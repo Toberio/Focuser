@@ -193,6 +193,44 @@ impl Database {
             .unwrap_or_else(|| default.to_string()))
     }
 
+    /// Remove a setting entirely, rather than leaving an empty-string value —
+    /// callers that check `get_setting(key).is_some()` (e.g. "is this locked")
+    /// need absence to actually mean absence.
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            rusqlite::params![key],
+        )
+        .map_err(|e| FocuserError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Whether any settings-table key starts with `prefix`.
+    ///
+    /// Used to ask "is anything locked" without a dedicated lock table —
+    /// wholesale operations like resetting or deleting all settings must
+    /// check this, or clearing the whole table would silently take the lock
+    /// with it.
+    pub fn any_setting_starts_with(&self, prefix: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        let pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key LIKE ?1 ESCAPE '\\'",
+                rusqlite::params![pattern],
+                |row| row.get(0),
+            )
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        Ok(count > 0)
+    }
+
     // ─── Statistics ─────────────────────────────────────────
 
     pub fn record_blocked_attempt(&self, domain_or_app: &str) -> Result<()> {

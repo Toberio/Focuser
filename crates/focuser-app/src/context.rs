@@ -43,6 +43,18 @@ pub trait SystemSync: Send + Sync {
         Vec::new()
     }
 
+    /// Browsers that have reported in *and* granted the extension "Allow in
+    /// Incognito" — a subset of [`Self::connected_browsers`].
+    ///
+    /// A browser can be connected without being in this set: the extension
+    /// is installed and checking in, but a private window in that browser
+    /// has nothing blocking it, because Chrome hides incognito windows from
+    /// an extension that lacks the permission. That gap is what this exists
+    /// to surface.
+    fn safely_connected_browsers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether the OS hosts file can actually be written right now.
     ///
     /// Writing it needs administrator or root. When it fails there is no error
@@ -72,6 +84,10 @@ pub struct AppContext {
     /// "type this phrase" into "read this phrase back from a file", which
     /// defeats the point of a typing lock.
     unlock_phrases: Mutex<HashMap<EntityId, String>>,
+    /// Same idea, for settings locks — keyed by settings-table key
+    /// (`"autostart"`, `"block_unsupported_browsers"`, ...) rather than a
+    /// block list id. Kept separate so the two namespaces can never collide.
+    setting_unlock_phrases: Mutex<HashMap<String, String>>,
     system: Arc<dyn SystemSync>,
 }
 
@@ -83,6 +99,7 @@ impl AppContext {
             allowance_tracker: AllowanceTracker::new(),
             pomodoro_events: Mutex::new(Vec::new()),
             unlock_phrases: Mutex::new(HashMap::new()),
+            setting_unlock_phrases: Mutex::new(HashMap::new()),
             system,
         }
     }
@@ -119,6 +136,10 @@ impl AppContext {
 
     pub fn connected_browsers(&self) -> Vec<String> {
         self.system.connected_browsers()
+    }
+
+    pub fn safely_connected_browsers(&self) -> Vec<String> {
+        self.system.safely_connected_browsers()
     }
 
     /// Domains currently exempt from blocking because an allowance still has
@@ -169,6 +190,23 @@ impl AppContext {
             .lock()
             .ok()
             .and_then(|mut phrases| phrases.remove(&list_id));
+        expected.is_some_and(|expected| expected == typed)
+    }
+
+    /// Same as [`Self::set_unlock_phrase`], for a settings lock.
+    pub fn set_setting_unlock_phrase(&self, key: String, phrase: String) {
+        if let Ok(mut phrases) = self.setting_unlock_phrases.lock() {
+            phrases.insert(key, phrase);
+        }
+    }
+
+    /// Same as [`Self::take_and_check_unlock_phrase`], for a settings lock.
+    pub fn take_and_check_setting_unlock_phrase(&self, key: &str, typed: &str) -> bool {
+        let expected = self
+            .setting_unlock_phrases
+            .lock()
+            .ok()
+            .and_then(|mut phrases| phrases.remove(key));
         expected.is_some_and(|expected| expected == typed)
     }
 }

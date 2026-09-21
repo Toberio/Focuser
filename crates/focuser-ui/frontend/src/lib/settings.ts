@@ -13,6 +13,15 @@ export const SETTING_KEYS = {
   blockUnsupportedBrowsers: "block_unsupported_browsers",
   extensionGracePeriod: "extension_grace_period",
   language: "language",
+  /**
+   * Not a settings-table key — autostart is its own Tauri command, not
+   * `SetSetting` (see `lib/autostart.ts`). This is only the *name* its
+   * settings lock is filed under (`lock:autostart`), which
+   * `crates/focuser-ui/src/autostart.rs` checks directly. Kept here anyway
+   * so both lockable rows in `routes/settings.tsx` share one place for
+   * their key names.
+   */
+  autostart: "autostart",
 } as const;
 
 export const MAX_RETENTION_DAYS = 36_500;

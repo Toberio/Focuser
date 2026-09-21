@@ -404,6 +404,59 @@ export function useSetSetting() {
   });
 }
 
+// ─── Settings lock ──────────────────────────────────────────────────
+//
+// Same typing-lock mechanism as a block list's, but keyed by a settings-table
+// key instead of a list id. Lock *status* is not a separate command — the
+// lock itself lives at settings key `lock:<key>`, so `useSetting` already
+// answers "is this locked, and for how many characters" for free.
+
+export function useSettingLockStatus(key: string) {
+  const status = useSetting(`lock:${key}`);
+  const phraseLength = status.data ? Number(status.data) : null;
+  return {
+    locked: phraseLength !== null && Number.isFinite(phraseLength) && phraseLength > 0,
+    phraseLength,
+    isPending: status.isPending,
+  };
+}
+
+export function useEnableSettingLock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { key: string; phraseLength: number }) =>
+      run({
+        cmd: "enable_setting_lock",
+        args: { key: args.key, phrase_length: args.phraseLength },
+      }),
+    onSuccess: (_r, { key }) =>
+      qc.invalidateQueries({ queryKey: queryKeys.setting(`lock:${key}`) }),
+  });
+}
+
+export function useRequestSettingUnlockPhrase() {
+  return useMutation({
+    mutationFn: async (key: string) =>
+      expect(await run({ cmd: "request_setting_unlock_phrase", args: { key } }), "text").data,
+  });
+}
+
+export function useAttemptSettingUnlock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: { key: string; typed: string }) =>
+      expect(
+        await run({
+          cmd: "attempt_setting_unlock",
+          args: { key: args.key, typed: args.typed },
+        }),
+        "flag",
+      ).data,
+    onSuccess: (_matched, { key }) =>
+      qc.invalidateQueries({ queryKey: queryKeys.setting(`lock:${key}`) }),
+  });
+}
+
 export function useResetSettings() {
   const qc = useQueryClient();
   return useMutation({

@@ -12,6 +12,7 @@ pub mod schedule;
 pub mod session;
 pub mod types;
 pub mod uninstall;
+pub mod unlock_phrase;
 
 pub use error::{FocuserError, Result};
 pub use types::*;

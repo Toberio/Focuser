@@ -28,6 +28,19 @@ pub const INITIALISED: &str = "autostart_initialised";
 /// What the user last asked for. Absent until they touch the toggle.
 pub const ENABLED: &str = "autostart_enabled";
 
+/// The settings-lock key that gates this toggle. Independent of `ENABLED` —
+/// it is not the setting itself, just the name a typing lock is filed under.
+/// Follows the same `lock:<key>` convention `focuser_app::execute` uses for
+/// settings locked through the generic command path; autostart is not one of
+/// those (it is a bespoke Tauri command, not `SetSetting`), so it has to be
+/// checked here instead.
+const LOCK_KEY: &str = "lock:autostart";
+
+/// Whether a settings lock currently holds this toggle.
+fn is_locked(db: &focuser_core::db::Database) -> bool {
+    db.get_setting(LOCK_KEY).ok().flatten().is_some()
+}
+
 /// How far [`imp::set_task`] got.
 ///
 /// Only Windows has a task to change, so everywhere else two of these are
@@ -64,6 +77,9 @@ pub fn set_autostart(
     enabled: bool,
 ) -> Result<(), String> {
     if let Ok(engine) = state.engine.lock() {
+        if is_locked(engine.db()) {
+            return Err("locked".into());
+        }
         engine
             .db()
             .set_setting(ENABLED, if enabled { "1" } else { "0" })
@@ -220,6 +236,18 @@ mod tests {
         db.set_setting(ENABLED, "0").unwrap();
 
         assert_eq!(shown(&db), Some(false));
+    }
+
+    #[test]
+    fn a_settings_lock_on_autostart_is_detected() {
+        let db = Database::open_in_memory().expect("in-memory db");
+        assert!(!is_locked(&db));
+
+        db.set_setting(LOCK_KEY, "24").unwrap();
+        assert!(is_locked(&db));
+
+        db.delete_setting(LOCK_KEY).unwrap();
+        assert!(!is_locked(&db));
     }
 
     #[test]

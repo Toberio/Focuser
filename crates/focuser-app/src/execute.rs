@@ -10,7 +10,6 @@ use focuser_common::types::{
     WebsiteRule,
 };
 use focuser_core::{BlockEngine, pomodoro};
-use rand::Rng;
 
 use crate::command::{
     AllowanceNotificationDto, AllowanceUsageEntry, AppIcon, BlockingHealth, BrowserStatus, Command,
@@ -341,9 +340,11 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             list_id,
             phrase_length,
         } => {
-            if !(MIN_PHRASE_LENGTH..=MAX_PHRASE_LENGTH).contains(&phrase_length) {
+            if !focuser_common::unlock_phrase::is_valid_length(phrase_length) {
                 return Err(CommandError::Validation(format!(
-                    "phrase length must be between {MIN_PHRASE_LENGTH} and {MAX_PHRASE_LENGTH} characters"
+                    "phrase length must be between {} and {} characters",
+                    focuser_common::unlock_phrase::MIN_PHRASE_LENGTH,
+                    focuser_common::unlock_phrase::MAX_PHRASE_LENGTH
                 )));
             }
 
@@ -388,7 +389,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 return Err(CommandError::Validation("list has no typing lock".into()));
             };
 
-            let phrase = generate_unlock_phrase(length);
+            let phrase = focuser_common::unlock_phrase::generate(length);
             ctx.set_unlock_phrase(list_id, phrase.clone());
             Ok(CommandResult::Text(phrase))
         }
@@ -426,13 +427,72 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                     "setting key must not be empty".into(),
                 ));
             }
+            if engine.db().get_setting(&setting_lock_key(&key))?.is_some() {
+                return Err(CommandError::Protected);
+            }
             engine.db().set_setting(&key, &value)?;
             Ok(CommandResult::Unit)
         }
 
         Command::ResetSettings => {
+            ensure_no_setting_locked(&engine)?;
             engine.db().clear_settings()?;
             Ok(CommandResult::Unit)
+        }
+
+        // ─── Settings lock ──────────────────────────────────────────
+        Command::EnableSettingLock { key, phrase_length } => {
+            if key.trim().is_empty() {
+                return Err(CommandError::Validation(
+                    "setting key must not be empty".into(),
+                ));
+            }
+            if !focuser_common::unlock_phrase::is_valid_length(phrase_length) {
+                return Err(CommandError::Validation(format!(
+                    "phrase length must be between {} and {} characters",
+                    focuser_common::unlock_phrase::MIN_PHRASE_LENGTH,
+                    focuser_common::unlock_phrase::MAX_PHRASE_LENGTH
+                )));
+            }
+
+            let lock_key = setting_lock_key(&key);
+            if engine.db().get_setting(&lock_key)?.is_some() {
+                // Re-arming would let a user swap in a shorter phrase mid-commitment.
+                return Err(CommandError::Protected);
+            }
+            engine
+                .db()
+                .set_setting(&lock_key, &phrase_length.to_string())?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::RequestSettingUnlockPhrase { key } => {
+            let lock_key = setting_lock_key(&key);
+            let Some(length) = engine
+                .db()
+                .get_setting(&lock_key)?
+                .and_then(|v| v.parse::<u32>().ok())
+            else {
+                return Err(CommandError::Validation("setting has no lock".into()));
+            };
+
+            let phrase = focuser_common::unlock_phrase::generate(length);
+            ctx.set_setting_unlock_phrase(key, phrase.clone());
+            Ok(CommandResult::Text(phrase))
+        }
+
+        Command::AttemptSettingUnlock { key, typed } => {
+            let lock_key = setting_lock_key(&key);
+            if engine.db().get_setting(&lock_key)?.is_none() {
+                return Err(CommandError::Validation("setting is not locked".into()));
+            }
+
+            if !ctx.take_and_check_setting_unlock_phrase(&key, &typed) {
+                return Ok(CommandResult::Flag(false));
+            }
+
+            engine.db().delete_setting(&lock_key)?;
+            Ok(CommandResult::Flag(true))
         }
 
         // ─── Enforcement ──────────────────────────────────────────
@@ -658,6 +718,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         Command::DeleteAllData => {
             ensure_nothing_protected(&engine)?;
+            ensure_no_setting_locked(&engine)?;
             engine.db().delete_all_data()?;
             engine.refresh()?;
             // Nothing is blocked any more, so clear the hosts file outright.
@@ -679,6 +740,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         Command::GetBrowserStatus => {
             let running = ctx.running_browsers();
             let connected = ctx.connected_browsers();
+            let safely_connected = ctx.safely_connected_browsers();
 
             let statuses = focuser_common::browser::KNOWN_BROWSERS
                 .iter()
@@ -687,6 +749,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                     BrowserStatus {
                         running: running.contains(&browser),
                         extension_connected: connected.contains(&browser),
+                        incognito_allowed: safely_connected.contains(&browser),
                         display_name: info.display_name.to_string(),
                         store_url: info.store_url().to_string(),
                         launch_name: info.launch_name().to_string(),
@@ -745,23 +808,24 @@ fn ensure_nothing_protected(engine: &BlockEngine) -> CommandOutcome<()> {
     Ok(())
 }
 
-/// Bounds on how long an unlock phrase may be. The floor keeps a "lock" from
-/// being trivially typed by accident; the ceiling keeps a typo in the field
-/// from asking someone to type tens of thousands of characters.
-const MIN_PHRASE_LENGTH: u32 = 10;
-const MAX_PHRASE_LENGTH: u32 = 5000;
+/// The settings-table key that holds a settings lock on `key`, if any. Its
+/// value is the locked phrase length; absence means unlocked. Shares the
+/// settings table rather than a dedicated one — this is exactly the kind of
+/// small, string-keyed state that table already exists for, and a dedicated
+/// table would need its own migration for no real benefit.
+fn setting_lock_key(key: &str) -> String {
+    format!("lock:{key}")
+}
 
-/// Characters an unlock phrase is drawn from: upper- and lower-case letters
-/// and digits. Wide enough that a phrase never looks accidentally patterned,
-/// plain enough to type without hunting for punctuation.
-const PHRASE_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-
-/// Generate a fresh random phrase of exactly `length` characters.
-fn generate_unlock_phrase(length: u32) -> String {
-    let mut rng = rand::thread_rng();
-    (0..length)
-        .map(|_| PHRASE_ALPHABET[rng.gen_range(0..PHRASE_ALPHABET.len())] as char)
-        .collect()
+/// Refuse a wholesale settings wipe while any setting is locked — otherwise
+/// resetting or deleting everything would take the lock with it, same as
+/// `ensure_nothing_protected` does for block lists.
+fn ensure_no_setting_locked(engine: &BlockEngine) -> CommandOutcome<()> {
+    if engine.db().any_setting_starts_with("lock:")? {
+        Err(CommandError::Protected)
+    } else {
+        Ok(())
+    }
 }
 
 /// Statistics retention setting key and bounds.
@@ -1413,6 +1477,109 @@ mod tests {
         assert!(
             matches!(stored, CommandResult::Setting(Some(v)) if v == "light"),
             "a stored value must win over the default"
+        );
+    }
+
+    fn setting_lock_phrase(ctx: &AppContext, key: &str) -> String {
+        let CommandResult::Text(phrase) =
+            execute(ctx, Command::RequestSettingUnlockPhrase { key: key.into() }).unwrap()
+        else {
+            panic!("expected the generated phrase back");
+        };
+        phrase
+    }
+
+    #[test]
+    fn a_locked_setting_cannot_be_changed_until_typed_back() {
+        let ctx = ctx();
+        execute(
+            &ctx,
+            Command::SetSetting {
+                key: "autostart".into(),
+                value: "1".into(),
+            },
+        )
+        .unwrap();
+
+        execute(
+            &ctx,
+            Command::EnableSettingLock {
+                key: "autostart".into(),
+                phrase_length: 24,
+            },
+        )
+        .unwrap();
+
+        // Locked: cannot be changed at all, correct value or not.
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::SetSetting {
+                    key: "autostart".into(),
+                    value: "0".into(),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+
+        // Cannot be re-armed either, same as a block list's typing lock.
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::EnableSettingLock {
+                    key: "autostart".into(),
+                    phrase_length: 24,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+
+        let phrase = setting_lock_phrase(&ctx, "autostart");
+        let unlocked = execute(
+            &ctx,
+            Command::AttemptSettingUnlock {
+                key: "autostart".into(),
+                typed: phrase,
+            },
+        )
+        .unwrap();
+        assert!(matches!(unlocked, CommandResult::Flag(true)));
+
+        // Unlocked: the setting can be changed again.
+        execute(
+            &ctx,
+            Command::SetSetting {
+                key: "autostart".into(),
+                value: "0".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resetting_or_deleting_everything_is_refused_while_a_setting_is_locked() {
+        let ctx = ctx();
+        execute(
+            &ctx,
+            Command::EnableSettingLock {
+                key: "autostart".into(),
+                phrase_length: 24,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            execute(&ctx, Command::ResetSettings).unwrap_err().code(),
+            "protected",
+            "reset must not be able to quietly drop the lock along with everything else"
+        );
+        assert_eq!(
+            execute(&ctx, Command::DeleteAllData).unwrap_err().code(),
+            "protected"
         );
     }
 

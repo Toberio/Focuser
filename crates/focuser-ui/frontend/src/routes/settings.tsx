@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { BrowserStatusList } from "@/components/browser-status";
 import { ConfigTransfer } from "@/components/config-transfer";
+import { useSettingLock } from "@/components/setting-lock";
 import { SettingRow, SettingsSection } from "@/components/setting-row";
 import { PageHeader } from "@/components/ui/card";
 import { ConfirmButton } from "@/components/ui/confirm-button";
@@ -33,6 +34,12 @@ export function Settings() {
   const enforceBrowsers = useBooleanSetting(SETTING_KEYS.blockUnsupportedBrowsers, true);
   const gracePeriod = useNumberSetting(SETTING_KEYS.extensionGracePeriod, 60);
   const language = useLanguage();
+
+  const autostartLock = useSettingLock(SETTING_KEYS.autostart, m.settings_autostart());
+  const enforceBrowsersLock = useSettingLock(
+    SETTING_KEYS.blockUnsupportedBrowsers,
+    m.settings_close_browsers(),
+  );
 
   const retention = useStatsRetention();
   const setRetention = useSetStatsRetention();
@@ -66,14 +73,24 @@ export function Settings() {
                 : m.settings_autostart_unsupported()
           }
           control={
-            <Switch
-              checked={autostart.value}
-              onCheckedChange={autostart.set}
-              disabled={!autostart.supported || autostart.isPending || autostart.isSaving}
-              aria-label={m.settings_autostart()}
-            />
+            <div className="flex items-center gap-1">
+              {autostartLock.badge}
+              <Switch
+                checked={autostart.value}
+                onCheckedChange={autostart.set}
+                disabled={
+                  !autostart.supported ||
+                  autostart.isPending ||
+                  autostart.isSaving ||
+                  autostartLock.locked
+                }
+                aria-label={m.settings_autostart()}
+              />
+              {autostart.supported && autostartLock.button}
+            </div>
           }
         />
+        {autostart.supported && autostartLock.panel}
       </SettingsSection>
 
       <SettingsSection
@@ -84,14 +101,23 @@ export function Settings() {
           label={m.settings_close_browsers()}
           description={m.settings_close_browsers_description()}
           control={
-            <Switch
-              checked={enforceBrowsers.value}
-              onCheckedChange={enforceBrowsers.set}
-              disabled={enforceBrowsers.isPending || enforceBrowsers.isSaving}
-              aria-label={m.settings_close_browsers()}
-            />
+            <div className="flex items-center gap-1">
+              {enforceBrowsersLock.badge}
+              <Switch
+                checked={enforceBrowsers.value}
+                onCheckedChange={enforceBrowsers.set}
+                disabled={
+                  enforceBrowsers.isPending ||
+                  enforceBrowsers.isSaving ||
+                  enforceBrowsersLock.locked
+                }
+                aria-label={m.settings_close_browsers()}
+              />
+              {enforceBrowsersLock.button}
+            </div>
           }
         />
+        {enforceBrowsersLock.panel}
         <SettingRow
           label={m.settings_grace_period()}
           htmlFor="grace-period"

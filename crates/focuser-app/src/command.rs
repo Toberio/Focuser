@@ -199,6 +199,26 @@ pub enum Command {
     /// Reset settings to defaults. Block lists and statistics are preserved.
     ResetSettings,
 
+    // ─── Settings lock ──────────────────────────────────────────────
+    /// Same typing-lock mechanism as [`Command::EnableTypingLock`], but for a
+    /// settings-table key instead of a block list — e.g. `"autostart"` or
+    /// `"block_unsupported_browsers"`. While locked, [`Command::SetSetting`]
+    /// refuses to change that key.
+    EnableSettingLock {
+        key: String,
+        phrase_length: u32,
+    },
+    /// Generate a fresh phrase the caller must type to unlock `key`.
+    RequestSettingUnlockPhrase {
+        key: String,
+    },
+    /// Attempt to unlock `key` by typing back the most recently requested
+    /// phrase. Returns whether it matched.
+    AttemptSettingUnlock {
+        key: String,
+        typed: String,
+    },
+
     // ─── Enforcement ──────────────────────────────────────────────
     /// Whether blocking is actually in force right now, and why not if it isn't.
     GetBlockingHealth,
@@ -428,6 +448,15 @@ pub struct BrowserStatus {
     pub display_name: String,
     pub running: bool,
     pub extension_connected: bool,
+    /// Whether the extension has been granted "Allow in Incognito". Only
+    /// meaningful when `extension_connected` is true — an extension that
+    /// has never checked in has not been granted anything either way, and
+    /// this is `false` for it too rather than a separate "unknown" state.
+    ///
+    /// `extension_connected && !incognito_allowed` is the real gap: the
+    /// extension is present and working, but a private window in this
+    /// browser has nothing blocking it.
+    pub incognito_allowed: bool,
     /// Where to install the extension for this browser.
     pub store_url: String,
     /// Short name for launching this browser at a URL.
