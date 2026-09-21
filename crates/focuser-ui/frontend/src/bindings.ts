@@ -282,7 +282,38 @@ export type Command =
 	prevent_uninstall: boolean,
 	prevent_service_stop: boolean,
 	prevent_modification: boolean,
-} } | { cmd: "get_protection_status" } | { cmd: "get_setting"; args: {
+} } | { cmd: "get_protection_status" } | 
+/**
+ *  Lock a block list so it cannot be disabled, deleted, or edited until a
+ *  freshly generated random phrase of `phrase_length` characters is typed
+ *  back exactly. Unlike [`Command::EnableProtection`], there is no timer —
+ *  typing it correctly is the only way out.
+ */
+{ cmd: "enable_typing_lock"; args: {
+	list_id: string,
+	phrase_length: number,
+} } | 
+/**  Every list currently held by a typing lock. */
+{ cmd: "get_typing_lock_status" } | 
+/**
+ *  Generate a fresh phrase the caller must type to unlock `list_id`.
+ * 
+ *  Returned once and held only in memory — requesting again discards the
+ *  previous phrase, so there is no way to "check the answer" after the
+ *  fact other than typing it back.
+ */
+{ cmd: "request_unlock_phrase"; args: {
+	list_id: string,
+} } | 
+/**
+ *  Attempt to unlock a list by typing back the most recently requested
+ *  phrase. Returns whether it matched. A wrong guess still consumes the
+ *  phrase — call `RequestUnlockPhrase` again for another try.
+ */
+{ cmd: "attempt_unlock"; args: {
+	list_id: string,
+	typed: string,
+} } | { cmd: "get_setting"; args: {
 	key: string,
 	default: string | null,
 } } | { cmd: "set_setting"; args: {
@@ -392,7 +423,7 @@ export type CommandResult =
 /**  Succeeded, nothing to return. */
 { kind: "unit" } | { kind: "block_list"; data: BlockList } | { kind: "block_lists"; data: BlockList[] } | { kind: "website_rule"; data: WebsiteRule } | { kind: "app_rule"; data: AppRule } | { kind: "exception"; data: ExceptionRule } | 
 /**  A number of affected items — e.g. rules imported or cleared. */
-{ kind: "count"; data: number } | { kind: "stats"; data: UsageStat[] } | { kind: "blocked_events"; data: BlockedEvent[] } | { kind: "protection_status"; data: ProtectionInfo[] } | { kind: "blocking_health"; data: BlockingHealth } | 
+{ kind: "count"; data: number } | { kind: "stats"; data: UsageStat[] } | { kind: "blocked_events"; data: BlockedEvent[] } | { kind: "protection_status"; data: ProtectionInfo[] } | { kind: "typing_lock_status"; data: TypingLockInfo[] } | { kind: "blocking_health"; data: BlockingHealth } | 
 /**  A setting value; `None` when unset and no default was supplied. */
 { kind: "setting"; data: string | null } | 
 /**  A yes/no outcome — e.g. "was a session actually paused". */
@@ -557,6 +588,13 @@ export type TimeSlot = {
 	day: string,
 	start: string,
 	end: string,
+};
+
+/**  A block list currently held by a typing lock. */
+export type TypingLockInfo = {
+	block_list_id: string,
+	block_list_name: string,
+	phrase_length: number,
 };
 
 export type UsageStat = {

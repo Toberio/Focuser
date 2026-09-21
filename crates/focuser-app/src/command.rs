@@ -160,6 +160,33 @@ pub enum Command {
     },
     GetProtectionStatus,
 
+    // ─── Typing lock ──────────────────────────────────────────────
+    /// Lock a block list so it cannot be disabled, deleted, or edited until a
+    /// freshly generated random phrase of `phrase_length` characters is typed
+    /// back exactly. Unlike [`Command::EnableProtection`], there is no timer —
+    /// typing it correctly is the only way out.
+    EnableTypingLock {
+        list_id: EntityId,
+        phrase_length: u32,
+    },
+    /// Every list currently held by a typing lock.
+    GetTypingLockStatus,
+    /// Generate a fresh phrase the caller must type to unlock `list_id`.
+    ///
+    /// Returned once and held only in memory — requesting again discards the
+    /// previous phrase, so there is no way to "check the answer" after the
+    /// fact other than typing it back.
+    RequestUnlockPhrase {
+        list_id: EntityId,
+    },
+    /// Attempt to unlock a list by typing back the most recently requested
+    /// phrase. Returns whether it matched. A wrong guess still consumes the
+    /// phrase — call `RequestUnlockPhrase` again for another try.
+    AttemptUnlock {
+        list_id: EntityId,
+        typed: String,
+    },
+
     // ─── Settings ─────────────────────────────────────────────────
     GetSetting {
         key: String,
@@ -344,6 +371,14 @@ pub struct ProtectionInfo {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A block list currently held by a typing lock.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct TypingLockInfo {
+    pub block_list_id: EntityId,
+    pub block_list_name: String,
+    pub phrase_length: u32,
+}
+
 /// The result of a successful [`Command`].
 ///
 /// Deliberately typed — the old command layer returned `serde_json::Value` from
@@ -364,6 +399,7 @@ pub enum CommandResult {
     Stats(Vec<UsageStat>),
     BlockedEvents(Vec<BlockedEvent>),
     ProtectionStatus(Vec<ProtectionInfo>),
+    TypingLockStatus(Vec<TypingLockInfo>),
     BlockingHealth(BlockingHealth),
     /// A setting value; `None` when unset and no default was supplied.
     Setting(Option<String>),

@@ -83,6 +83,20 @@ pub fn print_human(result: &CommandResult) {
             }
         }
 
+        CommandResult::TypingLockStatus(infos) if infos.is_empty() => {
+            println!("No typing locks active.");
+        }
+        CommandResult::TypingLockStatus(infos) => {
+            for i in infos {
+                println!(
+                    "{}  {:<24} {} chars to unlock",
+                    i.block_list_id,
+                    truncate(&i.block_list_name, 24),
+                    i.phrase_length,
+                );
+            }
+        }
+
         CommandResult::PomodoroStatus(None) => println!("No session running."),
         CommandResult::PomodoroStatus(Some(status)) => {
             println!(

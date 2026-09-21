@@ -223,6 +223,13 @@ impl BlockEngine {
             .is_some_and(|l| l.is_modification_protected())
     }
 
+    pub fn is_block_list_locked(&self, id: EntityId) -> bool {
+        self.cached_lists
+            .iter()
+            .find(|l| l.id == id)
+            .is_some_and(|l| l.is_locked())
+    }
+
     pub fn active_protection_info(&self) -> Vec<ProtectionInfo> {
         self.cached_lists
             .iter()

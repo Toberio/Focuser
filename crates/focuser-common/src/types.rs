@@ -83,6 +83,14 @@ impl BlockList {
             .is_some_and(|p| p.is_active() && p.prevent_modification)
     }
 
+    /// Whether this list is held by a typing lock — armed until a freshly
+    /// generated random phrase is typed back exactly, with no timer to wait
+    /// out. Separate from [`Self::is_modification_protected`], which is
+    /// specifically about a [`Protection`] window.
+    pub fn is_locked(&self) -> bool {
+        matches!(self.lock, Some(Lock::RandomText { .. }))
+    }
+
     pub fn has_uninstall_protection(&self) -> bool {
         self.enabled
             && self

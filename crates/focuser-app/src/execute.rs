@@ -6,14 +6,15 @@
 use focuser_common::allowance::Allowance;
 use focuser_common::host::canonical_host;
 use focuser_common::types::{
-    AppRule, BlockList, EntityId, ExceptionRule, Protection, Schedule, WebsiteMatchType,
+    AppRule, BlockList, EntityId, ExceptionRule, Lock, Protection, Schedule, WebsiteMatchType,
     WebsiteRule,
 };
 use focuser_core::{BlockEngine, pomodoro};
+use rand::Rng;
 
 use crate::command::{
     AllowanceNotificationDto, AllowanceUsageEntry, AppIcon, BlockingHealth, BrowserStatus, Command,
-    CommandResult, PomodoroEventDto, PomodoroHistoryEntry, ProtectionInfo,
+    CommandResult, PomodoroEventDto, PomodoroHistoryEntry, ProtectionInfo, TypingLockInfo,
 };
 use crate::context::{AppContext, PomodoroEvent};
 use crate::error::{CommandError, CommandOutcome};
@@ -290,7 +291,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             }
 
             let mut list = engine.db().get_block_list(list_id)?;
-            if list.is_modification_protected() {
+            if list.is_modification_protected() || list.is_locked() {
                 // Re-arming would let a user extend or shorten a commitment they
                 // already made, which defeats the point of protection.
                 return Err(CommandError::Protected);
@@ -333,6 +334,81 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 })
                 .collect();
             Ok(CommandResult::ProtectionStatus(infos))
+        }
+
+        // ─── Typing lock ────────────────────────────────────────────
+        Command::EnableTypingLock {
+            list_id,
+            phrase_length,
+        } => {
+            if !(MIN_PHRASE_LENGTH..=MAX_PHRASE_LENGTH).contains(&phrase_length) {
+                return Err(CommandError::Validation(format!(
+                    "phrase length must be between {MIN_PHRASE_LENGTH} and {MAX_PHRASE_LENGTH} characters"
+                )));
+            }
+
+            let mut list = engine.db().get_block_list(list_id)?;
+            if list.is_modification_protected() || list.is_locked() {
+                // Re-arming would let a user swap in a shorter phrase mid-commitment.
+                return Err(CommandError::Protected);
+            }
+
+            list.lock = Some(Lock::RandomText {
+                length: phrase_length,
+            });
+            // Locking a disabled list would lock nothing.
+            list.enabled = true;
+            list.updated_at = chrono::Utc::now();
+
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            ctx.sync_hosts(&engine);
+            Ok(CommandResult::Unit)
+        }
+
+        Command::GetTypingLockStatus => {
+            let infos = engine
+                .block_lists()
+                .iter()
+                .filter_map(|l| match &l.lock {
+                    Some(Lock::RandomText { length }) => Some(TypingLockInfo {
+                        block_list_id: l.id,
+                        block_list_name: l.name.clone(),
+                        phrase_length: *length,
+                    }),
+                    _ => None,
+                })
+                .collect();
+            Ok(CommandResult::TypingLockStatus(infos))
+        }
+
+        Command::RequestUnlockPhrase { list_id } => {
+            let list = engine.db().get_block_list(list_id)?;
+            let Some(Lock::RandomText { length }) = list.lock else {
+                return Err(CommandError::Validation("list has no typing lock".into()));
+            };
+
+            let phrase = generate_unlock_phrase(length);
+            ctx.set_unlock_phrase(list_id, phrase.clone());
+            Ok(CommandResult::Text(phrase))
+        }
+
+        Command::AttemptUnlock { list_id, typed } => {
+            let mut list = engine.db().get_block_list(list_id)?;
+            if !list.is_locked() {
+                return Err(CommandError::Validation("list is not locked".into()));
+            }
+
+            if !ctx.take_and_check_unlock_phrase(list_id, &typed) {
+                return Ok(CommandResult::Flag(false));
+            }
+
+            list.lock = None;
+            list.updated_at = chrono::Utc::now();
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            ctx.sync_hosts(&engine);
+            Ok(CommandResult::Flag(true))
         }
 
         // ─── Settings ─────────────────────────────────────────────
@@ -662,11 +738,30 @@ struct ConfigDocument {
 /// commitment could be escaped by importing over it or wiping everything.
 fn ensure_nothing_protected(engine: &BlockEngine) -> CommandOutcome<()> {
     for list in engine.block_lists() {
-        if engine.is_block_list_protected(list.id) {
+        if engine.is_block_list_protected(list.id) || engine.is_block_list_locked(list.id) {
             return Err(CommandError::Protected);
         }
     }
     Ok(())
+}
+
+/// Bounds on how long an unlock phrase may be. The floor keeps a "lock" from
+/// being trivially typed by accident; the ceiling keeps a typo in the field
+/// from asking someone to type tens of thousands of characters.
+const MIN_PHRASE_LENGTH: u32 = 10;
+const MAX_PHRASE_LENGTH: u32 = 5000;
+
+/// Characters an unlock phrase is drawn from: upper- and lower-case letters
+/// and digits. Wide enough that a phrase never looks accidentally patterned,
+/// plain enough to type without hunting for punctuation.
+const PHRASE_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/// Generate a fresh random phrase of exactly `length` characters.
+fn generate_unlock_phrase(length: u32) -> String {
+    let mut rng = rand::thread_rng();
+    (0..length)
+        .map(|_| PHRASE_ALPHABET[rng.gen_range(0..PHRASE_ALPHABET.len())] as char)
+        .collect()
 }
 
 /// Statistics retention setting key and bounds.
@@ -740,7 +835,7 @@ fn clear_across_lists(
     let mut cleared = 0u32;
 
     for mut list in engine.db().list_block_lists()? {
-        if list.is_modification_protected() {
+        if list.is_modification_protected() || list.is_locked() {
             continue;
         }
         let n = clear(&mut list);
@@ -790,14 +885,15 @@ fn normalize(match_type: &mut WebsiteMatchType) {
     }
 }
 
-/// Reject mutations to a block list whose protection window is still open.
+/// Reject mutations to a block list whose protection window is still open,
+/// or that is held by a typing lock.
 ///
 /// Centralised here on purpose. This check was previously duplicated inline in
 /// four `service.rs` arms plus a separate `check_protected` in `commands.rs`,
 /// and the CLI's `list disable` path skipped it entirely — so a protected list
 /// could be disabled from the command line.
 fn ensure_unprotected(engine: &BlockEngine, id: EntityId) -> CommandOutcome<()> {
-    if engine.is_block_list_protected(id) {
+    if engine.is_block_list_protected(id) || engine.is_block_list_locked(id) {
         Err(CommandError::Protected)
     } else {
         Ok(())
@@ -1405,6 +1501,158 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].block_list_id, list.id);
         assert!(infos[0].remaining_seconds > 0);
+    }
+
+    fn typing_lock(
+        ctx: &AppContext,
+        id: EntityId,
+        phrase_length: u32,
+    ) -> CommandOutcome<CommandResult> {
+        execute(
+            ctx,
+            Command::EnableTypingLock {
+                list_id: id,
+                phrase_length,
+            },
+        )
+    }
+
+    fn requested_phrase(ctx: &AppContext, id: EntityId) -> String {
+        let CommandResult::Text(phrase) =
+            execute(ctx, Command::RequestUnlockPhrase { list_id: id }).unwrap()
+        else {
+            panic!("expected the generated phrase back");
+        };
+        phrase
+    }
+
+    #[test]
+    fn typing_lock_blocks_modification_and_disabling_but_not_enabling() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        typing_lock(&ctx, list.id, 32).unwrap();
+
+        let err = execute(
+            &ctx,
+            Command::ToggleBlockList {
+                id: list.id,
+                enabled: false,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "protected");
+
+        assert_eq!(
+            execute(&ctx, Command::DeleteBlockList { id: list.id })
+                .unwrap_err()
+                .code(),
+            "protected"
+        );
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::AddWebsiteRule {
+                    list_id: list.id,
+                    rule: WebsiteMatchType::Domain("x.com".into()),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+
+        // Re-enabling is harmless and must stay allowed.
+        execute(
+            &ctx,
+            Command::ToggleBlockList {
+                id: list.id,
+                enabled: true,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn typing_lock_cannot_be_re_armed_while_active() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        typing_lock(&ctx, list.id, 32).unwrap();
+
+        assert_eq!(
+            typing_lock(&ctx, list.id, 32).unwrap_err().code(),
+            "protected"
+        );
+    }
+
+    #[test]
+    fn typing_lock_rejects_out_of_range_phrase_lengths() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+
+        for bad in [0, 5, 5001, 50_000] {
+            assert_eq!(
+                typing_lock(&ctx, list.id, bad).unwrap_err().code(),
+                "validation",
+                "{bad} characters should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_lock_generates_a_phrase_of_the_configured_length() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        typing_lock(&ctx, list.id, 200).unwrap();
+
+        let phrase = requested_phrase(&ctx, list.id);
+        assert_eq!(phrase.chars().count(), 200);
+        assert!(phrase.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn typing_lock_unlocks_only_on_an_exact_match_of_the_latest_phrase() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        typing_lock(&ctx, list.id, 24).unwrap();
+
+        let _first_phrase = requested_phrase(&ctx, list.id);
+
+        // A wrong guess leaves it locked and consumes the phrase — the same
+        // guess must not work twice.
+        let wrong = execute(
+            &ctx,
+            Command::AttemptUnlock {
+                list_id: list.id,
+                typed: "not the phrase".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(wrong, CommandResult::Flag(false)));
+
+        let status = execute(&ctx, Command::GetTypingLockStatus).unwrap();
+        assert!(
+            matches!(status, CommandResult::TypingLockStatus(v) if v.len() == 1),
+            "list must still be locked after a wrong guess"
+        );
+
+        // Requesting again gets a fresh phrase; typing that one back exactly
+        // unlocks it.
+        let second_phrase = requested_phrase(&ctx, list.id);
+        let right = execute(
+            &ctx,
+            Command::AttemptUnlock {
+                list_id: list.id,
+                typed: second_phrase,
+            },
+        )
+        .unwrap();
+        assert!(matches!(right, CommandResult::Flag(true)));
+
+        let status = execute(&ctx, Command::GetTypingLockStatus).unwrap();
+        assert!(matches!(status, CommandResult::TypingLockStatus(v) if v.is_empty()));
+
+        // And the list is editable again.
+        execute(&ctx, Command::DeleteBlockList { id: list.id }).unwrap();
     }
 
     #[test]

@@ -23,6 +23,7 @@ import type {
   PomodoroStatus,
   ProtectionInfo,
   TimeSlot,
+  TypingLockInfo,
   UsageStat,
   WebsiteMatchType,
   WebsiteRuleKind,
@@ -44,6 +45,7 @@ export type {
   PomodoroStatus,
   ProtectionInfo,
   TimeSlot,
+  TypingLockInfo,
   UsageStat,
   WebsiteMatchType,
   WebsiteRuleKind,
@@ -67,6 +69,7 @@ const run = (command: Command) => send<CommandResult>(command);
 export const queryKeys = {
   blockLists: ["block-lists"] as const,
   protection: ["protection"] as const,
+  typingLock: ["typing-lock"] as const,
   allowances: ["allowances"] as const,
   pomodoro: ["pomodoro"] as const,
   stats: (from: string, to: string) => ["stats", from, to] as const,
@@ -327,6 +330,60 @@ export const useEnableProtection = () =>
       prevent_modification: a.preventModification,
     },
   }));
+
+// ─── Typing lock ────────────────────────────────────────────────────
+
+function useTypingLockMutation<TArgs>(build: (args: TArgs) => Command) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: TArgs) => run(build(args)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.blockLists });
+      qc.invalidateQueries({ queryKey: queryKeys.typingLock });
+    },
+  });
+}
+
+export function useTypingLockStatus() {
+  return useQuery({
+    queryKey: queryKeys.typingLock,
+    queryFn: async () =>
+      expect(await run({ cmd: "get_typing_lock_status" }), "typing_lock_status").data,
+  });
+}
+
+export const useEnableTypingLock = () =>
+  useTypingLockMutation<{ listId: string; phraseLength: number }>((a) => ({
+    cmd: "enable_typing_lock",
+    args: { list_id: a.listId, phrase_length: a.phraseLength },
+  }));
+
+/** Fetches a fresh phrase to type back. Each call discards the previous one. */
+export function useRequestUnlockPhrase() {
+  return useMutation({
+    mutationFn: async (listId: string) =>
+      expect(await run({ cmd: "request_unlock_phrase", args: { list_id: listId } }), "text").data,
+  });
+}
+
+/** Resolves to whether the typed text matched — the list stays locked on `false`. */
+export function useAttemptUnlock() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: { listId: string; typed: string }) =>
+      expect(
+        await run({
+          cmd: "attempt_unlock",
+          args: { list_id: args.listId, typed: args.typed },
+        }),
+        "flag",
+      ).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.blockLists });
+      qc.invalidateQueries({ queryKey: queryKeys.typingLock });
+    },
+  });
+}
 
 // ─── Settings ───────────────────────────────────────────────────────
 
