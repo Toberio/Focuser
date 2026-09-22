@@ -1359,6 +1359,7 @@ dependencies = [
  "objc2-core-graphics",
  "serde",
  "serde_json",
+ "signal-hook",
  "specta",
  "specta-typescript",
  "tauri",

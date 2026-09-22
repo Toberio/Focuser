@@ -87,24 +87,32 @@ impl BlockList {
     /// generated random phrase is typed back exactly, with no timer to wait
     /// out. Separate from [`Self::is_modification_protected`], which is
     /// specifically about a [`Protection`] window.
+    ///
+    /// A typing lock has no granular checkboxes the way [`Protection`] does
+    /// (prevent uninstall / service stop / modification, chosen separately):
+    /// it implies all three at once, same as the original Focus Lock design
+    /// ("you can't disable it, delete it, or edit it") — see
+    /// [`Self::has_uninstall_protection`] and [`Self::has_service_protection`].
     pub fn is_locked(&self) -> bool {
         matches!(self.lock, Some(Lock::RandomText { .. }))
     }
 
     pub fn has_uninstall_protection(&self) -> bool {
         self.enabled
-            && self
-                .protection
-                .as_ref()
-                .is_some_and(|p| p.is_active() && p.prevent_uninstall)
+            && (self.is_locked()
+                || self
+                    .protection
+                    .as_ref()
+                    .is_some_and(|p| p.is_active() && p.prevent_uninstall))
     }
 
     pub fn has_service_protection(&self) -> bool {
         self.enabled
-            && self
-                .protection
-                .as_ref()
-                .is_some_and(|p| p.is_active() && p.prevent_service_stop)
+            && (self.is_locked()
+                || self
+                    .protection
+                    .as_ref()
+                    .is_some_and(|p| p.is_active() && p.prevent_service_stop))
     }
 }
 

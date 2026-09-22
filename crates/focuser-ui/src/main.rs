@@ -179,6 +179,18 @@ fn main() {
             let icon_state = Arc::clone(&state_for_blocker);
             std::thread::spawn(move || warm_app_icons(&icon_state));
 
+            // `kill` / `pkill` send SIGTERM by default, which the OS would
+            // otherwise end the process on unconditionally — the tray's Quit
+            // item checks for an active lock, but a raw signal bypassed that
+            // check entirely. This routes SIGTERM/SIGINT through the same
+            // check. SIGKILL cannot be caught by any process; nothing here
+            // (or anywhere) changes that.
+            #[cfg(unix)]
+            {
+                let signal_state = Arc::clone(&state_for_blocker);
+                std::thread::spawn(move || run_signal_guard(signal_state));
+            }
+
             // System tray icon. Built in the saved language; the tray exists
             // before any window does, so it cannot ask the frontend.
             let tray_locale = state_for_blocker
@@ -430,10 +442,19 @@ fn warm_app_icons(state: &Arc<AppState>) {
 
 /// Why quitting is refused right now, or `None` if it is allowed.
 ///
-/// Only locks that asked to prevent it count. A lock set without that box
-/// ticked is a commitment about the block list, not about the app staying up.
+/// A timer lock only counts if its "block stopping the service" box was
+/// ticked — a lock set without that is a commitment about the block list,
+/// not about the app staying up. A typing lock has no such box; it always
+/// counts, same as it always blocks uninstalling too.
 fn quit_blocked_by(state: &Arc<AppState>) -> Option<String> {
     let engine = state.engine.lock().ok()?;
+
+    // A typing lock has no countdown to rank against the timer locks below —
+    // it is either armed or not — so it is checked first and separately.
+    if let Some(list) = engine.block_lists().iter().find(|l| l.is_locked()) {
+        return Some(format!("{} — locked until the phrase is typed", list.name));
+    }
+
     let list = engine
         .block_lists()
         .iter()
@@ -446,6 +467,32 @@ fn quit_blocked_by(state: &Arc<AppState>) -> Option<String> {
         list.name,
         format_remaining(remaining)
     ))
+}
+
+/// SIGTERM/SIGINT ("kill", "pkill", Ctrl+C) receive the same lock check the
+/// tray's Quit item gets, instead of ending the process unconditionally the
+/// moment the signal arrives. SIGKILL cannot be intercepted by any process —
+/// this only ever narrows the gap, never closes it.
+#[cfg(unix)]
+fn run_signal_guard(state: Arc<AppState>) {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let Ok(mut signals) = Signals::new([SIGTERM, SIGINT]) else {
+        warn!(
+            "Could not install a SIGTERM/SIGINT handler — a lock cannot stop `kill` from working"
+        );
+        return;
+    };
+
+    for sig in signals.forever() {
+        if let Some(reason) = quit_blocked_by(&state) {
+            warn!(%reason, signal = sig, "Refused to exit on signal — a lock is active");
+            continue;
+        }
+        let _ = blocker::remove_hosts_blocks();
+        std::process::exit(0);
+    }
 }
 
 /// Coarse, human phrasing. The exact second does not matter to someone being
@@ -635,7 +682,7 @@ fn is_elevated() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use focuser_common::types::{BlockList, Protection};
+    use focuser_common::types::{BlockList, Lock, Protection};
     use focuser_core::Database;
 
     fn state_with(list: BlockList) -> Arc<AppState> {
@@ -690,6 +737,21 @@ mod tests {
         let mut list = locked(true, 45);
         list.enabled = false;
         assert!(quit_blocked_by(&state_with(list)).is_none());
+    }
+
+    #[test]
+    fn a_typing_lock_blocks_quitting_with_no_checkbox_needed() {
+        // Unlike a timer lock, a typing lock has no "block stopping the
+        // service" box to tick — it always holds the app open.
+        let mut list = BlockList::new("Deep Work");
+        list.enabled = true;
+        list.lock = Some(Lock::RandomText { length: 24 });
+
+        let reason = quit_blocked_by(&state_with(list));
+        assert!(
+            reason.is_some_and(|r| r.contains("Deep Work")),
+            "a typing lock should hold the app open"
+        );
     }
 
     #[test]
