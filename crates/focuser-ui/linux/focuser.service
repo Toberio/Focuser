@@ -1,0 +1,20 @@
+[Unit]
+Description=Focuser — website and application blocker
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/focuser-ui --autostart
+# on-failure, not always: a clean quit exits 0, which is not a failure and
+# must not be resurrected — only a crash or a kill (including SIGKILL,
+# which no process can catch) counts. A SIGTERM/SIGINT that the app itself
+# refuses because a lock is active never reaches exit at all, so this only
+# ever fires for the case nothing in-process can stop.
+Restart=on-failure
+RestartSec=2
+# Give up after 5 restarts within 60s rather than spinning forever on a
+# genuinely broken install (e.g. a corrupt database crashing on every launch).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=default.target
