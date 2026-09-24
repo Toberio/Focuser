@@ -325,8 +325,11 @@ fn enforce_browser_extension(
         // is no way to tell them apart by name. Killing them individually
         // bypasses the browser's own shutdown path entirely and reads as a
         // crash, not a close. Every subprocess carries `--type=...`; the
-        // top-level process never does.
-        let is_subprocess = process::cmdline(proc.pid).is_some_and(|cmd| cmd.contains("--type="));
+        // top-level process never does. Firefox's equivalent is
+        // `-contentproc`: its children usually rename themselves ("Web
+        // Content", "forkserver"), but not reliably before we look.
+        let is_subprocess = process::cmdline(proc.pid)
+            .is_some_and(|cmd| cmd.contains("--type=") || cmd.contains("-contentproc"));
         if is_subprocess {
             continue;
         }
