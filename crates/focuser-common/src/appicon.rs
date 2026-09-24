@@ -175,12 +175,16 @@ pub fn decode_png(bytes: &[u8]) -> Option<Icon> {
     let rgba = match info.color_type {
         png::ColorType::Rgba => buffer[..info.buffer_size()].to_vec(),
         png::ColorType::Rgb => buffer[..info.buffer_size()]
-            .chunks_exact(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [r, g, b, 255])
             .collect(),
         png::ColorType::GrayscaleAlpha => buffer[..info.buffer_size()]
-            .chunks_exact(2)
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|&[g, a]| [g, g, g, a])
             .collect(),
         png::ColorType::Grayscale => buffer[..info.buffer_size()]
             .iter()
