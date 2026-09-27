@@ -256,6 +256,7 @@
   "lists_unlocking": "正在解锁…",
   "allowances_title": "每日额度",
   "allowances_description": "用每日预算代替彻底拦截。额度用完后，该网站或应用当天剩余时间都会被拦截。",
+  "allowances_schedule_note": "设了时间段的拦截列表在这些时段内照样拦截，不管这里还剩多少。额度只管时段以外的时间。",
   "allowances_kind_website": "网站",
   "allowances_kind_application": "应用",
   "allowances_field_type": "类型",

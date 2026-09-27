@@ -259,6 +259,7 @@
   "lists_unlocking": "Wird entsperrt…",
   "allowances_title": "Tageskontingente",
   "allowances_description": "Ein Tagesbudget statt einer vollständigen Sperre. Ist es aufgebraucht, bleibt die Website oder App für den Rest des Tages blockiert.",
+  "allowances_schedule_note": "Eine Sperrliste mit festen Zeiten sperrt in diesen Zeiten trotzdem, egal wie viel hier übrig ist. Kontingente gelten für die Zeit außerhalb.",
   "allowances_kind_website": "Website",
   "allowances_kind_application": "Anwendung",
   "allowances_field_type": "Typ",

@@ -144,6 +144,7 @@ export function Allowances() {
             {create.isPending ? m.allowances_adding() : m.allowances_add()}
           </Button>
         </form>
+        <p className="mt-3 text-muted-foreground text-xs">{m.allowances_schedule_note()}</p>
         <InlineError error={create.error} />
       </Card>
 

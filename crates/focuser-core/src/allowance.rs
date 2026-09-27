@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use tracing::info;
 
 use crate::Database;
+use crate::engine::BlockEngine;
 
 /// Seconds added per tick. Must match the extension's reporting cadence.
 pub const TICK_INCREMENT_SECS: u32 = 5;
@@ -235,7 +236,9 @@ impl AllowanceTracker {
     /// Allowance exceptions are **suspended during a Pomodoro work phase**:
     /// the user explicitly committed to focus, so the back door is closed.
     /// During break phases, or with no Pomodoro running, exceptions apply.
-    pub fn active_allowance_domains(&self, db: &Database) -> Vec<String> {
+    /// They also stop at a scheduled list's hours, which are a hard block.
+    pub fn active_allowance_domains(&self, engine: &BlockEngine) -> Vec<String> {
+        let db = engine.db();
         if is_pomodoro_work_phase(db) {
             return Vec::new();
         }
@@ -255,7 +258,7 @@ impl AllowanceTracker {
             if let AllowanceMatch::Domain(d) = &a.target {
                 let host = canonical_host(d);
                 // Already exhausted → not an exception, it's blocked.
-                if blocked.contains(&host) {
+                if blocked.contains(&host) || engine.scheduled_block_on_domain(&host) {
                     continue;
                 }
                 let Ok(used) = db.get_allowance_used_today(a.id) else {
@@ -270,8 +273,9 @@ impl AllowanceTracker {
     }
 
     /// App executables with an active, non-exhausted allowance.
-    /// Also suspended during a Pomodoro work phase (see note above).
-    pub fn active_allowance_apps(&self, db: &Database) -> Vec<String> {
+    /// Suspended the same way as domains (see note above).
+    pub fn active_allowance_apps(&self, engine: &BlockEngine) -> Vec<String> {
+        let db = engine.db();
         if is_pomodoro_work_phase(db) {
             return Vec::new();
         }
@@ -290,7 +294,7 @@ impl AllowanceTracker {
             }
             if let AllowanceMatch::AppExecutable(e) = &a.target {
                 let lc = e.to_ascii_lowercase();
-                if blocked.contains(&lc) {
+                if blocked.contains(&lc) || engine.scheduled_block_on_app(&lc) {
                     continue;
                 }
                 let Ok(used) = db.get_allowance_used_today(a.id) else {
@@ -428,6 +432,64 @@ mod tests {
         }
         assert!(tracker.is_domain_blocked("reddit.com"));
         assert!(tracker.is_domain_blocked("old.reddit.com"));
+    }
+
+    /// A list blocking reddit and steam, with an allowance for each.
+    fn engine_with_hours(schedule: Option<focuser_common::types::Schedule>) -> BlockEngine {
+        use focuser_common::types::{AppRule, BlockList, WebsiteRule};
+
+        let db = mk_db();
+        for target in [
+            AllowanceMatch::Domain("reddit.com".into()),
+            AllowanceMatch::AppExecutable("steam.exe".into()),
+        ] {
+            db.create_allowance(&Allowance::new(target, 600, false))
+                .unwrap();
+        }
+        let mut list = BlockList::new("Work hours");
+        list.websites.push(WebsiteRule::domain("reddit.com"));
+        list.applications.push(AppRule::executable("steam.exe"));
+        list.schedule = schedule;
+        db.create_block_list(&list).unwrap();
+        BlockEngine::new(db).unwrap()
+    }
+
+    fn all_day(day: chrono::Weekday) -> focuser_common::types::Schedule {
+        focuser_common::types::Schedule {
+            id: uuid::Uuid::new_v4(),
+            name: "Work".into(),
+            time_slots: vec![focuser_common::types::TimeSlot::new(
+                day,
+                chrono::NaiveTime::MIN,
+                chrono::NaiveTime::from_hms_opt(23, 59, 59).unwrap(),
+            )],
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn a_scheduled_list_in_its_hours_beats_the_allowance() {
+        use chrono::Datelike;
+        // #17: set hours are a hard block, whatever budget is left.
+        let engine = engine_with_hours(Some(all_day(Local::now().weekday())));
+        let tracker = AllowanceTracker::new();
+
+        assert!(tracker.active_allowance_domains(&engine).is_empty());
+        assert!(tracker.active_allowance_apps(&engine).is_empty());
+    }
+
+    #[test]
+    fn outside_its_hours_or_with_no_hours_the_allowance_applies() {
+        use chrono::Datelike;
+        let tomorrow = all_day(Local::now().weekday().succ());
+
+        for schedule in [None, Some(tomorrow)] {
+            let engine = engine_with_hours(schedule);
+            let tracker = AllowanceTracker::new();
+
+            assert_eq!(tracker.active_allowance_domains(&engine), ["reddit.com"]);
+            assert_eq!(tracker.active_allowance_apps(&engine), ["steam.exe"]);
+        }
     }
 
     #[test]

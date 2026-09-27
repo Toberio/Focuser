@@ -125,7 +125,7 @@ impl AppContext {
         if self.connected_browsers().is_empty() {
             return Vec::new();
         }
-        self.allowance_tracker.active_allowance_domains(engine.db())
+        self.allowance_tracker.active_allowance_domains(engine)
     }
 
     pub fn push_pomodoro_event(&self, event: PomodoroEvent) {

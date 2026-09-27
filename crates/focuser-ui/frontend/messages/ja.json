@@ -256,6 +256,7 @@
   "lists_unlocking": "解除しています…",
   "allowances_title": "1日の上限",
   "allowances_description": "完全にブロックする代わりに1日の持ち時間を決めます。使い切ると、その日はそのサイトやアプリがブロックされます。",
+  "allowances_schedule_note": "時間帯を決めたブロックリストは、ここでの残り時間に関係なくその時間帯はブロックします。上限はそれ以外の時間に適用されます。",
   "allowances_kind_website": "ウェブサイト",
   "allowances_kind_application": "アプリケーション",
   "allowances_field_type": "種類",

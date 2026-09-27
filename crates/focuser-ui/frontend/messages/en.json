@@ -342,6 +342,7 @@
   "lists_unlocking": "Unlocking…",
   "allowances_title": "Allowances",
   "allowances_description": "A daily budget instead of an outright block. When it runs out, the site or app is blocked for the rest of the day.",
+  "allowances_schedule_note": "A block list with set hours still blocks during those hours, whatever is left here. Allowances cover the time outside them.",
   "allowances_kind_website": "Website",
   "allowances_kind_application": "Application",
   "allowances_field_type": "Type",

@@ -262,6 +262,7 @@
   "lists_unlocking": "Desbloqueando…",
   "allowances_title": "Cotas diárias",
   "allowances_description": "Um orçamento diário em vez de um bloqueio total. Quando acaba, o site ou aplicativo fica bloqueado pelo resto do dia.",
+  "allowances_schedule_note": "Uma lista de bloqueio com horário continua bloqueando nesse horário, não importa o que sobre aqui. As cotas valem para o tempo fora dele.",
   "allowances_kind_website": "Site",
   "allowances_kind_application": "Aplicativo",
   "allowances_field_type": "Tipo",

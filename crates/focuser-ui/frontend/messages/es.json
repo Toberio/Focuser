@@ -254,6 +254,7 @@
   "lists_unlocking": "Desbloqueando…",
   "allowances_title": "Cupos diarios",
   "allowances_description": "Un presupuesto diario en lugar de un bloqueo total. Cuando se agota, el sitio o la aplicación queda bloqueado el resto del día.",
+  "allowances_schedule_note": "Una lista de bloqueo con horario sigue bloqueando en esas horas, quede lo que quede aquí. Los cupos cubren el tiempo fuera de ellas.",
   "allowances_kind_website": "Sitio web",
   "allowances_kind_application": "Aplicación",
   "allowances_field_type": "Tipo",

@@ -275,7 +275,7 @@ fn kill_blocked_processes(
     // An app still inside its daily quota is exempt. Blocking it here would
     // defeat the allowance, which exists precisely to permit some use.
     let exempt: HashSet<String> = tracker
-        .active_allowance_apps(eng.db())
+        .active_allowance_apps(eng)
         .into_iter()
         .map(|s| s.to_ascii_lowercase())
         .collect();

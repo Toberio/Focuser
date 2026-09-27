@@ -57,6 +57,21 @@ impl BlockEngine {
         None
     }
 
+    /// Whether a list with set hours is blocking this domain right now. Those
+    /// hours are a hard block, so an allowance does not reach through them (#17).
+    pub fn scheduled_block_on_domain(&self, domain: &str) -> bool {
+        self.cached_lists
+            .iter()
+            .any(|l| has_hours(l) && l.should_block_domain(domain))
+    }
+
+    /// The app half of [`Self::scheduled_block_on_domain`].
+    pub fn scheduled_block_on_app(&self, exe: &str) -> bool {
+        self.cached_lists
+            .iter()
+            .any(|l| has_hours(l) && l.should_block_app(exe, None, None))
+    }
+
     /// Collect all domains that need to be blocked (for hosts file generation).
     pub fn collect_blocked_domains(&self) -> Vec<String> {
         let mut domains = Vec::new();
@@ -258,6 +273,13 @@ impl BlockEngine {
     pub fn block_lists(&self) -> &[BlockList] {
         &self.cached_lists
     }
+}
+
+/// A list with no time slots is always on, not scheduled.
+fn has_hours(list: &BlockList) -> bool {
+    list.schedule
+        .as_ref()
+        .is_some_and(|s| !s.time_slots.is_empty())
 }
 
 #[cfg(test)]
