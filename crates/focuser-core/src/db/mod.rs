@@ -154,25 +154,22 @@ impl Database {
 
     // ─── Unlock challenges ──────────────────────────────────
 
-    /// Record the random-text challenge just issued for a block list,
-    /// replacing any earlier one.
-    ///
-    /// Persisted rather than kept in process memory: the CLI opens the
-    /// database fresh for every invocation, so a challenge issued by one
-    /// `focuser protect challenge` call has to survive to be read back by a
-    /// later `focuser protect unlock` call in a different process.
-    pub fn set_unlock_challenge(&self, list_id: EntityId, challenge: &str) -> Result<()> {
+    /// The outstanding random-text challenge for a block list, stored as
+    /// `fresh` if there is none yet. Asking twice returns the same text, so a
+    /// second request cannot swap it out from under the one on screen.
+    pub fn issue_unlock_challenge(&self, list_id: EntityId, fresh: &str) -> Result<String> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| FocuserError::Database(e.to_string()))?;
-        conn.execute(
+        conn.query_row(
             "INSERT INTO unlock_challenges (block_list_id, challenge) VALUES (?1, ?2)
-             ON CONFLICT(block_list_id) DO UPDATE SET challenge = ?2",
-            rusqlite::params![list_id.to_string(), challenge],
+             ON CONFLICT(block_list_id) DO UPDATE SET challenge = challenge
+             RETURNING challenge",
+            rusqlite::params![list_id.to_string(), fresh],
+            |row| row.get(0),
         )
-        .map_err(|e| FocuserError::Database(e.to_string()))?;
-        Ok(())
+        .map_err(|e| FocuserError::Database(e.to_string()))
     }
 
     /// Remove and return the outstanding challenge for a block list, if any.
@@ -539,8 +536,8 @@ mod tests {
 
         assert_eq!(db.take_unlock_challenge(a).unwrap(), None);
 
-        db.set_unlock_challenge(a, "abc123").unwrap();
-        db.set_unlock_challenge(b, "xyz789").unwrap();
+        db.issue_unlock_challenge(a, "abc123").unwrap();
+        db.issue_unlock_challenge(b, "xyz789").unwrap();
 
         // Taking it once returns the value...
         assert_eq!(db.take_unlock_challenge(a).unwrap(), Some("abc123".into()));
@@ -553,29 +550,31 @@ mod tests {
     }
 
     #[test]
-    fn setting_a_new_challenge_replaces_the_old_one() {
+    fn asking_again_returns_the_challenge_already_out() {
+        // The screen asked twice (React runs effects twice in development)
+        // and showed the first answer while the second replaced it here.
         let db = Database::open_in_memory().unwrap();
         let id = focuser_common::types::new_id();
 
-        db.set_unlock_challenge(id, "first").unwrap();
-        db.set_unlock_challenge(id, "second").unwrap();
+        assert_eq!(db.issue_unlock_challenge(id, "first").unwrap(), "first");
+        assert_eq!(db.issue_unlock_challenge(id, "second").unwrap(), "first");
+        assert_eq!(db.take_unlock_challenge(id).unwrap(), Some("first".into()));
 
-        assert_eq!(db.take_unlock_challenge(id).unwrap(), Some("second".into()));
+        // Once answered, the next one is fresh.
+        assert_eq!(db.issue_unlock_challenge(id, "third").unwrap(), "third");
     }
 
     #[test]
     fn unlock_challenge_survives_a_fresh_connection_to_the_same_file() {
-        // This is the property the CLI depends on: `protect challenge` and
-        // `protect unlock` are separate process invocations that each open
-        // their own `Database`, so the challenge must live in the file, not
-        // in any in-process state.
+        // `protect unlock` runs in its own process, so the challenge the app
+        // issued must live in the file, not in any in-process state.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("focuser.db");
         let id = focuser_common::types::new_id();
 
         {
             let db = Database::open(&path).unwrap();
-            db.set_unlock_challenge(id, "persisted").unwrap();
+            db.issue_unlock_challenge(id, "persisted").unwrap();
         }
         {
             let db = Database::open(&path).unwrap();

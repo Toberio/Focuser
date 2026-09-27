@@ -387,7 +387,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                     "this block list has no active protection to unlock".into(),
                 ));
             }
-            let challenge = match &list.lock {
+            let fresh = match &list.lock {
                 Some(Lock::RandomText { length }) => Lock::random_text_of_length(*length),
                 Some(Lock::Password { .. }) => {
                     return Err(CommandError::Validation(
@@ -397,7 +397,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 None => return Err(CommandError::Protected),
             };
 
-            engine.db().set_unlock_challenge(list_id, &challenge)?;
+            let challenge = engine.db().issue_unlock_challenge(list_id, &fresh)?;
             Ok(CommandResult::Text(challenge))
         }
 
@@ -1688,6 +1688,29 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "wrong_unlock_response");
+    }
+
+    #[test]
+    fn asking_for_the_challenge_twice_shows_the_one_that_unlocks() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
+        let ask = || execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id });
+
+        let (Ok(CommandResult::Text(first)), Ok(CommandResult::Text(second))) = (ask(), ask())
+        else {
+            panic!("expected two challenge strings");
+        };
+        assert_eq!(first, second);
+
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: first,
+            },
+        )
+        .unwrap();
     }
 
     #[test]

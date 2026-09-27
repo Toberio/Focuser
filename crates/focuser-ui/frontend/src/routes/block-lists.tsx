@@ -370,8 +370,7 @@ function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => void }) {
   const isRandomText = list.lock !== null && "RandomText" in list.lock;
 
   // Random text needs a challenge to display before there is anything to
-  // type. `requestChallenge.mutate` is stable across re-renders, so this
-  // fires exactly once per mount rather than looping.
+  // type. Asking twice is harmless: the backend returns the one already out.
   useEffect(() => {
     if (isRandomText) {
       requestChallenge.mutate(list.id);
