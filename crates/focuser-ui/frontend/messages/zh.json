@@ -219,7 +219,6 @@
   "lists_toggle_locked": "锁定正在进行，无法关闭",
   "lists_toggle_hint": "开启或关闭该列表",
   "lists_enable": "启用 {name}",
-  "lists_protect_already": "已锁定",
   "lists_protect_hint": "将该列表锁定一段固定时间",
   "lists_protect": "保护 {name}",
   "lists_delete_locked": "已锁定的列表无法删除",

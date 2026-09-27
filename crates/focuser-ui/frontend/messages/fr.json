@@ -225,7 +225,6 @@
   "lists_toggle_locked": "Un verrou est en cours, cela ne peut pas être désactivé",
   "lists_toggle_hint": "Activer ou désactiver cette liste",
   "lists_enable": "Activer {name}",
-  "lists_protect_already": "Déjà verrouillée",
   "lists_protect_hint": "Verrouiller cette liste pour une durée déterminée",
   "lists_protect": "Protéger {name}",
   "lists_delete_locked": "Les listes verrouillées ne peuvent pas être supprimées",

@@ -219,7 +219,6 @@
   "lists_toggle_locked": "잠금이 실행 중이라 끌 수 없습니다",
   "lists_toggle_hint": "이 목록을 켜거나 끕니다",
   "lists_enable": "{name} 켜기",
-  "lists_protect_already": "이미 잠겨 있음",
   "lists_protect_hint": "이 목록을 정해진 시간 동안 잠급니다",
   "lists_protect": "{name} 보호하기",
   "lists_delete_locked": "잠긴 목록은 삭제할 수 없습니다",

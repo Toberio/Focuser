@@ -356,26 +356,13 @@ impl Lock {
             .is_ok()
     }
 
-    /// Generate a fresh challenge string for a random-text lock. `None` for
-    /// a password lock, which has nothing to generate.
-    pub fn generate_challenge(&self) -> Option<String> {
-        match self {
-            Self::RandomText { length } => Some(Self::random_text_of_length(*length)),
-            Self::Password { .. } => None,
-        }
-    }
-
-    /// Build a challenge string of exactly `length` characters.
-    ///
-    /// Split out from [`Self::generate_challenge`] so a caller that already
-    /// knows it is holding a `RandomText` lock (e.g. having just matched on
-    /// it) can get a `String` directly, with no `Option` to unwrap for a
-    /// case the match already ruled out.
+    /// A fresh challenge string. The length is clamped because an imported
+    /// file can carry any number here.
     pub fn random_text_of_length(length: u32) -> String {
         use argon2::password_hash::rand_core::{OsRng, RngCore};
 
         let mut rng = OsRng;
-        (0..length)
+        (0..length.clamp(Self::MIN_RANDOM_TEXT_LEN, Self::MAX_RANDOM_TEXT_LEN))
             .map(|_| {
                 let idx = (rng.next_u32() as usize) % Self::CHALLENGE_ALPHABET.len();
                 Self::CHALLENGE_ALPHABET[idx] as char
@@ -474,8 +461,7 @@ mod lock_tests {
 
     #[test]
     fn random_text_challenges_have_the_requested_length_and_alphabet() {
-        let lock = Lock::RandomText { length: 20 };
-        let challenge = lock.generate_challenge().unwrap();
+        let challenge = Lock::random_text_of_length(20);
         assert_eq!(challenge.chars().count(), 20);
         assert!(
             challenge
@@ -485,20 +471,29 @@ mod lock_tests {
     }
 
     #[test]
-    fn successive_challenges_are_not_the_same_string() {
-        let lock = Lock::RandomText { length: 24 };
-        let a = lock.generate_challenge().unwrap();
-        let b = lock.generate_challenge().unwrap();
-        // Astronomically unlikely to collide at this length; a collision here
-        // means the RNG is not actually being drawn from per call.
-        assert_ne!(a, b);
+    fn a_length_from_a_crafted_file_is_clamped() {
+        assert_eq!(
+            Lock::random_text_of_length(u32::MAX).len(),
+            Lock::MAX_RANDOM_TEXT_LEN as usize
+        );
+        assert_eq!(
+            Lock::random_text_of_length(0).len(),
+            Lock::MIN_RANDOM_TEXT_LEN as usize
+        );
     }
 
     #[test]
-    fn a_password_lock_has_no_challenge_and_a_random_text_lock_has_no_password() {
-        let password_lock = Lock::password("x").unwrap();
-        assert!(password_lock.generate_challenge().is_none());
+    fn successive_challenges_are_not_the_same_string() {
+        // Astronomically unlikely to collide at this length; a collision here
+        // means the RNG is not actually being drawn from per call.
+        assert_ne!(
+            Lock::random_text_of_length(24),
+            Lock::random_text_of_length(24)
+        );
+    }
 
+    #[test]
+    fn a_random_text_lock_has_no_password() {
         let text_lock = Lock::RandomText { length: 10 };
         assert!(!text_lock.verify_password("anything"));
     }

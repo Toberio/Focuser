@@ -228,7 +228,6 @@
   "lists_toggle_locked": "Идёт блокировка, это нельзя выключить",
   "lists_toggle_hint": "Включить или выключить этот список",
   "lists_enable": "Включить {name}",
-  "lists_protect_already": "Уже заблокирован",
   "lists_protect_hint": "Заблокировать этот список на заданное время",
   "lists_protect": "Защитить {name}",
   "lists_delete_locked": "Заблокированные списки удалить нельзя",

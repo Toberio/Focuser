@@ -225,7 +225,6 @@
   "lists_toggle_locked": "Há um bloqueio em andamento, isso não pode ser desativado",
   "lists_toggle_hint": "Ative ou desative esta lista",
   "lists_enable": "Ativar {name}",
-  "lists_protect_already": "Já está bloqueada",
   "lists_protect_hint": "Bloquear esta lista por um tempo determinado",
   "lists_protect": "Proteger {name}",
   "lists_delete_locked": "Listas bloqueadas não podem ser excluídas",

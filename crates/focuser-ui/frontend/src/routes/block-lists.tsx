@@ -271,6 +271,7 @@ function ProtectForm({ list, onDone }: { list: BlockList; onDone: () => void }) 
             value={lockKind}
             onValueChange={setLockKind}
             size="sm"
+            aria-label={m.lists_lock_kind_label()}
             options={[
               { value: "none", label: m.lists_lock_kind_none() },
               { value: "password", label: m.lists_lock_kind_password() },

@@ -307,7 +307,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             let lock = match lock {
                 None => None,
                 Some(LockSetup::Password { password }) => {
-                    if password.is_empty() {
+                    if password.trim().is_empty() {
                         return Err(CommandError::Validation(
                             "password must not be empty".into(),
                         ));
@@ -409,14 +409,14 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 ));
             }
 
-            let response = response.trim();
+            // A password is checked exactly as typed, the way it was hashed.
             let verified = match &list.lock {
-                Some(lock @ Lock::Password { .. }) => lock.verify_password(response),
+                Some(lock @ Lock::Password { .. }) => lock.verify_password(&response),
                 Some(Lock::RandomText { .. }) => {
                     // Consumed unconditionally: right or wrong, this challenge
                     // is spent, so a wrong guess cannot be retried against it
                     // and a right one cannot be replayed.
-                    engine.db().take_unlock_challenge(list_id)?.as_deref() == Some(response)
+                    engine.db().take_unlock_challenge(list_id)?.as_deref() == Some(response.trim())
                 }
                 // No lock means no early unlock — the only way out is to wait.
                 None => return Err(CommandError::Protected),
@@ -1598,6 +1598,34 @@ mod tests {
         )
         .unwrap();
         assert!(!lists(&ctx)[0].enabled);
+    }
+
+    #[test]
+    fn a_password_is_checked_exactly_as_it_was_set() {
+        let ctx = ctx();
+        let unlock = |list_id, response: &str| {
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id,
+                    response: response.into(),
+                },
+            )
+        };
+        let list = create(&ctx, "Committed");
+        let password = Some(LockSetup::Password {
+            password: " secret ".into(),
+        });
+        protect_with_lock(&ctx, list.id, password).unwrap();
+
+        // Trimming on one side only made this lock impossible to open.
+        assert!(unlock(list.id, "secret").is_err());
+        unlock(list.id, " secret ").unwrap();
+
+        let blank = Some(LockSetup::Password {
+            password: "   ".into(),
+        });
+        assert!(protect_with_lock(&ctx, list.id, blank).is_err());
     }
 
     #[test]

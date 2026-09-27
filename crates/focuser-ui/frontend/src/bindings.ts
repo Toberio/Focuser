@@ -290,8 +290,8 @@ export type Command =
 } } | { cmd: "get_protection_status" } | 
 /**
  *  Issue a fresh random-text challenge for a protected list. Only valid
- *  on a list whose lock is [`LockSetup::RandomText`]. Returns the
- *  string to display and retype.
+ *  on a list whose lock is [`focuser_common::types::Lock::RandomText`].
+ *  Returns the string to display and retype.
  */
 { cmd: "request_unlock_challenge"; args: {
 	list_id: string,
@@ -461,12 +461,12 @@ export type Lock =
 /**
  *  Must retype a freshly generated random string to unlock early.
  * 
- *  The string currently on offer is *not* stored here — it lives in
- *  `focuser_app::AppContext` for as long as it takes to answer it. That
- *  keeps it out of `ListBlockLists`/`ExportConfiguration`, means a
- *  restart invalidates any outstanding challenge, and lets a wrong
- *  answer simply require a fresh one rather than allow retries against
- *  the same string.
+ *  The string currently on offer is *not* stored here — it lives in the
+ *  database's `unlock_challenges` table (see `focuser_core::Database`)
+ *  keyed by block list, separate from this JSON blob. That keeps it out
+ *  of `ListBlockLists`/`ExportConfiguration`, and a wrong answer simply
+ *  requires a fresh one rather than allowing retries against the same
+ *  string.
  */
 ({ RandomText: {
 	length: number,

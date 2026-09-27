@@ -219,7 +219,6 @@
   "lists_toggle_locked": "ロックが実行中のため、オフにできません",
   "lists_toggle_hint": "このリストのオン・オフを切り替えます",
   "lists_enable": "{name} を有効にする",
-  "lists_protect_already": "すでにロック済み",
   "lists_protect_hint": "このリストを一定時間ロックします",
   "lists_protect": "{name} を保護する",
   "lists_delete_locked": "ロック中のリストは削除できません",

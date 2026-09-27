@@ -222,7 +222,6 @@
   "lists_toggle_locked": "Eine Sperre läuft, das lässt sich nicht ausschalten",
   "lists_toggle_hint": "Diese Liste ein- oder ausschalten",
   "lists_enable": "{name} aktivieren",
-  "lists_protect_already": "Bereits gesperrt",
   "lists_protect_hint": "Diese Liste für eine feste Zeit sperren",
   "lists_protect": "{name} schützen",
   "lists_delete_locked": "Gesperrte Listen lassen sich nicht löschen",

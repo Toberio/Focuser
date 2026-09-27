@@ -304,7 +304,6 @@
   "lists_toggle_locked": "A lock is running, so this cannot be turned off",
   "lists_toggle_hint": "Turn this list on or off",
   "lists_enable": "Enable {name}",
-  "lists_protect_already": "Already locked",
   "lists_protect_hint": "Lock this list on for a set time",
   "lists_protect": "Protect {name}",
   "lists_delete_locked": "Locked lists cannot be deleted",

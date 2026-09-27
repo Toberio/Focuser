@@ -295,20 +295,15 @@ pub enum ProtectCmd {
         /// early.
         #[arg(long, conflicts_with = "random_text_length")]
         password: Option<String>,
-        /// Require a freshly generated random string of this many
-        /// characters, retyped via `protect unlock`, to end the window
-        /// early. Get the current string with `protect challenge`.
+        /// Require retyping a random string of this many characters to end
+        /// the window early. The string is only shown in the app.
         #[arg(long, conflicts_with = "password")]
         random_text_length: Option<u32>,
     },
     /// Show active protection windows.
     Status,
-    /// Get a fresh random-text challenge to retype, for a list locked with
-    /// `--random-text-length`.
-    Challenge { id: EntityId },
-    /// Answer a protected list's lock — its password, or the string most
-    /// recently returned by `protect challenge` — to end its protection
-    /// window immediately.
+    /// End a protection window early with its password. Random-text locks
+    /// are unlocked in the app, where the text is shown.
     Unlock { id: EntityId, response: String },
 }
 
@@ -567,7 +562,6 @@ impl TopLevel {
                     },
                 },
                 ProtectCmd::Status => Command::GetProtectionStatus,
-                ProtectCmd::Challenge { id } => Command::RequestUnlockChallenge { list_id: id },
                 ProtectCmd::Unlock { id, response } => Command::UnlockProtection {
                     list_id: id,
                     response,
