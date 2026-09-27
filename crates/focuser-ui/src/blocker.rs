@@ -28,6 +28,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
     // Browser enforcement state
     let mut grace_periods: HashMap<BrowserType, Instant> = HashMap::new();
     let mut was_using_hosts = true;
+    let mut cleared_processes = HashSet::new();
 
     // Cleanup old events on startup (keep 30 days)
     if let Ok(eng) = state.engine.lock() {
@@ -123,7 +124,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
             // scanning command lines is expensive and this is the one case
             // that justifies it.
             if eng.has_uninstall_protection() {
-                block_uninstall_attempts();
+                block_uninstall_attempts(&mut cleared_processes);
             }
 
             // Browser extension enforcement. Settings are read on every heavy
@@ -236,12 +237,34 @@ fn sync_hosts_file(domains: &[String]) {
 /// Only reached while a lock has `prevent_uninstall` set. The detection is
 /// deliberately narrow — see [`focuser_common::uninstall`] — because the
 /// alternative is killing an uninstaller the user aimed at other software.
-fn block_uninstall_attempts() {
-    for pid in uninstall::detect(&process::list(), process::cmdline) {
+fn block_uninstall_attempts(cleared: &mut HashSet<(u32, String)>) {
+    for pid in uninstall_attempts(&process::list(), cleared, process::cmdline) {
         if process::terminate(pid) {
             warn!(pid, "Closed an uninstall attempt — a lock is active");
         }
     }
+}
+
+/// `cleared` remembers processes already read and found harmless: a command
+/// line never changes, and on Windows each read starts PowerShell (#12).
+fn uninstall_attempts(
+    procs: &[process::Process],
+    cleared: &mut HashSet<(u32, String)>,
+    mut read_cmdline: impl FnMut(u32) -> Option<String>,
+) -> Vec<u32> {
+    cleared.retain(|(pid, name)| procs.iter().any(|p| p.pid == *pid && p.name == *name));
+
+    uninstall::detect(procs, |pid| {
+        let key = (pid, procs.iter().find(|p| p.pid == pid)?.name.clone());
+        if cleared.contains(&key) {
+            return None;
+        }
+        let line = read_cmdline(pid);
+        if !line.as_deref().is_some_and(uninstall::targets_focuser) {
+            cleared.insert(key);
+        }
+        line
+    })
 }
 
 /// Kill processes matching an app rule on an active block list.
@@ -457,5 +480,35 @@ fn flush_dns() {
         let _ = std::process::Command::new("systemd-resolve")
             .args(["--flush-caches"])
             .output();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use focuser_common::process::Process;
+
+    #[test]
+    fn a_harmless_shell_is_read_once_and_an_uninstall_every_time() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "bash" };
+        let procs = [7, 9].map(|pid| Process {
+            pid,
+            name: shell.into(),
+        });
+        let mut cleared = HashSet::new();
+        let mut reads = Vec::new();
+        let mut read = |pid| {
+            reads.push(pid);
+            Some(if pid == 9 { "uninstall focuser" } else { "dir" }.to_string())
+        };
+
+        assert_eq!(uninstall_attempts(&procs, &mut cleared, &mut read), [9]);
+        assert_eq!(uninstall_attempts(&procs, &mut cleared, &mut read), [9]);
+
+        // Gone, so a new process reusing pid 7 gets read afresh.
+        uninstall_attempts(&procs[1..], &mut cleared, &mut read);
+        assert!(cleared.is_empty());
+
+        assert_eq!(reads, [7, 9, 9, 9], "the harmless shell was read again");
     }
 }
