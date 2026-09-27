@@ -236,8 +236,10 @@ fn resolve_browser_exe(browser: &str) -> String {
 
         if status.is_ok() && buf_len > 2 {
             let wide_buf: Vec<u16> = buf[..buf_len as usize]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&c| u16::from_le_bytes(c))
                 .collect();
             let len = wide_buf
                 .iter()

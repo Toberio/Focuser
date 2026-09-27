@@ -340,6 +340,6 @@ mod tests {
 
         assert!(icon.width >= 16 && icon.height >= 16);
         assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
-        assert!(icon.rgba.chunks_exact(4).any(|px| px[3] > 0));
+        assert!(icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
     }
 }
