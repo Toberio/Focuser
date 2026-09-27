@@ -109,8 +109,12 @@ fn main() {
     let state_for_blocker = Arc::clone(&state);
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Another instance tried to launch — bring existing window to front
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Another instance tried to launch — bring existing window to front.
+            // Not for the second of the two logon launches, though.
+            if launched_at_login(&args) {
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -276,6 +280,10 @@ fn main() {
             // Close to tray instead of quitting
             let app_handle = app.handle().clone();
             let window = app.get_webview_window("main").unwrap();
+            // Created hidden, so a login start stays in the tray (#9).
+            if !launched_at_login(&std::env::args().collect::<Vec<_>>()) {
+                let _ = window.show();
+            }
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -295,6 +303,11 @@ fn main() {
                 let _ = blocker::remove_hosts_blocks();
             }
         });
+}
+
+/// Both logon registrations (the Run entry and the installer's task) pass this.
+fn launched_at_login(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--autostart")
 }
 
 /// Get the extension store URL for a given browser.

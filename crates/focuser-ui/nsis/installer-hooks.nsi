@@ -7,8 +7,9 @@
 ${StrRep}
 
 !macro NSIS_HOOK_POSTINSTALL
-  ; Create a scheduled task that runs Focuser at logon with admin rights
-  nsExec::ExecToLog 'schtasks /create /tn "Focuser" /tr "\"$INSTDIR\Focuser.exe\"" /sc onlogon /rl highest /f'
+  ; Create a scheduled task that runs Focuser at logon with admin rights,
+  ; starting in the tray like the Run entry does
+  nsExec::ExecToLog 'schtasks /create /tn "Focuser" /tr "\"$INSTDIR\Focuser.exe\" --autostart" /sc onlogon /rl highest /f'
 
   ; ─── Register Native Messaging Host for browsers ──────────────────
 
