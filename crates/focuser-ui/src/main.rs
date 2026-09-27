@@ -6,6 +6,7 @@ mod blocker;
 mod foreground_watcher;
 mod i18n;
 mod native;
+mod sound;
 mod typed_commands;
 
 use directories::ProjectDirs;
@@ -141,6 +142,8 @@ fn main() {
             native::do_update,
             autostart::is_autostart_enabled,
             autostart::set_autostart,
+            sound::pick_sound_file,
+            sound::preview_sound,
         ])
         .setup(move |app| {
             // Once, on a fresh install. This used to re-enable autostart on

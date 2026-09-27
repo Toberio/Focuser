@@ -56,6 +56,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         if let Ok(mut eng) = state.engine.lock() {
             match focuser_core::pomodoro::tick(&mut eng, &mut pomodoro_runtime) {
                 Ok(focuser_core::pomodoro::TickOutcome::PhaseAdvanced { to, cycle, .. }) => {
+                    crate::sound::phase_changed(eng.db(), to);
                     state.push_pomodoro_event(crate::PomodoroEvent::PhaseAdvanced {
                         to: to.as_str().to_string(),
                         cycle,

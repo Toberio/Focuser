@@ -1,8 +1,11 @@
+import { useMutation } from "@tanstack/react-query";
+import { FolderOpen, Play, RotateCcw } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { BrowserStatusList } from "@/components/browser-status";
 import { ConfigTransfer } from "@/components/config-transfer";
 import { SettingRow, SettingsSection } from "@/components/setting-row";
+import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/card";
 import { ConfirmButton } from "@/components/ui/confirm-button";
 import { InlineError } from "@/components/ui/feedback";
@@ -17,10 +20,13 @@ import {
   useDeleteAllData,
   useProtectionStatus,
   useResetSettings,
+  useSetSetting,
   useSetStatsRetention,
+  useSetting,
   useStatsRetention,
 } from "@/lib/commands";
 import { useLanguage } from "@/lib/language";
+import { isTauri, pickSound, previewSound } from "@/lib/native";
 import {
   MAX_RETENTION_DAYS,
   SETTING_KEYS,
@@ -33,6 +39,8 @@ export function Settings() {
   const autostart = useAutostart();
   const enforceBrowsers = useBooleanSetting(SETTING_KEYS.blockUnsupportedBrowsers, true);
   const gracePeriod = useNumberSetting(SETTING_KEYS.extensionGracePeriod, 60);
+  const phaseSound = useBooleanSetting(SETTING_KEYS.phaseSound, false);
+  const soundVolume = useNumberSetting(SETTING_KEYS.phaseSoundVolume, 70);
   const language = useLanguage();
 
   // A lock can tighten these but never loosen them (#18).
@@ -132,6 +140,38 @@ export function Settings() {
         <BrowserStatusList />
       </SettingsSection>
 
+      <SettingsSection title={m.settings_section_focus()}>
+        <SettingRow
+          label={m.settings_sound()}
+          description={m.settings_sound_description()}
+          control={
+            <Switch
+              checked={phaseSound.value}
+              onCheckedChange={phaseSound.set}
+              disabled={phaseSound.isPending || phaseSound.isSaving}
+              aria-label={m.settings_sound()}
+            />
+          }
+        />
+        <SettingRow
+          label={m.settings_sound_volume()}
+          htmlFor="sound-volume"
+          control={
+            <NumberField
+              id="sound-volume"
+              value={soundVolume.value}
+              onCommit={soundVolume.set}
+              min={0}
+              max={100}
+              step={10}
+              suffix="%"
+              disabled={soundVolume.isPending}
+            />
+          }
+        />
+        <SoundFile />
+      </SettingsSection>
+
       <SettingsSection title={m.settings_section_data()}>
         <SettingRow
           label={m.settings_retention()}
@@ -220,12 +260,73 @@ export function Settings() {
           autostart.error ??
           enforceBrowsers.error ??
           gracePeriod.error ??
+          phaseSound.error ??
+          soundVolume.error ??
           setRetention.error ??
           reset.error ??
           deleteAll.error
         }
       />
     </Page>
+  );
+}
+
+/** The chime file: built in unless the user picked one. Desktop only. */
+function SoundFile() {
+  const saved = useSetting(SETTING_KEYS.phaseSoundFile, "");
+  const save = useSetSetting();
+  const preview = useMutation({ mutationFn: previewSound });
+  const path = saved.data ?? "";
+  const native = isTauri();
+
+  const choose = async () => {
+    const picked = await pickSound();
+    if (picked) save.mutate({ key: SETTING_KEYS.phaseSoundFile, value: picked });
+  };
+
+  return (
+    <div>
+      <SettingRow
+        label={m.settings_sound_file()}
+        description={path ? path.split(/[\\/]/).pop() : m.settings_sound_builtin()}
+        control={
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<FolderOpen />}
+              onClick={choose}
+              disabled={!native || save.isPending}
+            >
+              {m.settings_sound_choose()}
+            </Button>
+            {path && (
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<RotateCcw />}
+                onClick={() => save.mutate({ key: SETTING_KEYS.phaseSoundFile, value: "" })}
+                disabled={save.isPending}
+              >
+                {m.settings_sound_builtin_action()}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Play />}
+              onClick={() => preview.mutate()}
+              disabled={!native || preview.isPending}
+            >
+              {m.settings_sound_preview()}
+            </Button>
+          </div>
+        }
+      />
+      <div className="px-5">
+        <InlineError error={save.error ?? preview.error} />
+      </div>
+    </div>
   );
 }
 
