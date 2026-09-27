@@ -359,7 +359,7 @@ function Timeline({ values }: { values: Minutes }) {
       {blocks.map((b) => (
         <span
           key={b.id}
-          title={m.focus_block_tooltip({ phase: PHASE_LABEL[b.kind], minutes: b.minutes })}
+          title={m.focus_block_tooltip({ phase: PHASE_LABEL[b.kind](), minutes: b.minutes })}
           style={{ width: `${(b.minutes / total) * 100}%`, backgroundColor: PHASE_COLOR[b.kind] }}
         />
       ))}
