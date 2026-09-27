@@ -64,6 +64,10 @@ pub fn set_autostart(
     enabled: bool,
 ) -> Result<(), String> {
     if let Ok(engine) = state.engine.lock() {
+        // Off, then a reboot, would end a lock that keeps Focuser running.
+        if !enabled && engine.has_service_protection() {
+            return Err("protected".into());
+        }
         engine
             .db()
             .set_setting(ENABLED, if enabled { "1" } else { "0" })

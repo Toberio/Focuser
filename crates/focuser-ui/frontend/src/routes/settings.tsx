@@ -15,6 +15,7 @@ import { useAutostart } from "@/lib/autostart";
 import {
   useAppVersion,
   useDeleteAllData,
+  useProtectionStatus,
   useResetSettings,
   useSetStatsRetention,
   useStatsRetention,
@@ -33,6 +34,12 @@ export function Settings() {
   const enforceBrowsers = useBooleanSetting(SETTING_KEYS.blockUnsupportedBrowsers, true);
   const gracePeriod = useNumberSetting(SETTING_KEYS.extensionGracePeriod, 60);
   const language = useLanguage();
+
+  // A lock can tighten these but never loosen them (#18).
+  const locks = useProtectionStatus().data ?? [];
+  const editLocked = locks.some((l) => l.prevent_modification);
+  const autostartLocked = autostart.value && locks.some((l) => l.prevent_service_stop);
+  const browsersLocked = editLocked && enforceBrowsers.value;
 
   const retention = useStatsRetention();
   const setRetention = useSetStatsRetention();
@@ -59,17 +66,21 @@ export function Settings() {
         <SettingRow
           label={m.settings_autostart()}
           description={
-            autostart.needsAdmin
-              ? m.settings_autostart_pending()
-              : autostart.supported
-                ? m.settings_autostart_description()
-                : m.settings_autostart_unsupported()
+            autostartLocked
+              ? m.settings_locked()
+              : autostart.needsAdmin
+                ? m.settings_autostart_pending()
+                : autostart.supported
+                  ? m.settings_autostart_description()
+                  : m.settings_autostart_unsupported()
           }
           control={
             <Switch
               checked={autostart.value}
               onCheckedChange={autostart.set}
-              disabled={!autostart.supported || autostart.isPending || autostart.isSaving}
+              disabled={
+                !autostart.supported || autostart.isPending || autostart.isSaving || autostartLocked
+              }
               aria-label={m.settings_autostart()}
             />
           }
@@ -82,12 +93,14 @@ export function Settings() {
       >
         <SettingRow
           label={m.settings_close_browsers()}
-          description={m.settings_close_browsers_description()}
+          description={
+            browsersLocked ? m.settings_locked() : m.settings_close_browsers_description()
+          }
           control={
             <Switch
               checked={enforceBrowsers.value}
               onCheckedChange={enforceBrowsers.set}
-              disabled={enforceBrowsers.isPending || enforceBrowsers.isSaving}
+              disabled={enforceBrowsers.isPending || enforceBrowsers.isSaving || browsersLocked}
               aria-label={m.settings_close_browsers()}
             />
           }
@@ -102,7 +115,7 @@ export function Settings() {
               value={gracePeriod.value}
               onCommit={gracePeriod.set}
               min={5}
-              max={3600}
+              max={editLocked ? gracePeriod.value : 3600}
               step={5}
               suffix={m.settings_seconds_suffix()}
               disabled={!enforceBrowsers.value || gracePeriod.isPending}
@@ -145,7 +158,12 @@ export function Settings() {
           label={m.settings_reset()}
           description={m.settings_reset_description()}
           control={
-            <ConfirmButton variant="outline" size="sm" onConfirm={() => reset.mutate()}>
+            <ConfirmButton
+              variant="outline"
+              size="sm"
+              onConfirm={() => reset.mutate()}
+              disabled={editLocked}
+            >
               {m.settings_reset_action()}
             </ConfirmButton>
           }

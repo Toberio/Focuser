@@ -19,9 +19,6 @@ use crate::AppState;
 const HOSTS_BEGIN: &str = "# ──── BEGIN FOCUSER BLOCK ────";
 const HOSTS_END: &str = "# ──── END FOCUSER BLOCK ────";
 
-/// Default grace period before killing browsers without the extension.
-const DEFAULT_GRACE_PERIOD_SECS: u64 = 60;
-
 /// Runs the blocking loop in a background thread.
 /// Every 3 seconds: re-sync hosts file, check for blocked processes,
 /// and enforce browser extension installation.
@@ -142,13 +139,18 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
 
 /// Grace period and whether unsupported browsers get closed at all.
 fn enforcement_settings(db: &focuser_core::db::Database) -> (Duration, bool) {
+    use focuser_app::execute::{
+        DEFAULT_GRACE_PERIOD_SECS, SETTING_CLOSE_BROWSERS, SETTING_GRACE_PERIOD,
+    };
+
     let grace = db
-        .get_setting_or_default("extension_grace_period", "60")
+        .get_setting(SETTING_GRACE_PERIOD)
         .ok()
+        .flatten()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_GRACE_PERIOD_SECS);
     let enabled = db
-        .get_setting_or_default("block_unsupported_browsers", "true")
+        .get_setting_or_default(SETTING_CLOSE_BROWSERS, "true")
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(true);

@@ -453,11 +453,15 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                     "setting key must not be empty".into(),
                 ));
             }
+            if loosens_enforcement(&engine, &key, &value)? {
+                ensure_nothing_protected(&engine)?;
+            }
             engine.db().set_setting(&key, &value)?;
             Ok(CommandResult::Unit)
         }
 
         Command::ResetSettings => {
+            ensure_nothing_protected(&engine)?;
             engine.db().clear_settings()?;
             Ok(CommandResult::Unit)
         }
@@ -774,6 +778,28 @@ fn ensure_nothing_protected(engine: &BlockEngine) -> CommandOutcome<()> {
         }
     }
     Ok(())
+}
+
+/// How the blocking loop treats browsers that have no extension connected.
+pub const SETTING_CLOSE_BROWSERS: &str = "block_unsupported_browsers";
+pub const SETTING_GRACE_PERIOD: &str = "extension_grace_period";
+pub const DEFAULT_GRACE_PERIOD_SECS: u64 = 60;
+
+/// Turning browser closing off, or giving browsers longer, is refused during a
+/// lock (#18). Tightening either one is always fine.
+fn loosens_enforcement(engine: &BlockEngine, key: &str, value: &str) -> CommandOutcome<bool> {
+    Ok(match key {
+        SETTING_CLOSE_BROWSERS => value != "true",
+        SETTING_GRACE_PERIOD => {
+            let current = engine
+                .db()
+                .get_setting(key)?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_GRACE_PERIOD_SECS);
+            value.parse::<u64>().map_or(true, |next| next > current)
+        }
+        _ => false,
+    })
 }
 
 /// Statistics retention setting key and bounds.
@@ -1969,6 +1995,52 @@ mod tests {
             execute(&ctx, Command::PomodoroStop).unwrap(),
             CommandResult::Flag(false)
         ));
+    }
+
+    fn set(ctx: &AppContext, key: &str, value: &str) -> CommandOutcome<CommandResult> {
+        execute(
+            ctx,
+            Command::SetSetting {
+                key: key.into(),
+                value: value.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_lock_refuses_settings_that_would_loosen_browser_closing() {
+        let ctx = ctx();
+        let list = create(&ctx, "Deep Work");
+        protect(&ctx, list.id).unwrap();
+
+        // #18: switching this off let the extension be removed mid-lock.
+        for (key, value) in [
+            (SETTING_CLOSE_BROWSERS, "false"),
+            (SETTING_GRACE_PERIOD, "3600"),
+        ] {
+            assert!(
+                matches!(set(&ctx, key, value), Err(CommandError::Protected)),
+                "{key}={value} got through a lock"
+            );
+        }
+        assert!(matches!(
+            execute(&ctx, Command::ResetSettings),
+            Err(CommandError::Protected)
+        ));
+
+        set(&ctx, SETTING_CLOSE_BROWSERS, "true").unwrap();
+        set(&ctx, SETTING_GRACE_PERIOD, "10").unwrap();
+        set(&ctx, "language", "de").unwrap();
+    }
+
+    #[test]
+    fn without_a_lock_browser_settings_change_freely() {
+        let ctx = ctx();
+        create(&ctx, "Deep Work");
+
+        set(&ctx, SETTING_CLOSE_BROWSERS, "false").unwrap();
+        set(&ctx, SETTING_GRACE_PERIOD, "3600").unwrap();
+        execute(&ctx, Command::ResetSettings).unwrap();
     }
 
     #[test]

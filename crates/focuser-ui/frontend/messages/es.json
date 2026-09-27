@@ -442,5 +442,6 @@
   "update_available": "Actualización disponible",
   "update_version_ready": "La versión {version} está lista",
   "update_installing": "Instalando…",
-  "settings_autostart_pending": "Guardado. El instalador también registró una tarea de inicio que necesita permisos de administrador para cambiarse, así que esto terminará de aplicarse la próxima vez que arranque Focuser."
+  "settings_autostart_pending": "Guardado. El instalador también registró una tarea de inicio que necesita permisos de administrador para cambiarse, así que esto terminará de aplicarse la próxima vez que arranque Focuser.",
+  "settings_locked": "No se puede desactivar mientras haya un bloqueo activo."
 }
