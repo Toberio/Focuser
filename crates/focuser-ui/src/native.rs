@@ -34,32 +34,23 @@ pub fn pick_app_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 /// Pick a Focuser configuration file and return its contents.
-/// `None` means the user cancelled.
-#[tauri::command]
+/// `None` means the user cancelled. `(async)` for the same reason as above.
+#[tauri::command(async)]
 pub fn pick_import_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    app.dialog()
+    let Some(path) = app
+        .dialog()
         .file()
         .set_title("Import Focuser Configuration")
         .add_filter("JSON", &["json"])
-        .pick_file(move |path| {
-            let _ = tx.send(path);
-        });
-
-    let chosen = rx.recv().map_err(|e| format!("Dialog error: {e}"))?;
-
-    match chosen {
-        Some(path) => {
-            let path_str = path.to_string();
-            let contents =
-                std::fs::read_to_string(&path_str).map_err(|e| format!("Read failed: {e}"))?;
-            Ok(Some(contents))
-        }
-        None => Ok(None),
-    }
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    std::fs::read_to_string(path.to_string())
+        .map(Some)
+        .map_err(|e| format!("Read failed: {e}"))
 }
 
 /// Ask where to save an exported configuration and write it there.
@@ -67,7 +58,7 @@ pub fn pick_import_file(app: tauri::AppHandle) -> Result<Option<String>, String>
 ///
 /// The document itself comes from `Command::ExportConfiguration` — this only
 /// decides where it lands.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_configuration(app: tauri::AppHandle, json: String) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
@@ -75,25 +66,19 @@ pub fn save_configuration(app: tauri::AppHandle, json: String) -> Result<Option<
         "focuser-config-{}.json",
         chrono::Local::now().format("%Y-%m-%d")
     );
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    app.dialog()
+    let Some(path) = app
+        .dialog()
         .file()
         .set_title("Export Focuser Configuration")
         .add_filter("JSON", &["json"])
         .set_file_name(&default_name)
-        .save_file(move |path| {
-            let _ = tx.send(path);
-        });
-
-    match rx.recv().map_err(|e| format!("Dialog error: {e}"))? {
-        Some(path) => {
-            let path = path.to_string();
-            std::fs::write(&path, &json).map_err(|e| format!("Write failed: {e}"))?;
-            Ok(Some(path))
-        }
-        None => Ok(None),
-    }
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.to_string();
+    std::fs::write(&path, &json).map_err(|e| format!("Write failed: {e}"))?;
+    Ok(Some(path))
 }
 
 /// Browser processes currently running, used by `SystemSync::running_browsers`.
