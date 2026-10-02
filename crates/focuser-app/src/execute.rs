@@ -6,8 +6,8 @@
 use focuser_common::allowance::Allowance;
 use focuser_common::host::canonical_host;
 use focuser_common::types::{
-    AppRule, BlockList, EntityId, ExceptionRule, ExceptionType, Lock, Protection, Schedule,
-    WebsiteMatchType, WebsiteRule,
+    AppRule, BlockList, EntityId, ExceptionRule, Lock, Protection, Schedule, WebsiteMatchType,
+    WebsiteRule,
 };
 use focuser_core::{BlockEngine, pomodoro};
 
@@ -198,9 +198,14 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         // ─── Exceptions ───────────────────────────────────────────
         Command::AddException { list_id, exception } => {
+            // An address with a path allows that page, anything else the
+            // site (#21). A blank value allows nothing, so it is refused.
+            let exception_type = exception.normalized().ok_or_else(|| {
+                CommandError::Validation("enter a domain or a page address".into())
+            })?;
             let created = ExceptionRule {
                 id: focuser_common::types::new_id(),
-                exception_type: normalize_exception(exception)?,
+                exception_type,
                 enabled: true,
             };
             let out = created.clone();
@@ -923,25 +928,6 @@ fn normalize(match_type: &mut WebsiteMatchType) {
     }
 }
 
-/// An address with a path allows that page; anything else allows the site.
-/// Stored that way round, whichever kind the caller picked (#21).
-fn normalize_exception(exception: ExceptionType) -> CommandOutcome<ExceptionType> {
-    let (ExceptionType::Domain(typed) | ExceptionType::UrlPath(typed)) = &exception else {
-        return Ok(exception);
-    };
-    if let Some((host, page)) = exception.page() {
-        return Ok(ExceptionType::UrlPath(format!("{host}{page}")));
-    }
-
-    let host = canonical_host(typed);
-    if host.is_empty() {
-        return Err(CommandError::Validation(
-            "enter a domain or a page address".into(),
-        ));
-    }
-    Ok(ExceptionType::Domain(host))
-}
-
 /// Reject mutations to a block list whose protection window is still open.
 ///
 /// Centralised here on purpose. This check was previously duplicated inline in
@@ -962,7 +948,7 @@ mod tests {
     use crate::command::WebsiteRuleKind;
     use focuser_common::allowance::AllowanceMatch;
     use focuser_common::pomodoro::PomodoroConfig;
-    use focuser_common::types::{AppMatchType, TimeSlot};
+    use focuser_common::types::{AppMatchType, ExceptionType, TimeSlot};
     use focuser_core::Database;
 
     fn ctx() -> AppContext {

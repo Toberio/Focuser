@@ -240,6 +240,19 @@ impl ExceptionType {
             Self::Wildcard(_) | Self::LocalFiles => None,
         }
     }
+
+    /// The form it is stored in: a bare host, or host plus page, whichever
+    /// kind was picked. `None` when there is nothing to allow.
+    pub fn normalized(self) -> Option<Self> {
+        let (Self::Domain(typed) | Self::UrlPath(typed)) = &self else {
+            return Some(self);
+        };
+        if let Some((host, page)) = self.page() {
+            return Some(Self::UrlPath(format!("{host}{page}")));
+        }
+        let host = crate::host::canonical_host(typed);
+        (!host.is_empty()).then_some(Self::Domain(host))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

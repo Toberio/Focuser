@@ -18,6 +18,7 @@ pub struct BlockEngine {
 
 impl BlockEngine {
     pub fn new(db: Database) -> Result<Self> {
+        upgrade_exceptions(&db)?;
         let cached_lists = db.list_block_lists()?;
         info!(count = cached_lists.len(), "Block engine initialized");
         Ok(Self { db, cached_lists })
@@ -283,6 +284,28 @@ impl BlockEngine {
     }
 }
 
+/// Before 0.8.1 an exception typed with a path was stored as a domain and
+/// allowed the whole site (#21). Rewritten once, so the list shows what the
+/// exception allows now.
+fn upgrade_exceptions(db: &Database) -> Result<()> {
+    for mut list in db.list_block_lists()? {
+        let mut changed = false;
+        for exc in &mut list.exceptions {
+            if matches!(exc.exception_type, ExceptionType::Domain(_))
+                && exc.exception_type.page().is_some()
+                && let Some(page) = exc.exception_type.clone().normalized()
+            {
+                exc.exception_type = page;
+                changed = true;
+            }
+        }
+        if changed {
+            db.update_block_list(&list)?;
+        }
+    }
+    Ok(())
+}
+
 /// A list with no time slots is always on, not scheduled.
 fn has_hours(list: &BlockList) -> bool {
     list.schedule
@@ -463,6 +486,29 @@ mod tests {
             ["docs.youtube.com", "www.docs.youtube.com"]
         );
         assert!(engine.check_domain("youtube.com").is_some());
+    }
+
+    #[test]
+    fn an_exception_saved_with_a_path_becomes_a_page_on_load() {
+        use focuser_common::types::ExceptionRule;
+
+        let db = Database::open_in_memory().unwrap();
+        let mut list = BlockList::new("From 0.8.0");
+        for typed in ["https://docs.google.com/document/u/0/", "example.com"] {
+            list.exceptions.push(ExceptionRule::domain(typed));
+        }
+        db.create_block_list(&list).unwrap();
+
+        let engine = BlockEngine::new(db).unwrap();
+        let stored = &engine.db().list_block_lists().unwrap()[0].exceptions;
+        assert!(matches!(
+            &stored[0].exception_type,
+            ExceptionType::UrlPath(page) if page == "docs.google.com/document/u/0"
+        ));
+        assert!(matches!(
+            &stored[1].exception_type,
+            ExceptionType::Domain(host) if host == "example.com"
+        ));
     }
 
     #[test]
