@@ -580,7 +580,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 .validate()
                 .map_err(|e| CommandError::Validation(e.to_string()))?;
 
-            ensure_unprotected(&engine, block_list_id)?;
+            // No lock check: a session can only tighten a locked list. Its breaks
+            // and its end leave such a list on (#14).
             let session = pomodoro::start_session(&mut engine, block_list_id, config)?;
             // A work phase suspends allowances and can change what is blocked.
             ctx.sync_hosts(&engine);
@@ -2315,7 +2316,6 @@ mod tests {
             Command::AllowanceCreate { target: AllowanceMatch::Domain("example.com".into()), daily_limit_secs: 600, strict_mode: false },
             Command::AllowanceUpdate { id: list.id, daily_limit_secs: 600, strict_mode: false, enabled: false },
             Command::AllowanceDelete { id: list.id }, Command::AllowanceResetToday { id: list.id },
-            Command::PomodoroStart { block_list_id: list.id, config: PomodoroConfig::CLASSIC },
             Command::DeleteAllData, Command::ResetSettings,
             Command::SetSetting { key: SETTING_CLOSE_BROWSERS.into(), value: "false".into() },
             Command::ImportConfiguration { json: r#"{"version":1,"app":"Focuser","exported_at":"2026-07-27T00:00:00Z","block_lists":[]}"#.into() },
@@ -2989,6 +2989,37 @@ mod tests {
             execute(&ctx, Command::PomodoroStop).unwrap(),
             CommandResult::Flag(false)
         ));
+    }
+
+    #[test]
+    fn a_pomodoro_runs_on_a_locked_list_and_cannot_switch_it_off() {
+        for scheduled in [false, true] {
+            let ctx = ctx();
+            let list = if scheduled {
+                scheduled_list(&ctx, None)
+            } else {
+                let list = create(&ctx, "Deep Work");
+                protect(&ctx, list.id).unwrap();
+                list
+            };
+
+            execute(
+                &ctx,
+                Command::PomodoroStart {
+                    block_list_id: list.id,
+                    config: PomodoroConfig::CLASSIC,
+                },
+            )
+            .unwrap();
+            // Into the break, which switches an unlocked list off, and then out
+            // of the session, which puts a list back as it found it.
+            execute(&ctx, Command::PomodoroSkip).unwrap();
+            execute(&ctx, Command::PomodoroStop).unwrap();
+
+            let engine = ctx.engine.lock().unwrap();
+            assert!(engine.db().get_block_list(list.id).unwrap().enabled);
+            assert!(engine.is_block_list_protected(list.id));
+        }
     }
 
     fn set(ctx: &AppContext, key: &str, value: &str) -> CommandOutcome<CommandResult> {
