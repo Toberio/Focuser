@@ -59,6 +59,13 @@ export default defineBackground(() => {
   let samplingShared = false;
 
   async function tickShared() {
+    // Only an app that sends scopes has a shared allowance running, and only
+    // that app knows these ticks. An older one would take each as a normal
+    // tick and charge the site's own allowance a second time.
+    if (!rules.scopes?.length) {
+      sharedActivity.sample(null, Date.now());
+      return;
+    }
     if (samplingShared) return;
     samplingShared = true;
     try {
@@ -66,7 +73,9 @@ export default defineBackground(() => {
       const idle = await browser.idle.queryState(60);
       const [tab] = await browser.tabs.query({ active: true, lastFocusedWindow: true });
       let url: string | null = null;
-      if (connected && window.focused && idle === "active" && tab?.url) {
+      // A video plays with no hand on the mouse, so "no input" still counts.
+      // A locked screen does not.
+      if (connected && window.focused && idle !== "locked" && tab?.url) {
         const parsed = new URL(tab.url);
         if (
           (parsed.protocol === "https:" || parsed.protocol === "http:") &&
