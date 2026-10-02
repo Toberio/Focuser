@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   Briefcase,
   CalendarRange,
   Check,
@@ -9,13 +10,15 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import { ListHoursOptions } from "@/components/list-hours-options";
 import { ListPicker, resolveSelected } from "@/components/list-picker";
 import { ScheduleGrid } from "@/components/schedule-grid";
-import { ScheduledProtectionControl } from "@/components/scheduled-protection-control";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, EmptyState, PageHeader } from "@/components/ui/card";
-import { InlineError, QueryState } from "@/components/ui/feedback";
+import { Dialog, ErrorDialog } from "@/components/ui/dialog";
+import { QueryState } from "@/components/ui/feedback";
 import { Page } from "@/components/ui/page";
 import { Tabs } from "@/components/ui/tabs";
 import { useBlockLists, useUpdateSchedule } from "@/lib/commands";
@@ -49,7 +52,14 @@ const PRESET_ICONS: Record<string, ReactNode> = {
 export function Schedule() {
   const lists = useBlockLists();
   const save = useUpdateSchedule();
-  const [rawSelected, setSelected] = useState("");
+  // "Set schedule" and "Edit schedule" on a list card land here with that list
+  // named in the address, so the page opens on it instead of on the first one.
+  const [params] = useSearchParams();
+  const [rawSelected, setSelected] = useState(() => params.get("list") ?? "");
+  // "Set schedule" also asks for the grid of that list: it has no hours yet,
+  // and the "always active" panel has nowhere to set them.
+  const gridFor = params.get("set") === "hours" ? params.get("list") : null;
+  const [needsGap, setNeedsGap] = useState(false);
 
   const all = lists.data ?? [];
   const selected = resolveSelected(all, rawSelected);
@@ -62,16 +72,27 @@ export function Schedule() {
   const [mode, setMode] = useState<"always" | "scheduled">("always");
 
   // Reset the draft whenever we switch lists or the saved schedule changes.
+  const listId = list?.id;
   useEffect(() => {
     setDraft(saved);
-    setMode(alwaysActive ? "always" : "scheduled");
-  }, [saved, alwaysActive]);
+    setMode(alwaysActive && listId !== gridFor ? "always" : "scheduled");
+  }, [saved, alwaysActive, listId, gridFor]);
 
   const dirty =
     list != null && (mode === "always" ? !alwaysActive : alwaysActive || !sameCells(draft, saved));
 
+  // A scheduled lock and a shared allowance last for one block of hours, so a
+  // list that has either cannot be saved as on all week. The command core
+  // refuses that too; this says it in the reader's language, before the call.
+  const followsHours = list?.scheduled_protection != null || list?.shared_allowance != null;
+  const leavesGap = mode === "scheduled" && draft.size > 0 && draft.size < WEEK_HOURS;
+
   function commit() {
     if (!list) return;
+    if (followsHours && !leavesGap) {
+      setNeedsGap(true);
+      return;
+    }
     save.mutate({
       listId: list.id,
       slots: mode === "always" ? [] : cellsToSlots(draft),
@@ -125,10 +146,34 @@ export function Schedule() {
                 saving={save.isPending}
                 onSave={commit}
               />
+
+              <Card padding="none" elevation="raised" className="edge-light overflow-hidden">
+                <ListHoursOptions list={list} page="schedule" />
+              </Card>
             </div>
 
-            <InlineError error={save.error} />
-            <ScheduledProtectionControl list={list} variant="compact" />
+            <Dialog
+              open={needsGap}
+              onClose={() => setNeedsGap(false)}
+              role="alertdialog"
+              title={m.schedule_needs_gap_title()}
+              icon={<AlertTriangle aria-hidden className="text-warning" />}
+            >
+              <p className="mt-2 text-muted-foreground text-sm leading-relaxed">
+                {m.schedule_needs_gap_body({ name: list.name })}
+              </p>
+              <div className="mt-5 flex justify-end">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-autofocus
+                  onClick={() => setNeedsGap(false)}
+                >
+                  {m.common_ok()}
+                </Button>
+              </div>
+            </Dialog>
+            <ErrorDialog error={save.error} onClose={() => save.reset()} />
           </>
         )}
       </QueryState>

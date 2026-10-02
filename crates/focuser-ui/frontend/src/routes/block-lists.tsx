@@ -1,13 +1,13 @@
 import { ListChecks, Lock, Plus, Trash2, Unlock } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import type { BlockList, ProtectionInfo } from "@/bindings";
-import { effectiveLock, ProtectForm, UnlockForm } from "@/components/focus-lock-forms";
-import { ScheduledProtectionControl } from "@/components/scheduled-protection-control";
-import { SharedAllowanceControl } from "@/components/shared-allowance-control";
+import { effectiveLock, ProtectDialog, UnlockDialog } from "@/components/focus-lock-forms";
+import { ListHoursOptions } from "@/components/list-hours-options";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, EmptyState, PageHeader } from "@/components/ui/card";
-import { InlineError, QueryState } from "@/components/ui/feedback";
+import { ErrorDialog } from "@/components/ui/dialog";
+import { QueryState } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import { Page } from "@/components/ui/page";
 import { ListSkeleton } from "@/components/ui/skeleton";
@@ -53,7 +53,7 @@ export function BlockLists() {
             {create.isPending ? m.lists_creating() : m.lists_create()}
           </Button>
         </form>
-        <InlineError error={create.error} />
+        <ErrorDialog error={create.error} onClose={() => create.reset()} />
       </Card>
 
       {lists.isPending ? (
@@ -156,11 +156,9 @@ function ListRow({ list, lock }: { list: BlockList; lock: ProtectionInfo | null 
                         ? m.lists_protect({ name: list.name })
                         : m.lists_unlock({ name: list.name })
                     }
-                    aria-expanded={lock === null ? protecting : unlocking}
+                    aria-haspopup="dialog"
                     disabled={lock !== null && !canUnlockEarly}
-                    onClick={() =>
-                      lock === null ? setProtecting(!protecting) : setUnlocking(!unlocking)
-                    }
+                    onClick={() => (lock === null ? setProtecting(true) : setUnlocking(true))}
                   >
                     {lock === null ? <Lock /> : <Unlock />}
                   </Button>
@@ -185,14 +183,27 @@ function ListRow({ list, lock }: { list: BlockList; lock: ProtectionInfo | null 
           </div>
         </div>
 
-        <ScheduledProtectionControl list={list} />
-        <SharedAllowanceControl list={list} />
-        {protecting && !lock && <ProtectForm list={list} onDone={() => setProtecting(false)} />}
-        {unlocking && canUnlockEarly && (
-          <UnlockForm list={list} onDone={() => setUnlocking(false)} />
-        )}
+        <ListHoursOptions list={list} page="lists" />
 
-        <InlineError error={toggle.error ?? remove.error} />
+        {/* The card shows state. Setting a lock, ending one, and anything that
+            goes wrong each get a pop-up, so the list never grows a form. */}
+        <ProtectDialog
+          list={list}
+          open={protecting && !lock}
+          onClose={() => setProtecting(false)}
+        />
+        <UnlockDialog
+          list={list}
+          open={unlocking && canUnlockEarly}
+          onClose={() => setUnlocking(false)}
+        />
+        <ErrorDialog
+          error={toggle.error ?? remove.error}
+          onClose={() => {
+            toggle.reset();
+            remove.reset();
+          }}
+        />
       </Card>
     </li>
   );

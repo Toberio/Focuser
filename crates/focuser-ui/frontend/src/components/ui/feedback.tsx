@@ -63,6 +63,25 @@ export function QueryState({
   return <>{children}</>;
 }
 
+/**
+ * A failed step inside a pop-up: said where it happened, in a quiet box.
+ *
+ * A pop-up cannot open a second pop-up over itself to complain, and a bare red
+ * line under its buttons reads as part of the form.
+ */
+export function Notice({ error }: { error: Error | null }) {
+  if (!error) return null;
+  return (
+    <p
+      role="alert"
+      className="mt-4 flex items-start gap-2 rounded-lg border border-border-strong bg-surface px-3 py-2 text-muted-foreground text-sm"
+    >
+      <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
+      {errorMessage(error)}
+    </p>
+  );
+}
+
 /** Inline error for a failed mutation, e.g. a rejected form submission. */
 export function InlineError({ error }: { error: Error | null }) {
   if (!error) return null;

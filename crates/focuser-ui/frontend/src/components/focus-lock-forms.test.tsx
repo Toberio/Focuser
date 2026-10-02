@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { BlockList, Command, CommandResult } from "@/bindings";
-import { UnlockForm } from "./focus-lock-forms";
+import { UnlockDialog, UnlockForm } from "./focus-lock-forms";
 
 const send = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/transport", async (importOriginal) => ({
@@ -30,35 +31,36 @@ beforeEach(() => {
   });
 });
 
-async function show(password = false) {
-  const list: BlockList = {
-    id: "list-1",
-    name: "Focus",
-    enabled: true,
-    websites: [],
-    applications: [],
-    exceptions: [],
-    lock: null,
-    protection: null,
-    schedule: null,
-    schedule_unlocked_until: null,
-    shared_allowance: null,
-    breaks: null,
-    scheduled_protection: {
-      lock: password ? { Password: { hash: "stored" } } : { RandomText: { length: 6 } },
-    },
-    created_at: "2026-09-28T00:00:00Z",
-    updated_at: "2026-09-28T00:00:00Z",
-  };
-  const onDone = vi.fn();
+const lockedList = (password: boolean): BlockList => ({
+  id: "list-1",
+  name: "Focus",
+  enabled: true,
+  websites: [],
+  applications: [],
+  exceptions: [],
+  lock: null,
+  protection: null,
+  schedule: null,
+  schedule_unlocked_until: null,
+  shared_allowance: null,
+  breaks: null,
+  scheduled_protection: {
+    lock: password ? { Password: { hash: "stored" } } : { RandomText: { length: 6 } },
+  },
+  created_at: "2026-09-28T00:00:00Z",
+  updated_at: "2026-09-28T00:00:00Z",
+});
+
+function renderWithClient(ui: ReactNode) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  render(
-    <QueryClientProvider client={client}>
-      <UnlockForm list={list} onDone={onDone} />
-    </QueryClientProvider>,
-  );
+  render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
+
+async function show(password = false) {
+  const onDone = vi.fn();
+  renderWithClient(<UnlockForm list={lockedList(password)} onDone={onDone} />);
   if (!password) await screen.findByText(challenge);
   const input = screen.getByLabelText(password ? "Enter the password" : "Type the string above");
   const button = screen.getByRole("button", { name: "Unlock" });
@@ -173,6 +175,24 @@ it("retains the backend rejection fallback and requires the fresh challenge", as
   type(input, "GhijkL");
   fireEvent.click(button);
   await waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+});
+
+// The pop-up exists for one thing, so the hands should already be on it.
+it("opens a password unlock with the cursor in the field", () => {
+  renderWithClient(<UnlockDialog list={lockedList(true)} open onClose={vi.fn()} />);
+
+  expect(screen.getByLabelText("Enter the password")).toHaveFocus();
+});
+
+it("moves the cursor to the field once the random text is there to type", async () => {
+  renderWithClient(<UnlockDialog list={lockedList(false)} open onClose={vi.fn()} />);
+  const input = screen.getByLabelText("Type the string above");
+  // Nothing to type yet, so nothing to type into.
+  expect(input).toBeDisabled();
+
+  await screen.findByText(challenge);
+
+  await waitFor(() => expect(input).toHaveFocus());
 });
 
 it("colors only the correct prefix and first mismatch, updating as corrected", async () => {

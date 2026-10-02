@@ -6,6 +6,18 @@ import { beforeEach } from "vitest";
 // and a `findBy` that times out there fails a test that is otherwise right.
 configure({ asyncUtilTimeout: 5000 });
 
+// jsdom has the <dialog> element but none of its methods. This is the least
+// that lets a component open one: the `open` attribute, and a `close` event.
+if (typeof HTMLDialogElement !== "undefined" && !HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function showModal() {
+    this.setAttribute("open", "");
+  };
+  HTMLDialogElement.prototype.close = function close() {
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+  };
+}
+
 /**
  * A `localStorage` for tests.
  *
