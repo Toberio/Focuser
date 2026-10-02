@@ -524,13 +524,18 @@ impl Lock {
             .is_ok()
     }
 
-    /// A fresh challenge string. The length is clamped because an imported
+    /// How long a challenge for `length` is. Clamped because an imported
     /// file can carry any number here.
+    pub fn challenge_len(length: u32) -> usize {
+        length.clamp(Self::MIN_RANDOM_TEXT_LEN, Self::MAX_RANDOM_TEXT_LEN) as usize
+    }
+
+    /// A fresh challenge string.
     pub fn random_text_of_length(length: u32) -> String {
         use argon2::password_hash::rand_core::{OsRng, RngCore};
 
         let mut rng = OsRng;
-        (0..length.clamp(Self::MIN_RANDOM_TEXT_LEN, Self::MAX_RANDOM_TEXT_LEN))
+        (0..Self::challenge_len(length))
             .map(|_| {
                 let idx = (rng.next_u32() as usize) % Self::CHALLENGE_ALPHABET.len();
                 Self::CHALLENGE_ALPHABET[idx] as char

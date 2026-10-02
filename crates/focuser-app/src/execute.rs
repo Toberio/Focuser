@@ -474,11 +474,18 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             // A password is checked exactly as typed, the way it was hashed.
             let verified = match list.effective_lock() {
                 Some(lock @ Lock::Password { .. }) => lock.verify_password(&response),
-                Some(Lock::RandomText { .. }) => {
+                Some(Lock::RandomText { length }) => {
                     // Consumed unconditionally: right or wrong, this challenge
                     // is spent, so a wrong guess cannot be retried against it
-                    // and a right one cannot be replayed.
-                    engine.db().take_unlock_challenge(list_id)?.as_deref() == Some(response.trim())
+                    // and a right one cannot be replayed. A text of another
+                    // length was issued for the list's other lock.
+                    engine
+                        .db()
+                        .take_unlock_challenge(list_id)?
+                        .is_some_and(|issued| {
+                            issued.len() == Lock::challenge_len(*length)
+                                && issued == response.trim()
+                        })
                 }
                 // No lock means no early unlock — the only way out is to wait.
                 None => return Err(CommandError::Protected),
@@ -2259,6 +2266,65 @@ mod tests {
         )
         .unwrap();
         assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+    }
+
+    #[test]
+    fn a_challenge_issued_for_one_lock_does_not_open_the_other() {
+        let ctx = ctx();
+        let list = scheduled_list(&ctx, Some(LockSetup::RandomText { length: 64 }));
+        let challenge = || {
+            let CommandResult::Text(text) =
+                execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+            else {
+                panic!("challenge expected")
+            };
+            text
+        };
+        // A manual lock with a short text on top of the scheduled one. Its text
+        // is asked for and never typed, and then the manual lock runs out.
+        let leave_a_short_text_behind = || {
+            let manual = |expires_in| {
+                let mut engine = ctx.engine.lock().unwrap();
+                let mut stored = engine.db().get_block_list(list.id).unwrap();
+                let mut protection = Protection::for_duration(60);
+                protection.expires_at = chrono::Utc::now() + chrono::Duration::minutes(expires_in);
+                stored.protection = Some(protection);
+                stored.lock = Some(Lock::RandomText { length: 6 });
+                engine.db().update_block_list(&stored).unwrap();
+                engine.refresh().unwrap();
+            };
+            manual(60);
+            let short = challenge();
+            assert_eq!(short.len(), 6);
+            manual(-1);
+            short
+        };
+        let unlock = |response: String| {
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response,
+                },
+            )
+        };
+        let locked = || ctx.engine.lock().unwrap().is_block_list_protected(list.id);
+
+        // Typed straight in, as the CLI can: six characters instead of 64.
+        let short = leave_a_short_text_behind();
+        assert!(matches!(
+            unlock(short),
+            Err(CommandError::WrongUnlockResponse)
+        ));
+        assert!(locked());
+
+        // Asked for again, as the app does: the text is for the lock in force.
+        leave_a_short_text_behind();
+        let long = challenge();
+        assert_eq!(long.len(), 64);
+        assert_eq!(challenge(), long, "asking twice must not change the text");
+        unlock(long).unwrap();
+        assert!(!locked());
     }
 
     #[test]

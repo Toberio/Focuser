@@ -184,6 +184,10 @@ impl Database {
     /// The outstanding random-text challenge for a block list, stored as
     /// `fresh` if there is none yet. Asking twice returns the same text, so a
     /// second request cannot swap it out from under the one on screen.
+    ///
+    /// A list can carry two locks, a manual one and a scheduled one, each with
+    /// its own length. A text left over from the other lock is replaced, so the
+    /// short one cannot stand in for the long one.
     pub fn issue_unlock_challenge(&self, list_id: EntityId, fresh: &str) -> Result<String> {
         let conn = self
             .conn
@@ -191,7 +195,9 @@ impl Database {
             .map_err(|e| FocuserError::Database(e.to_string()))?;
         conn.query_row(
             "INSERT INTO unlock_challenges (block_list_id, challenge) VALUES (?1, ?2)
-             ON CONFLICT(block_list_id) DO UPDATE SET challenge = challenge
+             ON CONFLICT(block_list_id) DO UPDATE SET challenge = CASE
+                 WHEN length(challenge) = length(excluded.challenge) THEN challenge
+                 ELSE excluded.challenge END
              RETURNING challenge",
             rusqlite::params![list_id.to_string(), fresh],
             |row| row.get(0),
@@ -659,11 +665,16 @@ mod tests {
         let id = focuser_common::types::new_id();
 
         assert_eq!(db.issue_unlock_challenge(id, "first").unwrap(), "first");
-        assert_eq!(db.issue_unlock_challenge(id, "second").unwrap(), "first");
+        assert_eq!(db.issue_unlock_challenge(id, "again").unwrap(), "first");
         assert_eq!(db.take_unlock_challenge(id).unwrap(), Some("first".into()));
 
         // Once answered, the next one is fresh.
         assert_eq!(db.issue_unlock_challenge(id, "third").unwrap(), "third");
+
+        // Another length means the list's other lock is asking. The short text
+        // left over must not be the answer to the long one.
+        let longer = "a much longer text";
+        assert_eq!(db.issue_unlock_challenge(id, longer).unwrap(), longer);
     }
 
     #[test]
