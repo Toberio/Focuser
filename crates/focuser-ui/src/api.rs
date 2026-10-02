@@ -424,6 +424,12 @@ fn api_add_site(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
+    if list.is_modification_protected() {
+        return (
+            "403 Forbidden",
+            serde_json::json!({"error": "protected"}).to_string(),
+        );
+    }
 
     use focuser_common::types::WebsiteRule;
     let rule = match rule_type {
@@ -492,6 +498,12 @@ fn api_remove_site(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
+    if list.is_modification_protected() {
+        return (
+            "403 Forbidden",
+            serde_json::json!({"error": "protected"}).to_string(),
+        );
+    }
 
     let before = list.websites.len();
     let mut left_behind = 0usize;
@@ -680,6 +692,12 @@ fn api_toggle_list(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
+    if list.is_modification_protected() {
+        return (
+            "403 Forbidden",
+            serde_json::json!({"error": "protected"}).to_string(),
+        );
+    }
 
     list.enabled = enabled;
     list.updated_at = chrono::Utc::now();
@@ -936,6 +954,35 @@ mod tests {
         );
 
         assert_eq!(used_secs(&state), 0, "strict mode only counts focused time");
+    }
+
+    #[test]
+    fn a_locked_list_cannot_be_changed_through_the_extension_api() {
+        let mut list = BlockList::new("Deep Work");
+        list.websites.push(WebsiteRule::domain("youtube.com"));
+        let now = chrono::Utc::now();
+        list.protection = Some(focuser_common::types::Protection {
+            prevent_uninstall: false,
+            prevent_service_stop: false,
+            prevent_modification: true,
+            started_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        });
+        let state = ctx_with_extension(|db| db.create_block_list(&list).unwrap());
+        let body =
+            serde_json::json!({"list_id": list.id, "domain": "youtube.com", "enabled": false})
+                .to_string();
+
+        // 0.8.0 answered 200 to all of these, so one request to this port
+        // switched a locked list off.
+        assert_eq!(super::api_toggle_list(&body, &state).0, "403 Forbidden");
+        assert_eq!(super::api_remove_site(&body, &state).0, "403 Forbidden");
+        assert_eq!(super::api_add_site(&body, &state).0, "403 Forbidden");
+
+        let engine = state.engine.lock().unwrap();
+        let stored = engine.db().get_block_list(list.id).unwrap();
+        assert!(stored.enabled, "the locked list was switched off");
+        assert_eq!(stored.websites.len(), 1);
     }
 
     // A hosts file cannot express these, so this endpoint is the only way they
