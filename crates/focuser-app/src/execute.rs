@@ -861,14 +861,19 @@ struct ConfigDocument {
     block_lists: Vec<BlockList>,
 }
 
-/// A scheduled lock and a shared allowance both last for one scheduled block.
-/// Hours that cover the whole week are a block with no end, so the lock would
-/// never open and the allowance would never refill.
+/// A scheduled lock and a shared allowance both last for one scheduled block,
+/// so the list needs hours, and hours that stop. A list that is on all week,
+/// with no hours set or with every hour set, has no block to tie them to: the
+/// lock would never open and the allowance would never refill.
 fn ensure_schedule_ends(list: &BlockList) -> CommandOutcome<()> {
-    if list.schedule.as_ref().is_some_and(Schedule::never_ends) {
+    let on_all_week = list
+        .schedule
+        .as_ref()
+        .is_none_or(|s| s.time_slots.is_empty() || s.never_ends());
+    if on_all_week {
         return Err(CommandError::Validation(
-            "these hours cover the whole week, so a lock or a shared allowance on them would \
-             never end; leave a gap in the schedule"
+            "this list is on all week, so a lock or a shared allowance that follows its \
+             hours would never end; set hours with a gap on the Schedule page first"
                 .into(),
         ));
     }
@@ -1741,6 +1746,25 @@ mod tests {
         list
     }
 
+    /// Hours on a day that is not today: enough for a lock or a shared allowance
+    /// to be set up, without the list being in its hours while the test runs.
+    fn hours_later_this_week(ctx: &AppContext, list_id: EntityId) {
+        use chrono::Datelike;
+        execute(
+            ctx,
+            Command::UpdateSchedule {
+                list_id,
+                slots: vec![TimeSlot::new(
+                    chrono::Local::now().weekday().succ().succ(),
+                    chrono::NaiveTime::MIN,
+                    chrono::NaiveTime::MIN,
+                )],
+                always_active: false,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn shared_allowance_configuration_is_guarded_but_consumption_never_unlocks() {
         let ctx = ctx();
@@ -1918,6 +1942,7 @@ mod tests {
             },
         )
         .unwrap();
+        hours_later_this_week(&ctx, list.id);
         assert!(
             ctx.engine
                 .lock()
@@ -2148,6 +2173,7 @@ mod tests {
     fn scheduled_configuration_uses_existing_challenge_length_limits() {
         let ctx = ctx();
         let list = create(&ctx, "Limits");
+        hours_later_this_week(&ctx, list.id);
         for length in [Lock::MIN_RANDOM_TEXT_LEN - 1, Lock::MAX_RANDOM_TEXT_LEN + 1] {
             assert!(
                 execute(
@@ -2197,23 +2223,29 @@ mod tests {
             minutes: Some(30),
         };
         let every_day = [Mon, Tue, Wed, Thu, Fri, Sat, Sun];
+        let refused = |cmd| assert_eq!(execute(&ctx, cmd).unwrap_err().code(), "validation");
 
-        // With no way to unlock, this lock would refuse quitting, uninstalling
+        // No hours set is "on all week" as much as every hour set is. With no
+        // way to unlock, a lock on either would refuse quitting, uninstalling
         // and editing for good.
+        refused(lock());
+        refused(share());
         execute(&ctx, hours(&every_day)).unwrap();
-        for refused in [lock(), share()] {
-            assert_eq!(execute(&ctx, refused).unwrap_err().code(), "validation");
-        }
+        refused(lock());
+        refused(share());
 
         // A day that is not today, so turning the lock on does not lock the test out.
         let later = chrono::Local::now().weekday().succ().succ();
         execute(&ctx, hours(&[later])).unwrap();
         execute(&ctx, lock()).unwrap();
         execute(&ctx, share()).unwrap();
-        assert_eq!(
-            execute(&ctx, hours(&every_day)).unwrap_err().code(),
-            "validation"
-        );
+        // And a list that has them cannot be put back on all week.
+        refused(hours(&every_day));
+        refused(Command::UpdateSchedule {
+            list_id: list.id,
+            slots: vec![],
+            always_active: true,
+        });
         assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
     }
 
