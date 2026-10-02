@@ -47,7 +47,11 @@ function OpenDialog({ onClose, title, icon, children, role, className }: Omit<Di
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
-    if (!dialog.open) dialog.showModal();
+    // WebKit before 15.4, which macOS before 12.3 gives the app, has no modal
+    // dialogs. Opened in place the form inside still works, and that beats an
+    // error that takes the whole window down.
+    if (typeof dialog.showModal !== "function") dialog.setAttribute("open", "");
+    else if (!dialog.open) dialog.showModal();
     dialog.querySelector<HTMLElement>("[data-autofocus]")?.focus();
     // `close()` hands the focus back; taking the element out of the page does
     // not, and this one is closed by unmounting.

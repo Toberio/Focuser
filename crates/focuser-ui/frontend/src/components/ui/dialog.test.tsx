@@ -81,6 +81,23 @@ it("gives the focus back to where it was when it closes", () => {
   expect(opener).toHaveFocus();
 });
 
+it("still shows what is in it where the browser has no modal dialogs", () => {
+  // WebKit before 15.4, which is what macOS before 12.3 gives the app.
+  const showModal = HTMLDialogElement.prototype.showModal;
+  Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+  try {
+    render(
+      <Dialog open title="Lock videos" onClose={vi.fn()}>
+        <p>Body</p>
+      </Dialog>,
+    );
+
+    expect(screen.getByText("Body")).toBeVisible();
+  } finally {
+    HTMLDialogElement.prototype.showModal = showModal;
+  }
+});
+
 it("puts the focus on the part that asks for it", () => {
   render(
     <Dialog open title="Unlock videos" onClose={vi.fn()}>
