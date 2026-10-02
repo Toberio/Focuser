@@ -26,6 +26,9 @@ base64 = "0.22"
 [target.'cfg(windows)'.dependencies]
 # Pinned to the version the rest of the workspace uses.
 windows = { version = "0.58", features = [
+    # NtQueryInformationProcess, to read a process command line without
+    # starting PowerShell for it.
+    "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
