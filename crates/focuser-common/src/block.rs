@@ -34,13 +34,14 @@ impl BlockList {
         exe_path: Option<&str>,
         window_title: Option<&str>,
     ) -> bool {
-        if !self.is_effectively_active() {
-            return false;
-        }
-
-        self.applications
-            .iter()
-            .any(|rule| rule.enabled && rule.matches_process(process_name, exe_path, window_title))
+        // The rules go first. This runs for every process on the machine every
+        // few seconds, nearly all of them match nothing, and working out the
+        // hours is by far the slower half.
+        self.enabled
+            && self.applications.iter().any(|rule| {
+                rule.enabled && rule.matches_process(process_name, exe_path, window_title)
+            })
+            && self.is_effectively_active()
     }
 
     fn is_excepted_domain(&self, domain: &str) -> bool {
