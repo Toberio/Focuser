@@ -178,6 +178,7 @@
   "settings_seconds_suffix": "segundos",
   "settings_section_extension": "Extensão",
   "settings_extension_description": "Onde a extensão do Focuser está instalada.",
+  "settings_extension_chromium": "Outros navegadores baseados em Chromium, como Vivaldi, Arc ou Ecosia, usam a versão da Chrome Web Store.",
   "settings_section_focus": "Sessões de foco",
   "settings_sound": "Som ao fim de uma fase",
   "settings_sound_description": "Um aviso sonoro quando o tempo de foco ou uma pausa termina, assim a janela pode ficar fechada.",

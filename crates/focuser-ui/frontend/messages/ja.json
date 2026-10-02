@@ -174,6 +174,7 @@
   "settings_seconds_suffix": "秒",
   "settings_section_extension": "拡張機能",
   "settings_extension_description": "Focuser 拡張機能がインストールされている場所です。",
+  "settings_extension_chromium": "Vivaldi、Arc、Ecosia など、ほかの Chromium ベースのブラウザーは Chrome ウェブストア版を使います。",
   "settings_section_focus": "集中セッション",
   "settings_sound": "フェーズ終了時に音を鳴らす",
   "settings_sound_description": "集中時間や休憩が終わるとチャイムが鳴るので、ウィンドウを閉じたままにできます。",

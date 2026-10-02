@@ -180,6 +180,7 @@
   "settings_seconds_suffix": "секунд",
   "settings_section_extension": "Расширение",
   "settings_extension_description": "Где установлено расширение Focuser.",
+  "settings_extension_chromium": "Другие браузеры на основе Chromium, например Vivaldi, Arc или Ecosia, используют версию из Chrome Web Store.",
   "settings_section_focus": "Сессии фокуса",
   "settings_sound": "Звук в конце этапа",
   "settings_sound_description": "Сигнал, когда заканчивается время фокуса или перерыв, чтобы окно можно было не открывать.",

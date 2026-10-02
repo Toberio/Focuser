@@ -178,6 +178,7 @@
   "settings_seconds_suffix": "secondi",
   "settings_section_extension": "Estensione",
   "settings_extension_description": "Dove è installata l'estensione Focuser.",
+  "settings_extension_chromium": "Gli altri browser basati su Chromium, come Vivaldi, Arc o Ecosia, usano la versione del Chrome Web Store.",
   "settings_section_focus": "Sessioni di concentrazione",
   "settings_sound": "Suono alla fine di una fase",
   "settings_sound_description": "Un rintocco quando finisce il tempo di concentrazione o una pausa, così la finestra può restare chiusa.",

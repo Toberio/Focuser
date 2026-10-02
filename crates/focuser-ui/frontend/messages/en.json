@@ -258,6 +258,7 @@
   "settings_seconds_suffix": "seconds",
   "settings_section_extension": "Extension",
   "settings_extension_description": "Where the Focuser extension is installed.",
+  "settings_extension_chromium": "Other Chromium-based browsers, such as Vivaldi, Arc or Ecosia, use the Chrome Web Store version.",
   "settings_section_focus": "Focus sessions",
   "settings_sound": "Sound when a phase ends",
   "settings_sound_description": "A chime when focus time or a break is over, so the window can stay closed.",

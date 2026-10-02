@@ -134,7 +134,7 @@ export function Settings() {
 
       <SettingsSection
         title={m.settings_section_extension()}
-        description={m.settings_extension_description()}
+        description={`${m.settings_extension_description()} ${m.settings_extension_chromium()}`}
         flush
       >
         <BrowserStatusList />

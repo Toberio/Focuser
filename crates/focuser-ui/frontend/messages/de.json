@@ -176,6 +176,7 @@
   "settings_seconds_suffix": "Sekunden",
   "settings_section_extension": "Erweiterung",
   "settings_extension_description": "Wo die Focuser-Erweiterung installiert ist.",
+  "settings_extension_chromium": "Andere Chromium-basierte Browser wie Vivaldi, Arc oder Ecosia nutzen die Version aus dem Chrome Web Store.",
   "settings_section_focus": "Fokussitzungen",
   "settings_sound": "Ton am Ende einer Phase",
   "settings_sound_description": "Ein Klang, wenn die Fokuszeit oder eine Pause vorbei ist, damit das Fenster geschlossen bleiben kann.",
