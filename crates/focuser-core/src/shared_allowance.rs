@@ -17,7 +17,7 @@ pub fn occurrence<T: TimeZone>(
     if !list.enabled || list.shared_allowance.as_ref()?.validate().is_err() {
         return None;
     }
-    list.schedule.as_ref()?.active_period_at(now)
+    list.occurrence_at(now)
 }
 
 pub fn active_at<T: TimeZone>(list: &BlockList, now: DateTime<T>) -> bool {
@@ -329,7 +329,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, NaiveTime, Weekday};
+    use chrono::{Datelike, Duration, NaiveTime, Weekday};
     use focuser_common::allowance::{Allowance, SharedAllowanceConfig};
     use focuser_common::types::{AppRule, Schedule, TimeSlot, WebsiteRule};
 
@@ -355,6 +355,15 @@ mod tests {
         });
         l.shared_allowance = Some(SharedAllowanceConfig { minutes: 1 });
         l
+    }
+    /// Hours that are running whenever the test is, for the code that reads the
+    /// real clock. Two days, so a run across midnight stays inside them.
+    fn running_now() -> Vec<TimeSlot> {
+        let today = Local::now().weekday();
+        [today, today.succ()]
+            .into_iter()
+            .map(|d| TimeSlot::new(d, NaiveTime::MIN, NaiveTime::MIN))
+            .collect()
     }
     fn tick(host: &str, secs: u32) -> AllowanceTick {
         AllowanceTick {
@@ -571,6 +580,27 @@ mod tests {
     }
 
     #[test]
+    fn hours_with_no_gap_give_no_shared_budget() {
+        let db = Database::open_in_memory().unwrap();
+        let mut l = list();
+        // One block that never ends would be one budget that never refills.
+        l.schedule.as_mut().unwrap().time_slots =
+            std::iter::successors(Some(Weekday::Mon), |d| Some(d.succ()))
+                .take(7)
+                .map(|d| TimeSlot::new(d, NaiveTime::MIN, NaiveTime::MIN))
+                .collect();
+        db.create_block_list(&l).unwrap();
+
+        assert!(!db.shared_status_at(&l, at(10, 0)).unwrap().unwrap().active);
+        assert!(!db.shared_permits_at(&l, at(10, 0)));
+        // The single-site allowances carry on as if there were no shared one.
+        assert!(
+            !db.ingest_shared_at(&tick("youtube.com", 20), at(10, 0))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn targets_share_one_budget_and_exhaustion_has_no_fallback() {
         let db = Database::open_in_memory().unwrap();
         let l = list();
@@ -681,18 +711,7 @@ mod tests {
     fn engine_keeps_exemptions_list_scoped_for_domains_and_apps() {
         let db = Database::open_in_memory().unwrap();
         let mut l = list();
-        l.schedule.as_mut().unwrap().time_slots = [
-            Weekday::Mon,
-            Weekday::Tue,
-            Weekday::Wed,
-            Weekday::Thu,
-            Weekday::Fri,
-            Weekday::Sat,
-            Weekday::Sun,
-        ]
-        .into_iter()
-        .map(|d| TimeSlot::new(d, NaiveTime::MIN, NaiveTime::MIN))
-        .collect();
+        l.schedule.as_mut().unwrap().time_slots = running_now();
         db.create_block_list(&l).unwrap();
         let mut engine = crate::BlockEngine::new(db).unwrap();
         assert!(engine.check_domain("youtube.com").is_none());
@@ -756,19 +775,7 @@ mod tests {
     fn paused_individual_usage_stays_intact_and_resumes_unrelated_usage_continues() {
         let db = Database::open_in_memory().unwrap();
         let mut l = list();
-        // All week, for the tracker's real-clock wrapper.
-        l.schedule.as_mut().unwrap().time_slots = [
-            Weekday::Mon,
-            Weekday::Tue,
-            Weekday::Wed,
-            Weekday::Thu,
-            Weekday::Fri,
-            Weekday::Sat,
-            Weekday::Sun,
-        ]
-        .into_iter()
-        .map(|d| TimeSlot::new(d, NaiveTime::MIN, NaiveTime::MIN))
-        .collect();
+        l.schedule.as_mut().unwrap().time_slots = running_now();
         db.create_block_list(&l).unwrap();
         let a = Allowance::new(AllowanceMatch::Domain("youtube.com".into()), 600, true);
         db.create_allowance(&a).unwrap();

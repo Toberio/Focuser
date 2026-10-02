@@ -1047,27 +1047,21 @@ mod tests {
     // ever reach anything that enforces them.
     #[test]
     fn shared_allowance_api_preserves_scopes_pauses_individuals_and_exhausts() {
-        use chrono::Weekday;
+        use chrono::Datelike;
         use focuser_common::types::{Schedule, TimeSlot};
         let state = ctx_with_extension(|db| {
             let mut list = BlockList::new("Shared");
             list.websites.push(WebsiteRule::domain("youtube.com"));
+            // Running now, and into tomorrow in case the test crosses midnight.
+            let today = chrono::Local::now().weekday();
             list.schedule = Some(Schedule {
                 id: list.id,
-                name: "Every day".into(),
+                name: "Today".into(),
                 enabled: true,
-                time_slots: [
-                    Weekday::Mon,
-                    Weekday::Tue,
-                    Weekday::Wed,
-                    Weekday::Thu,
-                    Weekday::Fri,
-                    Weekday::Sat,
-                    Weekday::Sun,
-                ]
-                .into_iter()
-                .map(|d| TimeSlot::new(d, chrono::NaiveTime::MIN, chrono::NaiveTime::MIN))
-                .collect(),
+                time_slots: [today, today.succ()]
+                    .into_iter()
+                    .map(|d| TimeSlot::new(d, chrono::NaiveTime::MIN, chrono::NaiveTime::MIN))
+                    .collect(),
             });
             list.shared_allowance =
                 Some(focuser_common::allowance::SharedAllowanceConfig { minutes: 1 });

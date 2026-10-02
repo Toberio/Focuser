@@ -87,6 +87,19 @@ impl BlockList {
         }
     }
 
+    /// The scheduled occurrence running at `now`, as (start, end). A schedule
+    /// with no gap has none: it never ends, so a lock or a budget tied to
+    /// "this occurrence" would never end or refill either.
+    pub fn occurrence_at<T: chrono::TimeZone>(
+        &self,
+        now: DateTime<T>,
+    ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        self.schedule
+            .as_ref()?
+            .active_period_at(now)
+            .filter(|(_, end)| *end != DateTime::<Utc>::MAX_UTC)
+    }
+
     pub fn scheduled_protection_at<T: chrono::TimeZone>(
         &self,
         now: DateTime<T>,
@@ -95,7 +108,7 @@ impl BlockList {
         if !self.enabled {
             return None;
         }
-        let (started_at, expires_at) = self.schedule.as_ref()?.active_period_at(now.clone())?;
+        let (started_at, expires_at) = self.occurrence_at(now.clone())?;
         if self
             .schedule_unlocked_until
             .is_some_and(|until| now.with_timezone(&Utc) < until)
@@ -122,11 +135,7 @@ impl BlockList {
         if self.scheduled_protection.is_none() {
             return ScheduledLockState::Off;
         }
-        if !self
-            .schedule
-            .as_ref()
-            .is_some_and(|s| s.active_period_at(now.clone()).is_some())
-        {
+        if self.occurrence_at(now.clone()).is_none() {
             return ScheduledLockState::Inactive;
         }
         // A separate manual commitment can still prohibit editing.
@@ -212,10 +221,7 @@ impl BlockList {
             }
             // An edit that keeps the schedule active continues this occurrence,
             // including an extension. An inactive edit ends the bypass immediately.
-            self.schedule
-                .as_ref()?
-                .active_period_at(now)
-                .map(|(_, end)| end)
+            self.occurrence_at(now).map(|(_, end)| end)
         });
     }
 }

@@ -252,6 +252,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                         enabled: true,
                     })
                 };
+                if list.scheduled_protection.is_some() || list.shared_allowance.is_some() {
+                    ensure_schedule_ends(list)?;
+                }
                 Ok(())
             })?;
             Ok(CommandResult::Unit)
@@ -357,6 +360,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             ensure_unprotected(&engine, list_id)?;
             let lock = prepare_lock(lock)?;
             let mut list = engine.db().get_block_list(list_id)?;
+            if enabled {
+                ensure_schedule_ends(&list)?;
+            }
             list.scheduled_protection =
                 enabled.then_some(focuser_common::types::ScheduledProtection { lock });
             list.updated_at = chrono::Utc::now();
@@ -374,6 +380,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 config.validate().map_err(CommandError::Validation)?;
             }
             let mut list = engine.db().get_block_list(list_id)?;
+            if config.is_some() {
+                ensure_schedule_ends(&list)?;
+            }
             list.shared_allowance = config;
             list.updated_at = chrono::Utc::now();
             engine.db().update_block_list(&list)?;
@@ -855,6 +864,20 @@ fn ensure_scheduled_unprotected(engine: &BlockEngine) -> CommandOutcome<()> {
     } else {
         Ok(())
     }
+}
+
+/// A scheduled lock and a shared allowance both last for one scheduled block.
+/// Hours that cover the whole week are a block with no end, so the lock would
+/// never open and the allowance would never refill.
+fn ensure_schedule_ends(list: &BlockList) -> CommandOutcome<()> {
+    if list.schedule.as_ref().is_some_and(Schedule::never_ends) {
+        return Err(CommandError::Validation(
+            "these hours cover the whole week, so a lock or a shared allowance on them would \
+             never end; leave a gap in the schedule"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Wholesale operations cannot replace or disable a protected list.
@@ -2154,6 +2177,49 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn hours_with_no_gap_cannot_carry_a_lock_or_a_shared_allowance() {
+        use chrono::{Datelike, NaiveTime, Weekday::*};
+        let ctx = ctx();
+        let list = create(&ctx, "Always");
+        let hours = |days: &[chrono::Weekday]| Command::UpdateSchedule {
+            list_id: list.id,
+            slots: days
+                .iter()
+                .map(|day| TimeSlot::new(*day, NaiveTime::MIN, NaiveTime::MIN))
+                .collect(),
+            always_active: false,
+        };
+        let lock = || Command::ConfigureScheduledProtection {
+            list_id: list.id,
+            enabled: true,
+            lock: None,
+        };
+        let share = || Command::ConfigureSharedAllowance {
+            list_id: list.id,
+            minutes: Some(30),
+        };
+        let every_day = [Mon, Tue, Wed, Thu, Fri, Sat, Sun];
+
+        // With no way to unlock, this lock would refuse quitting, uninstalling
+        // and editing for good.
+        execute(&ctx, hours(&every_day)).unwrap();
+        for refused in [lock(), share()] {
+            assert_eq!(execute(&ctx, refused).unwrap_err().code(), "validation");
+        }
+
+        // A day that is not today, so turning the lock on does not lock the test out.
+        let later = chrono::Local::now().weekday().succ().succ();
+        execute(&ctx, hours(&[later])).unwrap();
+        execute(&ctx, lock()).unwrap();
+        execute(&ctx, share()).unwrap();
+        assert_eq!(
+            execute(&ctx, hours(&every_day)).unwrap_err().code(),
+            "validation"
+        );
+        assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
     }
 
     #[test]

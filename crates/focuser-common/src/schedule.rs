@@ -8,6 +8,13 @@ impl Schedule {
         self.active_period_at(Local::now()).is_some()
     }
 
+    /// Whether the slots cover the whole week with no gap. That is simply
+    /// "always on": there is no occurrence that starts, and none that ends.
+    pub fn never_ends(&self) -> bool {
+        self.active_period_at(Local::now())
+            .is_some_and(|(_, end)| end == chrono::DateTime::<chrono::Utc>::MAX_UTC)
+    }
+
     /// Maximal continuous weekly occurrence, merging adjacent/overlapping slots.
     /// Slots that wrap midnight belong to their starting day.
     pub fn active_period_at<T: chrono::TimeZone>(
@@ -297,7 +304,15 @@ mod protection_tests {
             schedule.active_period_at(at(21, 12)),
             Some((at(21, 0), at(22, 0)))
         );
-        schedule.time_slots = [
+        schedule.time_slots = every_hour();
+        assert_eq!(
+            schedule.active_period_at(at(21, 12)).unwrap().1,
+            chrono::DateTime::<Utc>::MAX_UTC
+        );
+    }
+
+    fn every_hour() -> Vec<TimeSlot> {
+        [
             Weekday::Mon,
             Weekday::Tue,
             Weekday::Wed,
@@ -308,10 +323,23 @@ mod protection_tests {
         ]
         .into_iter()
         .map(|day| TimeSlot::new(day, NaiveTime::MIN, NaiveTime::MIN))
-        .collect();
-        assert_eq!(
-            schedule.active_period_at(at(21, 12)).unwrap().1,
-            chrono::DateTime::<Utc>::MAX_UTC
-        );
+        .collect()
+    }
+
+    #[test]
+    fn a_week_with_no_gap_is_always_on_and_never_a_lock() {
+        use crate::types::ScheduledLockState::Inactive;
+        // A lock "during the schedule" here would run until the year 262142,
+        // with quitting, uninstalling and editing all refused.
+        let mut list = list();
+        assert!(!list.schedule.as_ref().unwrap().never_ends());
+
+        list.schedule.as_mut().unwrap().time_slots = every_hour();
+        list.scheduled_protection = Some(ScheduledProtection { lock: None });
+
+        assert!(list.schedule.as_ref().unwrap().never_ends());
+        assert!(list.occurrence_at(at(21, 12)).is_none());
+        assert!(list.scheduled_protection_at(at(21, 12)).is_none());
+        assert_eq!(list.scheduled_lock_state_at(at(21, 12)), Inactive);
     }
 }
