@@ -254,9 +254,21 @@ export default defineBackground(() => {
     }
   }
 
+  /** Drop what was injected into a tab's earlier pages. */
+  function forgetTab(tabId: number) {
+    for (const key of recentInjections.keys()) {
+      if (key.startsWith(`${tabId}:`)) recentInjections.delete(key);
+    }
+  }
+
   browser.webNavigation.onCommitted.addListener(async (details) => {
     const to = destination(details);
-    if (to) await blockTab(details.tabId, to.hostname, to.url);
+    if (!to) return;
+    // This is a new page, and nothing has gone into it yet. Without this, a
+    // second visit within the dedup window got no block page: the site stayed
+    // hidden behind the early style, but loaded and able to play sound.
+    forgetTab(details.tabId);
+    await blockTab(details.tabId, to.hostname, to.url);
   });
 
   // Sites like YouTube move between pages without loading one, so an allowed
@@ -267,11 +279,7 @@ export default defineBackground(() => {
     if (to && match(rules, to.hostname, to.url)) void browser.tabs.reload(details.tabId);
   });
 
-  browser.tabs.onRemoved.addListener((tabId) => {
-    for (const key of recentInjections.keys()) {
-      if (key.startsWith(`${tabId}:`)) recentInjections.delete(key);
-    }
-  });
+  browser.tabs.onRemoved.addListener(forgetTab);
 
   browser.runtime.onMessage.addListener(
     (raw: unknown, sender, sendResponse: (reply: MessageReply) => void) => {

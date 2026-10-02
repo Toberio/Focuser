@@ -14,6 +14,10 @@ const RULES: RuleSet = {
   allowed_url_paths: ["youtube.com/@YouTube"],
 };
 
+/** Every script the worker put into a page. The block page is one of them. */
+let injected = vi.fn(async (_injection: { files?: string[] }) => undefined);
+const blockPages = () => injected.mock.calls.filter(([i]) => i.files?.includes("/block-page.js"));
+
 /** Start the background worker with `rules` already loaded. */
 async function start(rules: RuleSet = RULES) {
   const fetched = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) =>
@@ -27,9 +31,10 @@ async function start(rules: RuleSet = RULES) {
   // "idle" is someone watching a video: the screen is on, the hands are not.
   const noop = vi.fn(async () => undefined);
   const badge = vi.fn(async () => undefined);
+  injected = vi.fn(async (_injection: { files?: string[] }) => undefined);
   Object.assign(fakeBrowser, {
     action: { setBadgeText: badge, setBadgeBackgroundColor: noop, setTitle: noop },
-    scripting: { executeScript: noop },
+    scripting: { executeScript: injected },
     idle: { queryState: vi.fn(async () => "idle"), onStateChanged: { addListener: noop } },
   });
 
@@ -39,7 +44,13 @@ async function start(rules: RuleSet = RULES) {
   return fetched;
 }
 
-beforeEach(() => fakeBrowser.reset());
+beforeEach(() => {
+  fakeBrowser.reset();
+  // reset() leaves the navigation listeners behind, and every test starts its
+  // own worker. Left there, an earlier worker would answer these events too.
+  fakeBrowser.webNavigation.onCommitted.removeAllListeners();
+  fakeBrowser.webNavigation.onHistoryStateUpdated.removeAllListeners();
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe("moving between pages without a page load", () => {
@@ -62,6 +73,25 @@ describe("moving between pages without a page load", () => {
 
     await move("https://www.youtube.com/watch?v=abc");
     expect(reload).toHaveBeenCalledWith(7);
+  });
+});
+
+describe("opening a blocked site", () => {
+  const visit = (url: string, frameId = 0) =>
+    fakeBrowser.webNavigation.onCommitted.trigger({ tabId: 7, frameId, url } as never);
+
+  it("puts the block page into every new page, however soon the next one comes", async () => {
+    await start();
+
+    // The same site twice in a row, the way a quick reload does it. The second
+    // page used to get nothing: it was taken for a repeat of the first.
+    await visit("https://www.youtube.com/watch?v=abc");
+    await visit("https://www.youtube.com/watch?v=abc");
+    expect(blockPages()).toHaveLength(2);
+
+    // A frame inside the page is not a new page.
+    await visit("https://www.youtube.com/embed/abc", 3);
+    expect(blockPages()).toHaveLength(2);
   });
 });
 
