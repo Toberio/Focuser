@@ -6,8 +6,8 @@
 use focuser_common::allowance::Allowance;
 use focuser_common::host::canonical_host;
 use focuser_common::types::{
-    AppRule, BlockList, EntityId, ExceptionRule, Lock, Protection, Schedule, WebsiteMatchType,
-    WebsiteRule,
+    AppRule, BlockList, EntityId, ExceptionRule, ExceptionType, Lock, Protection, Schedule,
+    WebsiteMatchType, WebsiteRule,
 };
 use focuser_core::{BlockEngine, pomodoro};
 
@@ -200,7 +200,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         Command::AddException { list_id, exception } => {
             let created = ExceptionRule {
                 id: focuser_common::types::new_id(),
-                exception_type: exception,
+                exception_type: normalize_exception(exception)?,
                 enabled: true,
             };
             let out = created.clone();
@@ -923,6 +923,25 @@ fn normalize(match_type: &mut WebsiteMatchType) {
     }
 }
 
+/// An address with a path allows that page; anything else allows the site.
+/// Stored that way round, whichever kind the caller picked (#21).
+fn normalize_exception(exception: ExceptionType) -> CommandOutcome<ExceptionType> {
+    let (ExceptionType::Domain(typed) | ExceptionType::UrlPath(typed)) = &exception else {
+        return Ok(exception);
+    };
+    if let Some((host, page)) = exception.page() {
+        return Ok(ExceptionType::UrlPath(format!("{host}{page}")));
+    }
+
+    let host = canonical_host(typed);
+    if host.is_empty() {
+        return Err(CommandError::Validation(
+            "enter a domain or a page address".into(),
+        ));
+    }
+    Ok(ExceptionType::Domain(host))
+}
+
 /// Reject mutations to a block list whose protection window is still open.
 ///
 /// Centralised here on purpose. This check was previously duplicated inline in
@@ -943,7 +962,7 @@ mod tests {
     use crate::command::WebsiteRuleKind;
     use focuser_common::allowance::AllowanceMatch;
     use focuser_common::pomodoro::PomodoroConfig;
-    use focuser_common::types::{AppMatchType, ExceptionType, TimeSlot};
+    use focuser_common::types::{AppMatchType, TimeSlot};
     use focuser_core::Database;
 
     fn ctx() -> AppContext {
@@ -1295,6 +1314,36 @@ mod tests {
         )
         .unwrap();
         assert!(lists(&ctx)[0].exceptions.is_empty());
+    }
+
+    #[test]
+    fn an_exception_is_stored_as_a_site_or_as_a_page() {
+        let ctx = ctx();
+        let list = create(&ctx, "Sites");
+        let add = |typed: &str| {
+            let added = execute(
+                &ctx,
+                Command::AddException {
+                    list_id: list.id,
+                    exception: ExceptionType::Domain(typed.into()),
+                },
+            );
+            match added {
+                Ok(CommandResult::Exception(exc)) => Some(exc.exception_type),
+                _ => None,
+            }
+        };
+
+        // #21: a pasted address lost its path and allowed the whole site.
+        assert!(matches!(
+            add("https://www.youtube.com/@YouTube"),
+            Some(ExceptionType::UrlPath(page)) if page == "youtube.com/@YouTube"
+        ));
+        assert!(matches!(
+            add("https://WWW.Reddit.com/"),
+            Some(ExceptionType::Domain(host)) if host == "reddit.com"
+        ));
+        assert!(add("   ").is_none(), "nothing to allow");
     }
 
     #[test]

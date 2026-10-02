@@ -338,6 +338,7 @@
   "websites_no_lists_description": "Créez-en une d'abord sur la page Listes de blocage.",
   "exceptions_kind_local_files": "Fichiers locaux",
   "exceptions_intro": "Les exceptions restent accessibles même si une règle ci-dessus les bloquerait.",
+  "exceptions_page_hint": "Une adresse complète, comme reddit.com/r/programming, n'autorise que cette page et ce qui se trouve en dessous. Cela nécessite l'extension de navigateur.",
   "exceptions_allow": "Autoriser",
   "exceptions_value_label": "Valeur à autoriser",
   "exceptions_empty_title": "Aucune exception",

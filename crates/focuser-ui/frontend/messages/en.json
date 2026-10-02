@@ -418,6 +418,7 @@
   "websites_no_lists_description": "Create one on the Block Lists page first.",
   "exceptions_kind_local_files": "Local files",
   "exceptions_intro": "Exceptions stay reachable even when a rule above would block them.",
+  "exceptions_page_hint": "A full address, like reddit.com/r/programming, allows only that page and what is under it. That needs the browser extension.",
   "exceptions_allow": "Allow",
   "exceptions_value_label": "Value to allow",
   "exceptions_empty_title": "No exceptions",

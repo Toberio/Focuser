@@ -17,6 +17,8 @@ export interface RuleSet {
   block_entire_internet: boolean;
   allowed_domains: string[];
   allowed_wildcards?: string[];
+  /** Pages allowed on a site that is otherwise blocked, as `host/path`. */
+  allowed_url_paths?: string[];
   domain_categories?: Record<string, string>;
   version?: number;
 }
@@ -30,7 +32,14 @@ export interface CompiledRules {
   blockEverything: boolean;
   allowed: Set<string>;
   allowedWildcards: string[];
+  allowedPages: AllowedPage[];
   categories: Record<string, string>;
+}
+
+/** One allowed page: its canonical host and its lower-cased path. */
+export interface AllowedPage {
+  host: string;
+  page: string;
 }
 
 export const EMPTY_RULES: CompiledRules = {
@@ -41,6 +50,7 @@ export const EMPTY_RULES: CompiledRules = {
   blockEverything: false,
   allowed: new Set(),
   allowedWildcards: [],
+  allowedPages: [],
   categories: {},
 };
 
@@ -53,17 +63,15 @@ export const EMPTY_RULES: CompiledRules = {
  * assumption, and the two must agree or a rule silently misses.
  */
 export function canonicalHost(raw: string | null | undefined): string {
-  let host = String(raw ?? "")
+  const lowered = String(raw ?? "")
     .trim()
     .toLowerCase();
 
-  const scheme = host.indexOf("://");
-  if (scheme !== -1) host = host.slice(scheme + 3);
-
-  const at = host.indexOf("@");
-  if (at !== -1) host = host.slice(at + 1);
-
-  host = host.split(/[/?#]/)[0] ?? "";
+  // A scheme only counts at the very start, and the path goes before the
+  // credentials: an `@` after the first slash is part of the page
+  // (youtube.com/@name). The Rust side parses it the same way.
+  let host = lowered.replace(/^[a-z0-9+-]+:\/\//, "").split(/[/?#]/)[0] ?? "";
+  host = host.slice(host.lastIndexOf("@") + 1);
 
   const colon = host.lastIndexOf(":");
   if (colon > 0) host = host.slice(0, colon);
@@ -146,13 +154,44 @@ export function compile(rules: RuleSet | null): CompiledRules {
     blockEverything: rules.block_entire_internet ?? false,
     allowed: canonicalSet(rules.allowed_domains),
     allowedWildcards: rules.allowed_wildcards ?? [],
+    allowedPages: (rules.allowed_url_paths ?? []).flatMap(compilePage),
     categories: rules.domain_categories ?? {},
   };
 }
 
-export function isAllowed(rules: CompiledRules, hostname: string): boolean {
+/** `host/path` as the app sends it. An entry with no path is dropped. */
+function compilePage(entry: string): AllowedPage[] {
+  const slash = entry.indexOf("/");
+  const host = canonicalHost(entry);
+  if (slash === -1 || !host) return [];
+  return [{ host, page: entry.slice(slash).toLowerCase() }];
+}
+
+/**
+ * On the allowed page or under it. `/r/programming` covers
+ * `/r/programming/comments` but not `/r/programminghumor`, so the match has
+ * to end on a boundary.
+ */
+function onPage(allowed: AllowedPage, hostname: string, url: string): boolean {
+  const host = canonicalHost(hostname);
+  if (host !== allowed.host && !host.endsWith(`.${allowed.host}`)) return false;
+
+  let path: string;
+  try {
+    const parsed = new URL(url);
+    path = (parsed.pathname + parsed.search).toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!path.startsWith(allowed.page)) return false;
+  const next = path[allowed.page.length];
+  return next === undefined || "/?&".includes(next);
+}
+
+export function isAllowed(rules: CompiledRules, hostname: string, url = ""): boolean {
   if (setCovers(rules.allowed, hostname)) return true;
-  return rules.allowedWildcards.some((pattern) => matchHostWildcard(pattern, hostname));
+  if (rules.allowedWildcards.some((pattern) => matchHostWildcard(pattern, hostname))) return true;
+  return rules.allowedPages.some((page) => onPage(page, hostname, url));
 }
 
 /**
@@ -183,7 +222,7 @@ export function match(
   const host = canonicalHost(hostname);
   const lowerUrl = (url ?? "").toLowerCase();
 
-  if (isAllowed(rules, hostname)) return null;
+  if (isAllowed(rules, hostname, url)) return null;
   if (rules.blockEverything) return { reason: "everything", target: host };
   if (setCovers(rules.domains, host)) return { reason: "domain", target: host };
 

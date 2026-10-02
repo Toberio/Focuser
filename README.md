@@ -116,7 +116,7 @@ It speaks ten languages: English, Español, Français, Deutsch, Português, Ital
 - **Real application icons** - Blocked programs show their actual icon, read out of the executable on your own machine. Nothing is fetched from the internet to do it, because asking an icon service once per entry would hand over your entire block list.
 - **Pre-made block lists** - 1,207 domains across 13 categories (social media, games, gambling, news, adult, etc.) ready to import with one click. We did the research so you don't have to.
 - **Bulk import** - Drop a text file with 500 domains and they're all blocked in under a second. Also supports JSON.
-- **Exceptions (whitelist)** - Block all of reddit.com but keep r/programming? Add exceptions for specific domains that bypass your block rules.
+- **Exceptions (whitelist)** - Block all of reddit.com but keep r/programming? Add an exception for a whole domain, or paste a full address to allow just that page and what is under it. Page exceptions are enforced by the browser extension, since a hosts file cannot see a path.
 - **Keyword blocking** - Block any URL containing "game" or "shorts" or whatever your specific weakness is. We don't judge.
 - **Focus Lock** - Lock a block list for a set duration. Once locked, you can't disable it, delete it, or edit it until the timer runs out. For when you genuinely don't trust yourself.
 - **Pomodoro focus sessions** - Work for 25 minutes, break for 5, repeat — blocks toggle on and off automatically with each phase. After 4 work cycles you earn a longer break. Pick a preset (Classic, Long, Sprint) or set your own rhythm. The dashboard shows a live ring counting down with pause / skip / stop controls.

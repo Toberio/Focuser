@@ -432,9 +432,14 @@ export type ExceptionRule = {
 
 export type ExceptionType = 
 /**  Allow a specific domain even when other rules would block it */
-({ Domain: string }) & { Wildcard?: never } | 
+({ Domain: string }) & { UrlPath?: never; Wildcard?: never } | 
+/**
+ *  Allow one page, and what is under it, on a site that stays blocked:
+ *  `reddit.com/r/programming`. Only the extension can see a path.
+ */
+({ UrlPath: string }) & { Domain?: never; Wildcard?: never } | 
 /**  Allow a wildcard pattern */
-({ Wildcard: string }) & { Domain?: never } | 
+({ Wildcard: string }) & { Domain?: never; UrlPath?: never } | 
 /**  Allow local file:// URLs */
 "LocalFiles";
 

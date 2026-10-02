@@ -201,15 +201,29 @@ export default defineBackground(() => {
 
   // ─── Wiring ───────────────────────────────────────────────────────
 
-  browser.webNavigation.onCommitted.addListener(async (details) => {
-    if (details.frameId !== 0) return;
+  /** Where a main-frame navigation is going, if it is ours to judge. */
+  function destination(details: { frameId: number; url: string }) {
+    if (details.frameId !== 0) return null;
     try {
       const parsed = new URL(details.url);
-      if (isInternalUrl(parsed.protocol)) return;
-      await blockTab(details.tabId, parsed.hostname, details.url);
+      if (isInternalUrl(parsed.protocol)) return null;
+      return { hostname: parsed.hostname, url: details.url };
     } catch {
-      /* unparseable */
+      return null;
     }
+  }
+
+  browser.webNavigation.onCommitted.addListener(async (details) => {
+    const to = destination(details);
+    if (to) await blockTab(details.tabId, to.hostname, to.url);
+  });
+
+  // Sites like YouTube move between pages without loading one, so an allowed
+  // page would be a door to the rest of the site. Reloading makes it a real
+  // navigation: the block then replaces a page that has not started playing.
+  browser.webNavigation.onHistoryStateUpdated.addListener((details) => {
+    const to = destination(details);
+    if (to && match(rules, to.hostname, to.url)) void browser.tabs.reload(details.tabId);
   });
 
   browser.tabs.onRemoved.addListener((tabId) => {

@@ -65,6 +65,9 @@ pub struct ExtensionRuleSet {
     pub allowed_domains: Vec<String>,
     /// Wildcard patterns for exceptions.
     pub allowed_wildcards: Vec<String>,
+    /// Pages allowed on a site that is otherwise blocked, as `host/path`.
+    #[serde(default)]
+    pub allowed_url_paths: Vec<String>,
 }
 
 impl ExtensionRuleSet {
@@ -78,6 +81,7 @@ impl ExtensionRuleSet {
             block_entire_internet: false,
             allowed_domains: Vec::new(),
             allowed_wildcards: Vec::new(),
+            allowed_url_paths: Vec::new(),
         }
     }
 

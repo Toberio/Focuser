@@ -341,6 +341,7 @@
   "websites_no_lists_description": "Сначала создайте список на странице «Списки блокировки».",
   "exceptions_kind_local_files": "Локальные файлы",
   "exceptions_intro": "Исключения остаются доступными, даже если правило выше их бы заблокировало.",
+  "exceptions_page_hint": "Полный адрес, например reddit.com/r/programming, разрешает только эту страницу и всё, что под ней. Для этого нужно расширение для браузера.",
   "exceptions_allow": "Разрешить",
   "exceptions_value_label": "Что разрешить",
   "exceptions_empty_title": "Исключений нет",

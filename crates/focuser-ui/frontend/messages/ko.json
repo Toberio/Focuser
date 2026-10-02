@@ -332,6 +332,7 @@
   "websites_no_lists_description": "먼저 차단 목록 페이지에서 하나 만들어 주세요.",
   "exceptions_kind_local_files": "로컬 파일",
   "exceptions_intro": "위의 규칙이 차단하더라도 예외로 둔 항목은 계속 열 수 있습니다.",
+  "exceptions_page_hint": "reddit.com/r/programming처럼 전체 주소를 넣으면 그 페이지와 하위 페이지만 허용됩니다. 브라우저 확장 프로그램이 필요합니다.",
   "exceptions_allow": "허용",
   "exceptions_value_label": "허용할 값",
   "exceptions_empty_title": "예외가 없습니다",

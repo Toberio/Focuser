@@ -328,6 +328,7 @@
   "websites_no_lists_title": "Todavía no hay listas de bloqueo",
   "websites_no_lists_description": "Crea una primero en la página de Listas de bloqueo.",
   "exceptions_intro": "Las excepciones siguen siendo accesibles aunque una regla de arriba las bloquearía.",
+  "exceptions_page_hint": "Una dirección completa, como reddit.com/r/programming, permite solo esa página y lo que hay debajo. Para eso hace falta la extensión del navegador.",
   "exceptions_allow": "Permitir",
   "exceptions_value_label": "Valor que permitir",
   "exceptions_empty_title": "No hay excepciones",

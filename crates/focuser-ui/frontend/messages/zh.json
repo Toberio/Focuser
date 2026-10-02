@@ -332,6 +332,7 @@
   "websites_no_lists_description": "请先在“拦截列表”页面创建一个。",
   "exceptions_kind_local_files": "本地文件",
   "exceptions_intro": "即使上面的规则会拦截，例外仍然可以访问。",
+  "exceptions_page_hint": "填写完整地址（如 reddit.com/r/programming）只放行该页面及其下级页面。这需要浏览器扩展。",
   "exceptions_allow": "允许",
   "exceptions_value_label": "要允许的内容",
   "exceptions_empty_title": "没有例外",

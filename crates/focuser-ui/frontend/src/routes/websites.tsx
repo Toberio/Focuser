@@ -296,6 +296,7 @@ function ExceptionsTab({
             {m.exceptions_allow()}
           </Button>
         </form>
+        <p className="mt-3 text-muted-foreground text-xs">{m.exceptions_page_hint()}</p>
         <InlineError error={add.error} />
       </Card>
 

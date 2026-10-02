@@ -332,6 +332,7 @@
   "websites_no_lists_description": "先に「ブロックリスト」ページで作成してください。",
   "exceptions_kind_local_files": "ローカルファイル",
   "exceptions_intro": "上のルールがブロックする場合でも、例外にしたものは開けます。",
+  "exceptions_page_hint": "reddit.com/r/programming のように完全なアドレスを入れると、そのページとその配下だけが許可されます。ブラウザー拡張機能が必要です。",
   "exceptions_allow": "許可",
   "exceptions_value_label": "許可する内容",
   "exceptions_empty_title": "例外はありません",

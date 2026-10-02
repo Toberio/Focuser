@@ -49,7 +49,11 @@ impl BlockList {
                 return false;
             }
             match &exc.exception_type {
-                ExceptionType::Domain(d) => host_matches(d, domain),
+                // One page is not the whole domain. Only the extension can
+                // tell them apart, so at this level the domain stays blocked.
+                ExceptionType::Domain(d) | ExceptionType::UrlPath(d) => {
+                    exc.exception_type.page().is_none() && host_matches(d, domain)
+                }
                 ExceptionType::Wildcard(pattern) => wildcard_matches(pattern, domain),
                 ExceptionType::LocalFiles => false, // N/A for domain checks
             }
@@ -145,6 +149,25 @@ mod tests {
         assert!(list.should_block_domain("reddit.com"));
         assert!(!list.should_block_domain("example.com"));
         assert!(!list.should_block_domain("sub.example.com"));
+    }
+
+    #[test]
+    fn a_page_exception_does_not_free_the_whole_domain() {
+        // #21: the path was dropped, so allowing one subreddit allowed reddit.
+        let mut list = BlockList::new("Test");
+        list.websites.push(WebsiteRule::domain("youtube.com"));
+        list.websites.push(WebsiteRule::domain("reddit.com"));
+        // Typed as a domain, which is how lists from before 0.8.1 hold them.
+        for page in [
+            "https://www.youtube.com/@YouTube",
+            "reddit.com/r/programming",
+        ] {
+            list.exceptions
+                .push(crate::types::ExceptionRule::domain(page));
+        }
+
+        assert!(list.should_block_domain("youtube.com"));
+        assert!(list.should_block_domain("www.reddit.com"));
     }
 
     #[test]

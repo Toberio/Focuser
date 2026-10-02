@@ -158,10 +158,15 @@ impl BlockEngine {
                     continue;
                 }
                 match &exc.exception_type {
-                    ExceptionType::Domain(d) => {
-                        // Both forms, for the same reason as blocked domains —
-                        // an exception must release whichever one is listed.
-                        rules.allowed_domains.extend(hosts_entries(d));
+                    ExceptionType::Domain(d) | ExceptionType::UrlPath(d) => {
+                        match exc.exception_type.page() {
+                            Some((host, page)) => {
+                                rules.allowed_url_paths.push(format!("{host}{page}"));
+                            }
+                            // Both forms, for the same reason as blocked domains —
+                            // an exception must release whichever one is listed.
+                            None => rules.allowed_domains.extend(hosts_entries(d)),
+                        }
                     }
                     ExceptionType::Wildcard(pat) => {
                         rules.allowed_wildcards.push(pat.clone());
@@ -191,6 +196,8 @@ impl BlockEngine {
         rules.allowed_domains.dedup();
         rules.allowed_wildcards.sort();
         rules.allowed_wildcards.dedup();
+        rules.allowed_url_paths.sort();
+        rules.allowed_url_paths.dedup();
 
         // Stable content-based version hash. Only changes when rules actually
         // change — NOT on every call. This prevents the extension from treating
@@ -205,6 +212,7 @@ impl BlockEngine {
         rules.block_entire_internet.hash(&mut hasher);
         rules.allowed_domains.hash(&mut hasher);
         rules.allowed_wildcards.hash(&mut hasher);
+        rules.allowed_url_paths.hash(&mut hasher);
         rules.version = hasher.finish();
 
         rules
@@ -434,6 +442,27 @@ mod tests {
                     .contains(&"www.youtube.com".to_string())
             );
         }
+    }
+
+    #[test]
+    fn a_page_exception_is_sent_as_a_page_not_as_its_domain() {
+        // #21: the path was dropped and the whole of youtube.com was allowed.
+        let mut engine = engine_blocking("youtube.com");
+        let mut list = engine.block_lists()[0].clone();
+        for typed in ["https://www.youtube.com/@YouTube", "docs.youtube.com"] {
+            list.exceptions
+                .push(focuser_common::types::ExceptionRule::domain(typed));
+        }
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+
+        let rules = engine.compile_extension_rules();
+        assert_eq!(rules.allowed_url_paths, ["youtube.com/@YouTube"]);
+        assert_eq!(
+            rules.allowed_domains,
+            ["docs.youtube.com", "www.docs.youtube.com"]
+        );
+        assert!(engine.check_domain("youtube.com").is_some());
     }
 
     #[test]

@@ -338,6 +338,7 @@
   "websites_no_lists_description": "Crie uma primeiro na página Listas de bloqueio.",
   "exceptions_kind_local_files": "Arquivos locais",
   "exceptions_intro": "As exceções continuam acessíveis mesmo quando uma regra acima as bloquearia.",
+  "exceptions_page_hint": "Um endereço completo, como reddit.com/r/programming, libera só essa página e o que está abaixo dela. Isso precisa da extensão do navegador.",
   "exceptions_allow": "Permitir",
   "exceptions_value_label": "Valor a permitir",
   "exceptions_empty_title": "Nenhuma exceção",

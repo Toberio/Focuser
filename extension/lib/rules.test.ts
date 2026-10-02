@@ -159,6 +159,63 @@ describe("wildcard exceptions", () => {
   });
 });
 
+describe("page exceptions", () => {
+  // #21: allowing one page used to allow the whole site, because only the
+  // host of the address survived.
+  const blocked = (r: ReturnType<typeof rules>, url: string) =>
+    match(r, new URL(url).hostname, url) !== null;
+
+  it("releases the page and what is under it, and nothing else on the site", () => {
+    const r = rules({
+      blocked_domains: ["youtube.com", "reddit.com"],
+      allowed_url_paths: ["youtube.com/@YouTube", "reddit.com/r/programming"],
+    });
+
+    for (const url of [
+      "https://www.youtube.com/@YouTube",
+      "https://www.youtube.com/@youtube/videos",
+      "https://m.youtube.com/@YouTube?view=0",
+      "https://www.reddit.com/r/programming/",
+      "https://old.reddit.com/r/programming/comments/abc/title",
+    ]) {
+      expect(blocked(r, url), url).toBe(false);
+    }
+
+    for (const url of [
+      "https://www.youtube.com/",
+      "https://www.youtube.com/watch?v=abc",
+      "https://www.youtube.com/@YouTubeKids",
+      "https://www.youtube.com/feed/subscriptions",
+      "https://www.reddit.com/r/programminghumor",
+      "https://www.reddit.com/r/funny",
+    ]) {
+      expect(blocked(r, url), url).toBe(true);
+    }
+  });
+
+  it("can pin one exact address with a query", () => {
+    const r = rules({
+      blocked_domains: ["youtube.com"],
+      allowed_url_paths: ["youtube.com/watch?v=lecture"],
+    });
+    expect(blocked(r, "https://www.youtube.com/watch?v=lecture&t=10")).toBe(false);
+    expect(blocked(r, "https://www.youtube.com/watch?v=lecture2")).toBe(true);
+  });
+
+  it("beats blocking the entire internet", () => {
+    const r = rules({ block_entire_internet: true, allowed_url_paths: ["docs.test/guide"] });
+    expect(blocked(r, "https://docs.test/guide/start")).toBe(false);
+    expect(blocked(r, "https://docs.test/other")).toBe(true);
+    // The same path on another host is not the page that was allowed.
+    expect(blocked(r, "https://notdocs.test/guide")).toBe(true);
+  });
+
+  it("does not read an @ or a second scheme in the path as the host", () => {
+    expect(canonicalHost("https://www.youtube.com/@YouTube")).toBe("youtube.com");
+    expect(canonicalHost("example.com/login?next=https://other.com")).toBe("example.com");
+  });
+});
+
 describe("matchWildcard", () => {
   it("treats * as any run and ? as one character", () => {
     expect(matchWildcard("*.example.com", "mail.example.com")).toBe(true);

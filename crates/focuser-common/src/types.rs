@@ -221,10 +221,25 @@ impl AppRule {
 pub enum ExceptionType {
     /// Allow a specific domain even when other rules would block it
     Domain(String),
+    /// Allow one page, and what is under it, on a site that stays blocked:
+    /// `reddit.com/r/programming`. Only the extension can see a path.
+    UrlPath(String),
     /// Allow a wildcard pattern
     Wildcard(String),
     /// Allow local file:// URLs
     LocalFiles,
+}
+
+impl ExceptionType {
+    /// The host and page this allows, when it names a page rather than a
+    /// whole site. A `Domain` typed with a path counts, as lists from before
+    /// 0.8.1 hold those.
+    pub fn page(&self) -> Option<(String, String)> {
+        match self {
+            Self::Domain(v) | Self::UrlPath(v) => crate::host::host_and_page(v),
+            Self::Wildcard(_) | Self::LocalFiles => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
