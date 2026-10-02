@@ -350,7 +350,7 @@ fn find_matching_allowances(db: &Database, tick: &AllowanceTick) -> Result<Vec<A
 /// True iff an active Pomodoro session is currently in an *unpaused*
 /// Work phase. Pausing suspends the focus contract → allowance
 /// exceptions re-apply. Resuming reinstates the suspension.
-fn is_pomodoro_work_phase(db: &Database) -> bool {
+pub(crate) fn is_pomodoro_work_phase(db: &Database) -> bool {
     matches!(
         db.get_active_pomodoro_session(),
         Ok(Some(s)) if s.current_phase.is_work() && !s.is_paused()

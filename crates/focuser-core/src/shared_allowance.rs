@@ -255,11 +255,14 @@ impl Database {
         }))
     }
 
+    /// A Pomodoro work phase closes this door as it closes the other allowances.
     pub fn shared_permits_at<T: TimeZone>(&self, list: &BlockList, now: DateTime<T>) -> bool {
-        self.shared_status_at(list, now)
-            .ok()
-            .flatten()
-            .is_some_and(|s| s.active && s.remaining_secs > 0)
+        !crate::allowance::is_pomodoro_work_phase(self)
+            && self
+                .shared_status_at(list, now)
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.active && s.remaining_secs > 0)
     }
 
     /// Returns whether the individual allowance is suppressed, even on inactive
@@ -598,6 +601,28 @@ mod tests {
             !db.ingest_shared_at(&tick("youtube.com", 20), at(10, 0))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn a_pomodoro_work_phase_suspends_the_shared_allowance() {
+        use focuser_common::pomodoro::{PomodoroConfig, PomodoroSession};
+        let db = Database::open_in_memory().unwrap();
+        let l = list();
+        db.create_block_list(&l).unwrap();
+        assert!(db.shared_permits_at(&l, at(10, 0)));
+
+        let mut session = PomodoroSession::new(l.id, PomodoroConfig::CLASSIC, true);
+        db.create_pomodoro_session(&session).unwrap();
+        assert!(!db.shared_permits_at(&l, at(10, 0)));
+        // Blocked time is not spent time.
+        db.ingest_shared_at(&tick("youtube.com", 30), at(10, 1))
+            .unwrap();
+        assert_eq!(remaining(&db, &l, at(10, 1)), 60);
+
+        // A paused session has let go of the focus, same as for the other allowances.
+        session.paused_remaining_secs = Some(600);
+        db.update_pomodoro_session(&session).unwrap();
+        assert!(db.shared_permits_at(&l, at(10, 2)));
     }
 
     #[test]
