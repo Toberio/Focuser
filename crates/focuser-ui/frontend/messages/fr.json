@@ -273,6 +273,7 @@
   "allowances_title": "Quotas quotidiens",
   "allowances_description": "Un budget quotidien au lieu d'un blocage total. Une fois épuisé, le site ou l'application est bloqué pour le reste de la journée.",
   "allowances_schedule_note": "Une liste de blocage avec des horaires bloque quand même pendant ces heures, quel que soit le reste ici. Les quotas couvrent le temps en dehors.",
+  "allowances_locked": "Tant qu'un verrou est actif sur une liste, les quotas ne peuvent être ni ajoutés, ni modifiés, ni réinitialisés.",
   "allowances_kind_website": "Site web",
   "allowances_kind_application": "Application",
   "allowances_field_type": "Type",

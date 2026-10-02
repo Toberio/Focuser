@@ -19,6 +19,7 @@ import {
   useBrowserStatus,
   useCreateAllowance,
   useDeleteAllowance,
+  useProtectionStatus,
   useResetAllowanceToday,
   useUpdateAllowance,
 } from "@/lib/commands";
@@ -56,6 +57,10 @@ export function Allowances() {
     (a) => a.allowance.target.kind === "AppExecutable",
   );
   const appTimingBlind = hasAppAllowance && health.data?.app_usage_measurable === false;
+
+  // An allowance with time left opens its site on every list, so the backend
+  // refuses to add or change one while any list is locked.
+  const locked = (useProtectionStatus().data ?? []).some((p) => p.prevent_modification);
 
   const [kind, setKind] = useState<(typeof KINDS)[number]["value"]>("Domain");
   const [value, setValue] = useState("");
@@ -140,11 +145,17 @@ export function Allowances() {
             />
           </Labelled>
 
-          <Button type="submit" icon={<Plus />} disabled={!value.trim() || create.isPending}>
+          <Button
+            type="submit"
+            icon={<Plus />}
+            disabled={!value.trim() || create.isPending || locked}
+          >
             {create.isPending ? m.allowances_adding() : m.allowances_add()}
           </Button>
         </form>
-        <p className="mt-3 text-muted-foreground text-xs">{m.allowances_schedule_note()}</p>
+        <p className="mt-3 text-muted-foreground text-xs">
+          {locked ? m.allowances_locked() : m.allowances_schedule_note()}
+        </p>
         <InlineError error={create.error} />
       </Card>
 
@@ -163,7 +174,7 @@ export function Allowances() {
         ) : (
           <ul className="flex flex-col gap-2">
             {allowances.data?.map((status) => (
-              <AllowanceRow key={status.allowance.id} status={status} />
+              <AllowanceRow key={status.allowance.id} status={status} locked={locked} />
             ))}
           </ul>
         )}
@@ -172,7 +183,7 @@ export function Allowances() {
   );
 }
 
-function AllowanceRow({ status }: { status: AllowanceStatus }) {
+function AllowanceRow({ status, locked }: { status: AllowanceStatus; locked: boolean }) {
   const update = useUpdateAllowance();
   const reset = useResetAllowanceToday();
   const remove = useDeleteAllowance();
@@ -218,11 +229,13 @@ function AllowanceRow({ status }: { status: AllowanceStatus }) {
               max={1440}
               suffix="min"
               aria-describedby={`allowance-${a.id}-usage`}
+              disabled={locked}
             />
             <Switch
               checked={a.enabled}
               onCheckedChange={(enabled) => save({ enabled })}
               aria-label={m.allowances_enable({ target: a.target.value })}
+              disabled={locked}
             />
             <Tooltip content={m.allowances_reset_tooltip()}>
               <Button
@@ -230,6 +243,7 @@ function AllowanceRow({ status }: { status: AllowanceStatus }) {
                 size="icon"
                 aria-label={m.allowances_reset_for({ target: a.target.value })}
                 onClick={() => reset.mutate(a.id)}
+                disabled={locked}
               >
                 <RotateCcw />
               </Button>

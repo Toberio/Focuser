@@ -494,6 +494,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         }
 
         Command::RemoveBlocks => {
+            // "Unblock everything" is not on offer while a list is locked.
+            ensure_nothing_protected(&engine)?;
             // An empty domain set is how "unblock everything" is expressed —
             // the sync writes the list, so an empty list clears the section.
             ctx.sync_hosts_with(&[]);
@@ -579,6 +581,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             daily_limit_secs,
             strict_mode,
         } => {
+            // An allowance with time left exempts its target from every list,
+            // so adding, changing or resetting one could open a locked list.
+            ensure_nothing_protected(&engine)?;
             let allowance = Allowance::new(target, daily_limit_secs, strict_mode);
             allowance.validate().map_err(CommandError::Validation)?;
 
@@ -595,6 +600,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             strict_mode,
             enabled,
         } => {
+            ensure_nothing_protected(&engine)?;
             let mut allowance = engine
                 .db()
                 .get_allowance(id)?
@@ -617,6 +623,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         }
 
         Command::AllowanceResetToday { id } => {
+            ensure_nothing_protected(&engine)?;
             engine.db().reset_allowance_usage_today(id)?;
             // Rebuild clears the exhausted flag, so the target unblocks at once.
             ctx.allowance_tracker.rebuild_from_db(engine.db())?;
@@ -2099,6 +2106,50 @@ mod tests {
         set(&ctx, SETTING_CLOSE_BROWSERS, "false").unwrap();
         set(&ctx, SETTING_GRACE_PERIOD, "3600").unwrap();
         execute(&ctx, Command::ResetSettings).unwrap();
+    }
+
+    #[test]
+    fn a_lock_freezes_allowances_and_unblock_everything() {
+        let ctx = ctx();
+        let list = create(&ctx, "Deep Work");
+        let allow_youtube = || {
+            execute(
+                &ctx,
+                Command::AllowanceCreate {
+                    target: AllowanceMatch::Domain("youtube.com".into()),
+                    daily_limit_secs: 600,
+                    strict_mode: false,
+                },
+            )
+        };
+        // Made before the lock, so there is one to change and reset.
+        let CommandResult::Allowance(existing) = allow_youtube().unwrap() else {
+            panic!("expected the created allowance back");
+        };
+        protect(&ctx, list.id).unwrap();
+
+        // An allowance with time left exempts its site from every list, so
+        // making one was a way straight through a lock.
+        let loosening = [
+            allow_youtube(),
+            execute(
+                &ctx,
+                Command::AllowanceUpdate {
+                    id: existing.id,
+                    daily_limit_secs: 86_400,
+                    strict_mode: false,
+                    enabled: true,
+                },
+            ),
+            execute(&ctx, Command::AllowanceResetToday { id: existing.id }),
+            execute(&ctx, Command::RemoveBlocks),
+        ];
+        for attempt in loosening {
+            assert!(matches!(attempt, Err(CommandError::Protected)));
+        }
+
+        // Deleting one only takes an exemption away.
+        execute(&ctx, Command::AllowanceDelete { id: existing.id }).unwrap();
     }
 
     #[test]

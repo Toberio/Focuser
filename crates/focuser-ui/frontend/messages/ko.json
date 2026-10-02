@@ -267,6 +267,7 @@
   "allowances_title": "하루 사용량",
   "allowances_description": "완전히 차단하는 대신 하루 사용 시간을 정합니다. 다 쓰면 그날 남은 시간 동안 그 사이트나 앱이 차단됩니다.",
   "allowances_schedule_note": "시간대를 정한 차단 목록은 여기 남은 시간과 상관없이 그 시간에는 차단합니다. 사용량은 그 밖의 시간에 적용됩니다.",
+  "allowances_locked": "목록에 잠금이 걸려 있는 동안에는 사용량을 추가, 변경하거나 초기화할 수 없습니다.",
   "allowances_kind_website": "웹사이트",
   "allowances_kind_application": "애플리케이션",
   "allowances_field_type": "종류",

@@ -273,6 +273,7 @@
   "allowances_title": "Quote giornaliere",
   "allowances_description": "Un budget giornaliero invece di un blocco totale. Quando finisce, il sito o l'applicazione resta bloccato per il resto della giornata.",
   "allowances_schedule_note": "Una lista di blocco con orari blocca comunque in quelle ore, qualunque cosa resti qui. Le quote coprono il tempo al di fuori.",
+  "allowances_locked": "Finché c'è un blocco attivo su una lista, le quote non si possono aggiungere, modificare o azzerare.",
   "allowances_kind_website": "Sito web",
   "allowances_kind_application": "Applicazione",
   "allowances_field_type": "Tipo",
