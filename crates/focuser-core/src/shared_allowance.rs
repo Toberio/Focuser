@@ -214,9 +214,13 @@ impl Database {
         };
         intervals.push((from, to));
         intervals.sort_unstable();
+        // A gap of one second joins too. Reports come every few seconds and
+        // are stamped in whole seconds, so two that are back to back can land
+        // one second apart here. Left open, each such gap is a second of use
+        // that is never charged.
         let mut merged: Vec<(i64, i64)> = Vec::new();
         for (a, b) in intervals {
-            if let Some(last) = merged.last_mut().filter(|last| last.1 >= a) {
+            if let Some(last) = merged.last_mut().filter(|last| last.1 + 1 >= a) {
                 last.1 = last.1.max(b);
             } else {
                 merged.push((a, b));
@@ -672,6 +676,31 @@ mod tests {
         l.enabled = true;
         db.update_block_list(&l).unwrap();
         assert_eq!(remaining(&db, &l, at(10, 3)), 30);
+    }
+
+    #[test]
+    fn back_to_back_reports_charge_all_of_the_time() {
+        let db = Database::open_in_memory().unwrap();
+        let mut l = list();
+        l.shared_allowance.as_mut().unwrap().minutes = 10;
+        db.create_block_list(&l).unwrap();
+
+        // The extension reports the last two seconds, every two seconds. Cut to
+        // whole seconds, those reports arrive 1 and 3 seconds apart as often as
+        // 2 and 2. This is 18 seconds of use with no break in it.
+        for arrived in [2, 3, 6, 7, 10, 11, 14, 15, 18] {
+            db.ingest_shared_at(
+                &tick("youtube.com", 2),
+                at(10, 0) + Duration::seconds(arrived),
+            )
+            .unwrap();
+        }
+        assert_eq!(remaining(&db, &l, at(10, 1)), 600 - 18);
+
+        // A real break is still a break.
+        db.ingest_shared_at(&tick("youtube.com", 2), at(10, 0) + Duration::seconds(30))
+            .unwrap();
+        assert_eq!(remaining(&db, &l, at(10, 1)), 600 - 20);
     }
 
     #[test]

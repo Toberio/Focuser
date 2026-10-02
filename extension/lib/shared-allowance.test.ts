@@ -84,3 +84,13 @@ it("samples focused usage without charging startup, tab switches, idle, or sleep
   expect(tracker.sample("https://reddit.com/", 12000)).toBeNull();
   expect(tracker.sample("https://reddit.com/", 100000)).toBeNull();
 });
+it("counts a sample that comes a few milliseconds early as its full two seconds", () => {
+  // The timer is never exact. Cut down instead of rounded, half the samples
+  // counted one second for two, and a 30 minute allowance lasted about 39.
+  const tracker = new SharedActivity();
+  tracker.sample("https://youtube.com/", 0);
+  const counted = [1990, 4010, 5995, 8000, 9985]
+    .map((at) => tracker.sample("https://youtube.com/", at)?.seconds ?? 0)
+    .reduce((a, b) => a + b, 0);
+  expect(counted).toBe(10);
+});

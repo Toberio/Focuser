@@ -7,7 +7,9 @@ export class SharedActivity {
     const previous = this.previous;
     this.previous = url ? { url, at: now } : null;
     if (!previous) return null;
-    const seconds = Math.floor((now - previous.at) / 1000);
+    // Rounded, not cut. Samples come two seconds apart, give or take a few
+    // milliseconds, and cutting 1.99 down to 1 lost a quarter of the time.
+    const seconds = Math.round((now - previous.at) / 1000);
     if (seconds < 1 || seconds > 60) return null;
     return { url: previous.url, seconds };
   }
