@@ -19,7 +19,8 @@ const hit = (
   scopes: NonNullable<RuleSet["scopes"]>,
   host = "youtube.com",
   allowed: string[] = [],
-) => match(compile({ ...base(), scopes, allowed_domains: allowed }), host, `https://${host}/watch`);
+) =>
+  match(compile({ ...base(), scopes, allowance_domains: allowed }), host, `https://${host}/watch`);
 
 it("shared budget permits access only within its own list", () => {
   expect(hit([scope(true)])).toBeNull();
@@ -50,6 +51,14 @@ it("one list's exception cannot exempt another list", () => {
   const excepted = scope(true);
   excepted.rules.allowed_domains = ["youtube.com"];
   expect(hit([excepted, scope(null)])).not.toBeNull();
+});
+it("the flat exceptions are for an older extension and are not read with scopes", () => {
+  // The app sends every list's exceptions there. Read here, one list's
+  // exception would open a site that another list blocks.
+  const plain = scope(null);
+  plain.scheduled = false;
+  const rules = compile({ ...base(), scopes: [plain], allowed_domains: ["youtube.com"] });
+  expect(match(rules, "youtube.com", "https://youtube.com/watch")).not.toBeNull();
 });
 it("path rules only consume their scoped target", () => {
   const s = scope(false);

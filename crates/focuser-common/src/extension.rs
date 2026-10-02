@@ -72,6 +72,11 @@ pub struct ExtensionRuleSet {
     /// Pages allowed on a site that is otherwise blocked, as `host/path`.
     #[serde(default)]
     pub allowed_url_paths: Vec<String>,
+    /// Sites an allowance is keeping open, sent with `scopes`. They are in
+    /// `allowed_domains` too, but there they are mixed with every list's
+    /// exceptions, and scoped matching must tell the two apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowance_domains: Vec<String>,
 }
 
 impl ExtensionRuleSet {
@@ -87,6 +92,7 @@ impl ExtensionRuleSet {
             allowed_domains: Vec::new(),
             allowed_wildcards: Vec::new(),
             allowed_url_paths: Vec::new(),
+            allowance_domains: Vec::new(),
         }
     }
 

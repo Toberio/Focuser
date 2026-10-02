@@ -20,6 +20,8 @@ export interface RuleSet {
   allowed_wildcards?: string[];
   /** Pages allowed on a site that is otherwise blocked, as `host/path`. */
   allowed_url_paths?: string[];
+  /** Sites an allowance is keeping open. Sent with `scopes`. */
+  allowance_domains?: string[];
   domain_categories?: Record<string, string>;
   version?: number;
 }
@@ -35,6 +37,7 @@ export interface CompiledRules {
   allowed: Set<string>;
   allowedWildcards: string[];
   allowedPages: AllowedPage[];
+  allowances: Set<string>;
   categories: Record<string, string>;
 }
 
@@ -53,6 +56,7 @@ export const EMPTY_RULES: CompiledRules = {
   allowed: new Set(),
   allowedWildcards: [],
   allowedPages: [],
+  allowances: new Set(),
   categories: {},
 };
 
@@ -164,6 +168,7 @@ export function compile(rules: RuleSet | null): CompiledRules {
     allowed: canonicalSet(rules.allowed_domains),
     allowedWildcards: rules.allowed_wildcards ?? [],
     allowedPages: (rules.allowed_url_paths ?? []).flatMap(compilePage),
+    allowances: canonicalSet(rules.allowance_domains),
     categories: rules.domain_categories ?? {},
   };
 }
@@ -227,6 +232,9 @@ export function match(rules: CompiledRules, hostname: string, url: string): Bloc
   const host = canonicalHost(hostname);
   const lowerUrl = (url ?? "").toLowerCase();
 
+  // With scopes, each list brings its own exceptions. The flat ones are every
+  // list's mixed together, for an extension older than this one, so only the
+  // allowances are read from the top level here.
   if (rules.scopes?.length) {
     const applicable = rules.scopes
       .map((s) => ({ ...s, hit: match(s.rules, hostname, url) }))
@@ -234,7 +242,7 @@ export function match(rules: CompiledRules, hostname: string, url: string): Bloc
     const shared = applicable.some((s) => s.sharedPermits !== null);
     for (const scope of applicable) {
       if (scope.sharedPermits === true) continue;
-      if (!shared && !scope.scheduled && isAllowed(rules, hostname, url)) continue;
+      if (!shared && !scope.scheduled && setCovers(rules.allowances, hostname)) continue;
       return scope.hit;
     }
     return null;

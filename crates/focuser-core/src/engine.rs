@@ -219,8 +219,10 @@ impl BlockEngine {
         rules.allowed_url_paths.sort();
         rules.allowed_url_paths.dedup();
 
-        // Keep the old payload unchanged when no shared occurrence is active.
-        // The fallback rules remain blocking for extensions predating scopes.
+        // Scopes are added only while a shared occurrence is running. The flat
+        // fields above stay as they always were, exceptions included, because an
+        // extension that predates scopes reads nothing else. It keeps blocking
+        // what a shared allowance would open, which is the safe side.
         if self
             .cached_lists
             .iter()
@@ -267,10 +269,9 @@ impl BlockEngine {
                         scheduled: has_hours(list),
                     });
             }
-            // Scoped matching must not promote one list's exceptions globally.
-            rules.allowed_domains = extra_allowed_domains.to_vec();
-            rules.allowed_wildcards.clear();
-            rules.allowed_url_paths.clear();
+            // Scoped matching keeps each list's exceptions to that list, so the
+            // allowances travel on their own instead of in the flat exceptions.
+            rules.allowance_domains = extra_allowed_domains.to_vec();
         }
 
         // Stable content-based version hash. Only changes when rules actually
@@ -287,6 +288,7 @@ impl BlockEngine {
         rules.allowed_domains.hash(&mut hasher);
         rules.allowed_wildcards.hash(&mut hasher);
         rules.allowed_url_paths.hash(&mut hasher);
+        rules.allowance_domains.hash(&mut hasher);
         serde_json::to_string(&rules.scopes)
             .unwrap_or_default()
             .hash(&mut hasher);

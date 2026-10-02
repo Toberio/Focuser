@@ -740,6 +740,37 @@ mod tests {
     }
 
     #[test]
+    fn an_older_extension_keeps_its_exceptions_while_a_shared_block_runs() {
+        use focuser_common::types::ExceptionRule;
+        let db = Database::open_in_memory().unwrap();
+        let mut l = list();
+        l.schedule.as_mut().unwrap().time_slots = running_now();
+        l.exceptions
+            .push(ExceptionRule::domain("music.youtube.com"));
+        l.exceptions
+            .push(ExceptionRule::wildcard("*.wikipedia.org"));
+        l.exceptions
+            .push(ExceptionRule::domain("reddit.com/r/rust"));
+        db.create_block_list(&l).unwrap();
+        let engine = crate::BlockEngine::new(db).unwrap();
+
+        let rules = engine.compile_extension_rules_with_exceptions(&["news.com".into()]);
+        assert_eq!(rules.scopes.len(), 1);
+
+        // An extension from before scopes reads only these. They used to be
+        // emptied here, so every site the user had excepted got blocked.
+        assert!(rules.allowed_domains.contains(&"music.youtube.com".into()));
+        assert!(rules.allowed_domains.contains(&"news.com".into()));
+        assert_eq!(rules.allowed_wildcards, ["*.wikipedia.org"]);
+        assert_eq!(rules.allowed_url_paths, ["reddit.com/r/rust"]);
+
+        // One that knows scopes takes the exceptions from the list they belong
+        // to, and the allowances from their own field.
+        assert_eq!(rules.allowance_domains, ["news.com"]);
+        assert_eq!(rules.scopes[0].rules.allowed_domains, ["music.youtube.com"]);
+    }
+
+    #[test]
     fn another_list_blocks_access_and_prevents_spending() {
         let db = Database::open_in_memory().unwrap();
         let l = list();
