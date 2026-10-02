@@ -74,6 +74,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         }
 
         // Refresh engine cache (every ~3s)
+        let mut watch_uninstalls = false;
         if let Ok(mut eng) = state.engine.lock() {
             let _ = eng.refresh();
 
@@ -121,12 +122,8 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
             // Also kill apps whose allowance is exhausted today.
             kill_allowance_blocked_apps(&state.allowance_tracker, &eng);
 
-            // Uninstall protection. Only while a lock actually asks for it —
-            // scanning command lines is expensive and this is the one case
-            // that justifies it.
-            if eng.has_uninstall_protection() {
-                block_uninstall_attempts(&mut cleared_processes);
-            }
+            // Uninstall protection. Only while a lock actually asks for it.
+            watch_uninstalls = eng.has_uninstall_protection();
 
             // Browser extension enforcement. Settings are read on every heavy
             // tick so a change in the UI applies without restarting the app.
@@ -135,6 +132,14 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
                 let has_active_blocks = eng.block_lists().iter().any(|l| l.is_effectively_active());
                 enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
             }
+        }
+
+        // After the engine lock is released, never inside it. Every command
+        // from the window and every request from the extension waits for that
+        // lock, and reading command lines is the one step here whose cost
+        // depends on what else the machine is running.
+        if watch_uninstalls {
+            block_uninstall_attempts(&mut cleared_processes);
         }
     }
 }
@@ -247,7 +252,7 @@ fn block_uninstall_attempts(cleared: &mut HashSet<(u32, String)>) {
 }
 
 /// `cleared` remembers processes already read and found harmless: a command
-/// line never changes, and on Windows each read starts PowerShell (#12).
+/// line never changes, and on macOS each read starts `ps` (#12).
 fn uninstall_attempts(
     procs: &[process::Process],
     cleared: &mut HashSet<(u32, String)>,
