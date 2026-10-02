@@ -27,15 +27,17 @@ export function SharedAllowanceControl({ list }: { list: BlockList }) {
     protection.data?.some((p) => p.block_list_id === list.id && p.prevent_modification);
   const scheduled = !!list.schedule?.enabled && !!list.schedule.time_slots.length;
   const save = (minutes: number | null) => configure.mutate({ listId: list.id, minutes });
+  // Block Lists shows this once per list, so the name says which one.
+  const label = `${m.shared_allowance_label()}: ${list.name}`;
 
   return (
-    <section className="border-border border-t p-4" aria-label={m.shared_allowance_label()}>
+    <section className="border-border border-t p-4" aria-label={label}>
       <div className="flex flex-wrap items-center gap-3">
         <Switch
           checked={!!config}
           disabled={disabled || (!config && !scheduled)}
           onCheckedChange={(on) => save(on ? 30 : null)}
-          aria-label={m.shared_allowance_label()}
+          aria-label={label}
         />
         <span className="font-medium">{m.shared_allowance_label()}</span>
         {config && (

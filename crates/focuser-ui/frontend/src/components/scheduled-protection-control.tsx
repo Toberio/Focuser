@@ -84,6 +84,8 @@ export function ScheduledProtectionControl({
       : summaryKind === "password"
         ? m.lists_lock_kind_password()
         : m.schedule_lock_none_summary();
+  // Block Lists shows this once per list, so the name says which one.
+  const label = `${m.schedule_protection_label()}: ${list.name}`;
   const labels = {
     off: m.schedule_lock_off,
     inactive: m.schedule_lock_inactive,
@@ -92,11 +94,11 @@ export function ScheduledProtectionControl({
   };
 
   return (
-    <section className="border-border border-t p-4" aria-label={m.schedule_protection_label()}>
+    <section className="border-border border-t p-4" aria-label={label}>
       <div className="flex flex-wrap items-center gap-3">
         <Switch
           checked={enabled}
-          aria-label={m.schedule_protection_label()}
+          aria-label={label}
           disabled={
             !state ||
             protection.isPending ||

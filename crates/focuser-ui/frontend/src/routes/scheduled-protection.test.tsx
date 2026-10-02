@@ -179,7 +179,7 @@ beforeEach(() => {
 
 it("shared allowance toggle and duration persist immediately on Block Lists", async () => {
   show();
-  const control = () => page("lists").getByRole("switch", { name: "Shared allowance" });
+  const control = () => page("lists").getByRole("switch", { name: "Shared allowance: Weekly" });
   await waitFor(() => expect(control()).toBeEnabled());
   fireEvent.click(control());
   await waitFor(() => expect(stored.shared_allowance?.minutes).toBe(30));
@@ -215,7 +215,7 @@ it("shared configuration is disabled while protected and hides stale inactive us
   state = "locked";
   show();
   await page("lists").findByText("LOCKED");
-  expect(page("lists").getByRole("switch", { name: "Shared allowance" })).toBeDisabled();
+  expect(page("lists").getByRole("switch", { name: "Shared allowance: Weekly" })).toBeDisabled();
   expect(
     page("lists").getByRole("spinbutton", { name: "Shared allowance minutes" }),
   ).toBeDisabled();
@@ -251,7 +251,8 @@ function show(
   );
 }
 const page = (name: string) => within(screen.getByTestId(name));
-const toggle = (name: string) => page(name).getByRole("switch", { name: "Lock during schedule" });
+const toggle = (name: string) =>
+  page(name).getByRole("switch", { name: "Lock during schedule: Weekly" });
 
 it("Block Lists owns configuration while Schedule shows a compact default summary", async () => {
   show();
@@ -306,7 +307,7 @@ it("Manage lock settings navigates to Block Lists", async () => {
   );
   fireEvent.click(await screen.findByRole("link", { name: "Manage lock settings" }));
   expect(await screen.findByRole("combobox", { name: "Unlock method" })).toBeVisible();
-  expect(screen.getByRole("switch", { name: "Shared allowance" })).toBeVisible();
+  expect(screen.getByRole("switch", { name: "Shared allowance: Weekly" })).toBeVisible();
 });
 
 it.each(["lists", "schedule"])(
