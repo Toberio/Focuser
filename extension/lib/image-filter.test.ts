@@ -1,97 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  type FilterLevel,
-  formatScores,
-  isExplicit,
-  MIN_SIDE,
-  type Prediction,
-  ScoreCache,
-  scoresOf,
-  sourceKind,
-  worthChecking,
-} from "./image-filter";
-
-const scores = (s: Partial<Record<string, number>>): Prediction[] =>
-  Object.entries(s).map(([className, probability]) => ({ className, probability: probability ?? 0 }));
-
-const LEVELS: FilterLevel[] = ["explicit", "balanced", "strict"];
-
-describe("isExplicit", () => {
-  const hiddenAt = (nsfw: number, s: Partial<Record<string, number>> = {}) =>
-    LEVELS.filter((level) => isExplicit({ nsfw, ...scoresOf(scores(s)) }, level));
-
-  it("hides what the ViT is sure of at every level", () => {
-    expect(hiddenAt(0.9)).toEqual(LEVELS);
-  });
-
-  it("hides what the ViT is less sure of only at stricter levels", () => {
-    expect(hiddenAt(0.8)).toEqual(["balanced", "strict"]);
-    expect(hiddenAt(0.7)).toEqual(["strict"]);
-  });
-
-  it("shows what both models call safe", () => {
-    expect(hiddenAt(0.06, { Neutral: 0.95 })).toEqual([]);
-  });
-
-  it("needs NSFWJS to agree when the ViT is unsure", () => {
-    // Real scores: glossy abstract art the ViT half-suspected.
-    expect(hiddenAt(0.48, { Porn: 0.02, Neutral: 0.98 })).toEqual([]);
-    expect(hiddenAt(0.48, { Porn: 0.3, Neutral: 0.7 })).toEqual(["balanced", "strict"]);
-  });
-
-  it("shows what NSFWJS calls porn with no suggestive grade at all", () => {
-    // Real scores: two abstract wallpapers and an ordinary picture.
-    expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual([]);
-    expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual([]);
-    expect(hiddenAt(0.05, { Porn: 0.69, Sexy: 0.03, Neutral: 0.28 })).toEqual([]);
-  });
-
-  it("hides at strict what only NSFWJS sees", () => {
-    // Real scores from images that slipped through on a feed.
-    expect(hiddenAt(0.11, { Porn: 0.79, Sexy: 0.14, Neutral: 0.07 })).toEqual(["strict"]);
-    expect(hiddenAt(0.1, { Sexy: 0.98, Neutral: 0.02 })).toEqual(["balanced", "strict"]);
-    expect(hiddenAt(0.09, { Sexy: 0.98, Neutral: 0.02 })).toEqual(["balanced", "strict"]);
-  });
-
-  it("catches suggestive pictures, which the ViT calls safe", () => {
-    // Real scores: a cleavage shot that should be hidden at strict.
-    expect(hiddenAt(0.13, { Porn: 0.03, Sexy: 0.41, Neutral: 0.56 })).toEqual(["strict"]);
-    expect(hiddenAt(0.2, { Sexy: 0.8, Neutral: 0.2 })).toEqual(["balanced", "strict"]);
-  });
-
-  it("leaves a suggestive grade alone below strict when the ViT is sure it is safe", () => {
-    expect(hiddenAt(0.06, { Sexy: 0.7, Neutral: 0.3 })).toEqual(["strict"]);
-  });
-
-  it("does not count suggestive at the explicit-only level", () => {
-    expect(hiddenAt(0.65, { Sexy: 0.9 })).not.toContain("explicit");
-    expect(hiddenAt(0.65, { Porn: 0.4 })).toContain("explicit");
-  });
-
-  it("hides at a level everything the level below it hides", () => {
-    for (let nsfw = 0; nsfw <= 1; nsfw += 0.05) {
-      for (let p = 0; p <= 1; p += 0.1) {
-        for (let s = 0; s <= 1 - p; s += 0.1) {
-          const hidden = hiddenAt(nsfw, { Porn: p, Sexy: s });
-          const first = hidden[0] ? LEVELS.indexOf(hidden[0]) : LEVELS.length;
-          expect(hidden).toEqual(LEVELS.slice(first));
-        }
-      }
-    }
-  });
-});
-
-describe("formatScores", () => {
-  it("shows every score and where it ran", () => {
-    expect(
-      formatScores({
-        nsfw: 0.123,
-        ...scoresOf(scores({ Porn: 0.1, Hentai: 0.05, Sexy: 0.333 })),
-        backend: "webgl",
-      }),
-    ).toBe("vit 0.12 · explicit 0.15 · suggestive 0.33 · webgl");
-  });
-});
+import { MIN_SIDE, sourceKind, VerdictCache, worthChecking } from "./image-filter";
 
 describe("worthChecking", () => {
   const big = { width: 800, height: 600 };
@@ -115,7 +23,7 @@ describe("worthChecking", () => {
 });
 
 describe("sourceKind", () => {
-  it("lets the classifier fetch web images", () => {
+  it("lets the background fetch web images", () => {
     expect(sourceKind("https://cdn.example.com/a.jpg")).toBe("url");
     expect(sourceKind("http://example.com/a.webp?x=1")).toBe("url");
   });
@@ -134,16 +42,21 @@ describe("sourceKind", () => {
   });
 });
 
-describe("ScoreCache", () => {
+describe("VerdictCache", () => {
   it("drops the least recently used entry", () => {
-    const cache = new ScoreCache(2);
-    const s = { nsfw: 0, explicit: 0, suggestive: 0 };
-    cache.set("a", s);
-    cache.set("b", s);
+    const cache = new VerdictCache(2);
+    cache.set("a", { verdict: "clear" });
+    cache.set("b", { verdict: "hidden" });
     cache.get("a");
-    cache.set("c", s);
-    expect(cache.get("a")).toBe(s);
+    cache.set("c", { verdict: "clear" });
+    expect(cache.get("a")?.verdict).toBe("clear");
     expect(cache.get("b")).toBeUndefined();
     expect(cache.size).toBe(2);
+  });
+
+  it("does not remember failures, so they are retried", () => {
+    const cache = new VerdictCache();
+    cache.set("a", { verdict: "error" });
+    expect(cache.get("a")).toBeUndefined();
   });
 });

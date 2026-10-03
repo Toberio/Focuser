@@ -3,6 +3,7 @@ import {
   clampIncrement,
   detectBrowser,
   fetchRules,
+  imageVerdict,
   isIncognitoAllowed,
   POLL_INTERVAL_MS,
   reportBlocked,
@@ -28,7 +29,7 @@ import {
   type RuleSet,
   trackingKey,
 } from "@/lib/rules";
-import { type FilterLevel, formatScores, isExplicit, type Judgement } from "@/lib/image-filter";
+import { type FilterLevel, type Judgement, MAX_CACHE_KEY, VerdictCache } from "@/lib/image-filter";
 import type { BlockContext, Message, MessageReply } from "@/lib/messages";
 import { isTappable, MAX_IMAGE_BYTES, ResponseTap } from "@/lib/response-tap";
 import { SharedActivity } from "@/lib/shared-activity";
@@ -46,7 +47,6 @@ const INJECTION_DEDUP_MS = 1_500;
 const REPORT_DEDUP_MS = 5_000;
 const IMAGE_FILTER_ID = "focuser-image-filter";
 const IMAGE_FILTER_SCRIPT = "/content-scripts/image-filter.js";
-const CLASSIFIER_PAGE = "/classifier.html";
 
 export default defineBackground(() => {
   const browserName: BrowserName = detectBrowser();
@@ -268,11 +268,11 @@ export default defineBackground(() => {
           ids: [IMAGE_FILTER_ID],
         });
         // Load the model before the first page asks, not when it does.
-        if (on) void ensureClassifier().catch(() => undefined);
         const tabs = await browser.tabs.query({});
         if (on === registered.length > 0) {
           // Still on, at another level: what was cleared may not be now.
           if (on && previous !== null && previous !== level) {
+            verdicts.clear();
             for (const tab of tabs) {
               if (tab.id === undefined) continue;
               browser.tabs
@@ -310,7 +310,6 @@ export default defineBackground(() => {
             if (tab.id === undefined) continue;
             browser.tabs.sendMessage(tab.id, { type: "image-filter-off" }).catch(() => undefined);
           }
-          await closeClassifier();
         }
       } catch {
         // Retried on the next rules change; the poll keeps coming.
@@ -390,85 +389,47 @@ export default defineBackground(() => {
       );
   }
 
-  let classifierFrame: HTMLIFrameElement | null = null;
-  let openingClassifier: Promise<void> | null = null;
+  /** Verdicts by level and URL, so a picture seen in many tabs is judged once. */
+  const verdicts = new VerdictCache();
 
-  /**
-   * Start the classifier page if it is not running.
-   *
-   * Chrome's service worker has no DOM, so the page is an offscreen document.
-   * Firefox has no offscreen API, but its background is a page and can hold
-   * the classifier in a frame.
-   */
-  function ensureClassifier(): Promise<void> {
-    openingClassifier ??= (async () => {
-      const url = browser.runtime.getURL(CLASSIFIER_PAGE as never);
-      if (browser.offscreen) {
-        const open = await browser.runtime.getContexts({
-          contextTypes: ["OFFSCREEN_DOCUMENT" as never],
-          documentUrls: [url],
-        });
-        if (open.length > 0) return;
-        await browser.offscreen.createDocument({
-          url,
-          reasons: ["BLOBS" as never],
-          justification:
-            "Decodes images and runs an on-device classifier to hide explicit images.",
-        });
-      } else if (!classifierFrame?.isConnected) {
-        const frame = document.createElement("iframe");
-        frame.src = url;
-        const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
-        document.body.appendChild(frame);
-        classifierFrame = frame;
-        await loaded;
-      }
-    })().finally(() => {
-      openingClassifier = null;
-    });
-    return openingClassifier;
-  }
-
-  async function closeClassifier() {
-    classifierFrame?.remove();
-    classifierFrame = null;
-    if (browser.offscreen) await browser.offscreen.closeDocument().catch(() => undefined);
+  /** The image itself: the page's own download where Firefox shared it, else fetched. */
+  async function imageBytes(src: string): Promise<{ bytes: ArrayBuffer; via: string } | null> {
+    if (tap && src.startsWith("http")) {
+      // The page asks once the image has loaded, so it has nearly always
+      // finished streaming.
+      const tapped = await tap.take(src, 1_500);
+      if (tapped) return { bytes: tapped, via: "tap" };
+    }
+    try {
+      // `force-cache` reuses this profile's copy where there is one. A
+      // service worker may fetch any origin it has host permission for.
+      const response = await fetch(src, { cache: "force-cache", credentials: "include" });
+      if (!response.ok) return null;
+      return { bytes: await response.arrayBuffer(), via: src.startsWith("data:") ? "copy" : "fetch" };
+    } catch {
+      return null;
+    }
   }
 
   async function classifyImage(src: string): Promise<Judgement> {
     // A tab that has not heard the filter went off yet: nothing to hide.
     const level = imageFilter;
     if (level === null) return { verdict: "clear" };
+    const key = `${level}|${src}`;
+    const cacheable = src.length <= MAX_CACHE_KEY;
+    const known = cacheable ? verdicts.get(key) : undefined;
+    if (known) return known;
+
     const started = performance.now();
-    // The page's own download, when Firefox let us copy it. The page asks
-    // once the image has loaded, so it has nearly always finished streaming.
-    const bytes = tap && src.startsWith("http") ? await tap.take(src, 1_500) : null;
-    // The page's listener may not be up the moment the page is, so a refused
-    // first message is retried rather than taken as an answer.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        await ensureClassifier();
-        const reply = (await browser.runtime.sendMessage({
-          type: "classifier-run",
-          src,
-          ...(bytes ? { bytes } : {}),
-        })) as
-          | Extract<MessageReply, { type: "classifier-run" }>
-          | undefined;
-        if (reply?.type === "classifier-run") {
-          if (!reply.scores) return { verdict: "error" };
-          const ms = Math.round(performance.now() - started);
-          return {
-            verdict: isExplicit(reply.scores, level) ? "hidden" : "clear",
-            score: `${formatScores(reply.scores)} · ${ms} ms · ${bytes ? "tap" : "fetch"}`,
-          };
-        }
-      } catch {
-        /* not listening yet */
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+    const image = await imageBytes(src);
+    if (!image) return { verdict: "error" };
+    const judgement = await imageVerdict(image.bytes);
+    if (judgement.score) {
+      const ms = Math.round(performance.now() - started);
+      judgement.score = `${judgement.score} · ${ms} ms total · ${image.via}`;
     }
-    return { verdict: "error" };
+    if (cacheable) verdicts.set(key, judgement);
+    return judgement;
   }
 
   // ─── Allowances ───────────────────────────────────────────────────
@@ -582,8 +543,7 @@ export default defineBackground(() => {
           );
           return true;
         }
-        // Handled by the classifier page and the content scripts.
-        case "classifier-run":
+        // Handled by the content scripts.
         case "image-filter-off":
         case "image-filter-rejudge":
           return false;

@@ -5,6 +5,7 @@ mod autostart;
 mod blocker;
 mod foreground_watcher;
 mod i18n;
+mod image_filter;
 mod native;
 mod sound;
 mod typed_commands;
@@ -105,6 +106,9 @@ fn main() {
         .expect("Could not determine project directories");
     let data_dir = project_dirs.data_dir();
     std::fs::create_dir_all(data_dir).expect("Could not create data directory");
+
+    // The image filter's models, downloaded the first time a list uses it.
+    image_filter::init(data_dir.join("models"));
 
     let db_path = data_dir.join("focuser.db");
     info!(path = %db_path.display(), "Opening database");

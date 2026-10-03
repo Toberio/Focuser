@@ -8,6 +8,7 @@ members = [
     "crates/focuser-cli",
     "crates/focuser-native",
     "crates/focuser-ui",
+    "crates/focuser-vision",
 ]
 
 [workspace.package]
@@ -50,3 +51,4 @@ tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
 focuser-common = { path = "crates/focuser-common" }
 focuser-core = { path = "crates/focuser-core" }
 focuser-app = { path = "crates/focuser-app" }
+focuser-vision = { path = "crates/focuser-vision" }

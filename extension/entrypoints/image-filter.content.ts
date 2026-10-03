@@ -64,7 +64,7 @@ export default defineContentScript({
       if (judgement.score) el.setAttribute(SCORE_ATTR, judgement.score);
     }
 
-    /** Copy what only this page can read into something the classifier can. */
+    /** Copy what only this page can read into something the background can send. */
     function toDataUrl(el: Media): string | null {
       try {
         const width = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
@@ -273,9 +273,8 @@ export default defineContentScript({
     ) => {
       const type = (raw as Message).type;
       if (type === "image-filter-rejudge") {
-        // The classifier keeps its scores, so this is quick. Each verdict
-        // stays in place until its replacement arrives, so nothing hidden is
-        // shown while the new level is applied.
+        // Each verdict stays in place until its replacement arrives, so
+        // nothing hidden is shown while the new level is applied.
         verdicts.clear();
         for (const el of Array.from(document.querySelectorAll(`[${ATTR}]`))) {
           if (el instanceof HTMLImageElement || el instanceof HTMLVideoElement) {

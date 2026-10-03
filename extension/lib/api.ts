@@ -11,6 +11,7 @@
  * HTTP is the only transport now.
  */
 
+import type { Judgement } from "./image-filter";
 import type { RuleSet } from "./rules";
 
 export const API_BASE = "http://127.0.0.1:17549";
@@ -44,6 +45,29 @@ export async function fetchRules(browser: BrowserName): Promise<RuleSet | null> 
     // The app being closed is a normal state, not an error worth logging on
     // every poll — the toolbar badge is how the user finds out.
     return null;
+  }
+}
+
+/**
+ * Ask the app whether an image should be hidden. The body is the image itself.
+ *
+ * The app judges at the level its own rules set; the request cannot loosen it.
+ * Any failure, the app being closed or still loading its models included,
+ * comes back as `error`, which the page shows: the filter fails open.
+ */
+export async function imageVerdict(bytes: ArrayBuffer): Promise<Judgement> {
+  try {
+    const response = await fetch(`${API_BASE}/api/image-verdict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: bytes,
+    });
+    if (!response.ok) return { verdict: "error" };
+    const reply = (await response.json()) as { verdict?: string; score?: string };
+    const verdict = reply.verdict === "hidden" || reply.verdict === "clear" ? reply.verdict : "error";
+    return { verdict, score: reply.score };
+  } catch {
+    return { verdict: "error" };
   }
 }
 

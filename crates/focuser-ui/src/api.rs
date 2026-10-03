@@ -246,13 +246,21 @@ fn handle_request(mut stream: std::net::TcpStream, state: &AppState) {
         record_extension_heartbeat(browser_name, None);
     }
 
-    // Read body if present
-    let mut body = String::new();
+    // A body is read only up to the cap: the largest is an image, and
+    // anything past that is a mistake or an attack on a loopback port that
+    // every local page can reach.
+    if content_length > MAX_BODY_BYTES {
+        respond(
+            &mut stream,
+            "413 Payload Too Large",
+            "{\"error\":\"too large\"}",
+        );
+        return;
+    }
+    let mut raw = vec![0u8; content_length];
     if content_length > 0 {
-        let mut buf = vec![0u8; content_length];
         use std::io::Read;
-        let _ = reader.read_exact(&mut buf);
-        body = String::from_utf8_lossy(&buf).to_string();
+        let _ = reader.read_exact(&mut raw);
     }
 
     // Parse method and path
@@ -260,9 +268,19 @@ fn handle_request(mut stream: std::net::TcpStream, state: &AppState) {
     let method = parts.first().copied().unwrap_or("");
     let path = parts.get(1).copied().unwrap_or("");
 
-    // Route
-    let (status, response_body) = route(method, path, &body, state);
+    // Route. Images are bytes; everything else is JSON text.
+    let (status, response_body) = if method == "POST" && path == "/api/image-verdict" {
+        api_image_verdict(&raw, state)
+    } else {
+        route(method, path, &String::from_utf8_lossy(&raw), state)
+    };
+    respond(&mut stream, status, &response_body);
+}
 
+/// Largest request body accepted: an image the filter is asked to judge.
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+fn respond(stream: &mut std::net::TcpStream, status: &str, response_body: &str) {
     let response = format!(
         "HTTP/1.1 {status}\r\n\
          Content-Type: application/json\r\n\
@@ -299,6 +317,10 @@ fn route(method: &str, path: &str, body: &str, state: &AppState) -> (&'static st
         ("GET", "/api/allowance-blocked") => api_allowance_blocked(state),
         ("GET", "/api/pomodoro") => api_pomodoro_status(state),
         ("GET", "/api/allowances") => api_allowances_list(state),
+        ("GET", "/api/image-filter-status") => (
+            "200 OK",
+            serde_json::to_string(&crate::image_filter::status()).unwrap_or_default(),
+        ),
         ("POST", "/api/show") | ("GET", "/api/show") => {
             SHOW_WINDOW_REQUESTED.store(true, Ordering::Relaxed);
             ("200 OK", r#"{"ok":true}"#.into())
@@ -370,6 +392,9 @@ fn api_rules(state: &AppState) -> (&'static str, String) {
     let eng = state.engine.lock().unwrap();
     let allowance_exceptions = state.allowance_exempt_domains(&eng);
     let rules = eng.compile_extension_rules_with_exceptions(&allowance_exceptions);
+    // The extension polls this, so it is also where the classifier learns
+    // whether it is wanted.
+    crate::image_filter::sync(rules.image_filter);
 
     let mut domain_categories: HashMap<String, String> = HashMap::new();
     for list in eng.block_lists().iter().filter(|l| l.enabled) {
@@ -390,6 +415,30 @@ fn api_rules(state: &AppState) -> (&'static str, String) {
     }
 
     ("200 OK", response.to_string())
+}
+
+/// Judge one image for the extension's filter. The body is the image itself.
+///
+/// The level comes from the rules, not the request: a page that reached this
+/// port cannot ask for a looser judgement than the user's lists set.
+fn api_image_verdict(bytes: &[u8], state: &AppState) -> (&'static str, String) {
+    let level = {
+        let eng = state.engine.lock().unwrap();
+        eng.compile_extension_rules().image_filter
+    };
+    let started = Instant::now();
+    let body = match crate::image_filter::classify(bytes) {
+        Ok(scores) => serde_json::json!({
+            "verdict": match focuser_vision::is_hidden(&scores, level) {
+                Some(true) => "hidden",
+                _ => "clear",
+            },
+            "score": format!("{} · {} ms", scores.describe(), started.elapsed().as_millis()),
+        }),
+        // Not ready, or the image would not decode: the extension shows it.
+        Err(status) => serde_json::json!({ "verdict": "error", "status": status }),
+    };
+    ("200 OK", body.to_string())
 }
 
 fn normalize_category(list_name: &str) -> String {
@@ -912,6 +961,85 @@ mod tests {
             .split_once("\r\n\r\n")
             .map(|(_, b)| b.to_string())
             .unwrap_or(response)
+    }
+
+    fn post_bytes(addr: &str, path: &str, body: &[u8]) -> String {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or(response)
+    }
+
+    /// The whole image filter over real HTTP: the rules poll starts the
+    /// models, then images posted as raw bytes come back judged.
+    ///
+    /// Ignored by default: it needs the 190 MB of models and a GPU or a
+    /// software Vulkan device. Run it with the models in a directory and
+    /// images that should and should not be hidden at strict:
+    ///
+    /// ```text
+    /// FOCUSER_TEST_MODELS=/path/to/models FOCUSER_TEST_HIDE=a.jpg \
+    ///   FOCUSER_TEST_SHOW=b.jpg cargo test -p focuser-ui image_verdict -- --ignored
+    /// ```
+    #[test]
+    #[ignore]
+    fn image_verdict_judges_posted_images() {
+        let models = std::env::var("FOCUSER_TEST_MODELS").expect("FOCUSER_TEST_MODELS");
+        crate::image_filter::init(models.into());
+        let state = ctx_with_extension(|db| {
+            let mut list = BlockList::new("Images");
+            list.image_filter = focuser_common::types::ImageFilter::Strict;
+            db.create_block_list(&list).unwrap();
+        });
+        let addr = start(state);
+
+        // Nothing is judged until the rules say the filter is on.
+        let early = post_bytes(&addr, "/api/image-verdict", b"x");
+        assert!(early.contains("\"verdict\":\"error\""), "{early}");
+
+        request(&addr, "GET", "/api/rules", None);
+        let ready = std::time::Instant::now();
+        while !request(&addr, "GET", "/api/image-filter-status", None).contains("ready") {
+            assert!(ready.elapsed().as_secs() < 600, "models never became ready");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+
+        for (var, expected) in [
+            ("FOCUSER_TEST_HIDE", "hidden"),
+            ("FOCUSER_TEST_SHOW", "clear"),
+        ] {
+            let Ok(path) = std::env::var(var) else {
+                continue;
+            };
+            let reply = post_bytes(&addr, "/api/image-verdict", &std::fs::read(&path).unwrap());
+            assert!(
+                reply.contains(&format!("\"verdict\":\"{expected}\"")),
+                "{path}: {reply}"
+            );
+            println!("{path}: {reply}");
+        }
+
+        // Too large is refused before it is read.
+        let huge = vec![0u8; super::MAX_BODY_BYTES + 1];
+        let mut stream = std::net::TcpStream::connect(&addr).unwrap();
+        let head = format!(
+            "POST /api/image-verdict HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            huge.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
     }
 
     fn tick(addr: &str, hostname: &str, seconds: u32) -> String {

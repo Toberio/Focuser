@@ -5,7 +5,7 @@
  * error rather than an `undefined` at runtime.
  */
 
-import type { Judgement, Scores } from "./image-filter";
+import type { Judgement } from "./image-filter";
 import type { BlockMatch, RuleSet } from "./rules";
 
 /** Everything the block page renders, resolved in the background. */
@@ -30,9 +30,6 @@ export type Message =
   // From the image filter to the background. `src` is a URL the classifier
   // can fetch, or a data URL the content script copied out of the page.
   | { type: "classify-image"; src: string }
-  // From the background to the classifier page. A separate type so the
-  // classifier never answers a content script's request a second time.
-  | { type: "classifier-run"; src: string; bytes?: ArrayBuffer }
   // From the background to open tabs, when the last list using it goes off.
   | { type: "image-filter-off" }
   // From the background to open tabs, when the level changes: judge again.
@@ -52,7 +49,6 @@ export type MessageReply =
   | { type: "open-app"; ok: boolean }
   | ({ type: "classify-image" } & Judgement)
   // No scores means the image could not be judged.
-  | { type: "classifier-run"; scores?: Scores }
   | { type: "image-filter-off"; ok: boolean }
   | { type: "image-filter-rejudge"; ok: boolean };
 

@@ -1,0 +1,29 @@
+[package]
+name = "focuser-vision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "On-device image classification for Focuser's explicit-image filter"
+
+[dependencies]
+focuser-common = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Pure-Rust inference on the GPU through wgpu (Vulkan, Metal, DirectX 12),
+# which needs no vendor toolkit such as CUDA installed on the user's machine.
+burn = { version = "0.21", default-features = false, features = ["std", "wgpu"] }
+safetensors = "0.8"
+half = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+sha2 = "0.10"
+# Already in the app through tauri-plugin-updater; the same TLS setup, so no
+# second copy is built.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Only the prompt-embedding example needs CLIP's tokenizer.
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
