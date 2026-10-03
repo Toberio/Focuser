@@ -271,6 +271,8 @@ fn handle_request(mut stream: std::net::TcpStream, state: &AppState) {
     // Route. Images are bytes; everything else is JSON text.
     let (status, response_body) = if method == "POST" && path == "/api/image-verdict" {
         api_image_verdict(&raw, state)
+    } else if method == "POST" && path.starts_with("/api/image-feedback?") {
+        api_image_feedback(path, &raw, state)
     } else {
         route(method, path, &String::from_utf8_lossy(&raw), state)
     };
@@ -439,6 +441,33 @@ fn api_image_verdict(bytes: &[u8], state: &AppState) -> (&'static str, String) {
         Err(status) => serde_json::json!({ "verdict": "error", "status": status }),
     };
     ("200 OK", body.to_string())
+}
+
+/// Debug builds of the extension: keep an image the user says was judged
+/// wrongly. `?label=show|hide&url=…`; the body is the image.
+fn api_image_feedback(path: &str, bytes: &[u8], state: &AppState) -> (&'static str, String) {
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let param = |name: &str| {
+        query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+            .map(percent_decode)
+            .unwrap_or_default()
+    };
+    let level = {
+        let eng = state.engine.lock().unwrap();
+        eng.compile_extension_rules().image_filter
+    };
+    match crate::image_feedback::record(bytes, &param("label"), &param("url"), level) {
+        Ok(file) => (
+            "200 OK",
+            serde_json::json!({ "ok": true, "file": file }).to_string(),
+        ),
+        Err(e) => (
+            "400 Bad Request",
+            serde_json::json!({ "ok": false, "error": e }).to_string(),
+        ),
+    }
 }
 
 fn normalize_category(list_name: &str) -> String {

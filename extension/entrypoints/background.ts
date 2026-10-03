@@ -5,6 +5,7 @@ import {
   fetchRules,
   imageVerdict,
   isIncognitoAllowed,
+  sendImageFeedback,
   POLL_INTERVAL_MS,
   reportBlocked,
   sendAllowanceTick,
@@ -541,6 +542,14 @@ export default defineBackground(() => {
           void classifyImage(message.src).then((judgement) =>
             sendResponse({ type: "classify-image", ...judgement }),
           );
+          return true;
+        }
+        case "image-feedback": {
+          void imageBytes(message.src)
+            .then((image) =>
+              image ? sendImageFeedback(image.bytes, message.label, message.src) : false,
+            )
+            .then((ok) => sendResponse({ type: "image-feedback", ok }));
           return true;
         }
         // Handled by the content scripts.

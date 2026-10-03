@@ -30,6 +30,8 @@ export type Message =
   // From the image filter to the background. `src` is a URL the classifier
   // can fetch, or a data URL the content script copied out of the page.
   | { type: "classify-image"; src: string }
+  // Debug builds: the user says this image was judged wrongly.
+  | { type: "image-feedback"; src: string; label: "show" | "hide" }
   // From the background to open tabs, when the last list using it goes off.
   | { type: "image-filter-off" }
   // From the background to open tabs, when the level changes: judge again.
@@ -50,6 +52,7 @@ export type MessageReply =
   | ({ type: "classify-image" } & Judgement)
   // No scores means the image could not be judged.
   | { type: "image-filter-off"; ok: boolean }
+  | { type: "image-feedback"; ok: boolean }
   | { type: "image-filter-rejudge"; ok: boolean };
 
 /** Send a message and get the reply narrowed to its request type. */

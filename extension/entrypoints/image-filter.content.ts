@@ -1,6 +1,10 @@
 import { COPY_SIZE, type Judgement, sourceKind, worthChecking } from "@/lib/image-filter";
 import type { Message, MessageReply } from "@/lib/messages";
 import { send } from "@/lib/messages";
+import { startFeedbackOverlay } from "@/lib/feedback-overlay";
+
+/** Debug builds put Show/Hide buttons on judged images, for labelling mistakes. */
+const FEEDBACK = (import.meta.env as Record<string, unknown>).WXT_IMAGE_FILTER_DEBUG === "true";
 
 /**
  * Blurs the images and videos the classifier finds explicit.
@@ -262,6 +266,18 @@ export default defineContentScript({
       }
     }, FRAME_INTERVAL_MS);
 
+    const stopFeedback = FEEDBACK
+      ? startFeedbackOverlay(ATTR, async (el, label) => {
+          const src = el instanceof HTMLVideoElement ? "" : el.currentSrc || el.src;
+          // What the user saw: the URL where the background can get it,
+          // otherwise a copy through a canvas (blob: images, video frames).
+          const payload = src && sourceKind(src) === "url" ? src : toDataUrl(el);
+          if (!payload) return false;
+          const reply = await send({ type: "image-feedback", src: payload, label });
+          return reply?.ok === true;
+        })
+      : () => {};
+
     // Injected into an open tab, the images are loaded already.
     for (const img of Array.from(document.images)) consider(img);
     for (const video of Array.from(document.querySelectorAll("video"))) consider(video);
@@ -287,6 +303,7 @@ export default defineContentScript({
       }
       if (type !== "image-filter-off") return false;
       clearInterval(sampler);
+      stopFeedback();
       nearView.disconnect();
       mutations.disconnect();
       document.removeEventListener("load", onLoad, true);

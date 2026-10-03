@@ -71,6 +71,25 @@ export async function imageVerdict(bytes: ArrayBuffer): Promise<Judgement> {
   }
 }
 
+/** Debug builds: keep an image the user says was judged wrongly. */
+export async function sendImageFeedback(
+  bytes: ArrayBuffer,
+  label: "show" | "hide",
+  url: string,
+): Promise<boolean> {
+  try {
+    const query = `label=${label}&url=${encodeURIComponent(url.slice(0, 2_000))}`;
+    const response = await fetch(`${API_BASE}/api/image-feedback?${query}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: bytes,
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Tell the app we are alive, so it does not close the browser for running
  * without the extension.

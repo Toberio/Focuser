@@ -5,6 +5,7 @@ mod autostart;
 mod blocker;
 mod foreground_watcher;
 mod i18n;
+mod image_feedback;
 mod image_filter;
 mod native;
 mod sound;
@@ -109,6 +110,7 @@ fn main() {
 
     // The image filter's models, downloaded the first time a list uses it.
     image_filter::init(data_dir.join("models"));
+    image_feedback::init(data_dir.join("image-feedback"));
 
     let db_path = data_dir.join("focuser.db");
     info!(path = %db_path.display(), "Opening database");
