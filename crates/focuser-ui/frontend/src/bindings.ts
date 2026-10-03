@@ -424,6 +424,8 @@ export type Command =
 } } | 
 /**  Which known browsers are running, and which have the extension. */
 { cmd: "get_browser_status" } | 
+/**  Where the image filter's models are: off, downloading, loading, ready. */
+{ cmd: "get_image_filter_status" } | 
 /**
  *  Icons for application rules, read from the executables on disk.
  * 
@@ -468,7 +470,7 @@ export type CommandResult =
 /**  Current Pomodoro session, or `None` when idle. */
 { kind: "pomodoro_status"; data: PomodoroStatus | null } | { kind: "pomodoro_session"; data: PomodoroSession } | { kind: "pomodoro_events"; data: PomodoroEventDto[] } | { kind: "pomodoro_history"; data: PomodoroHistoryEntry[] } | { kind: "pomodoro_presets"; data: PomodoroPreset[] } | { kind: "allowance"; data: Allowance } | { kind: "allowances"; data: AllowanceStatus[] } | { kind: "allowance_notifications"; data: AllowanceNotificationDto[] } | { kind: "allowance_history"; data: AllowanceUsageEntry[] } | 
 /**  Free text — an exported configuration document, or a version string. */
-{ kind: "text"; data: string } | { kind: "browser_status"; data: BrowserStatus[] } | { kind: "app_icons"; data: AppIcon[] };
+{ kind: "text"; data: string } | { kind: "browser_status"; data: BrowserStatus[] } | { kind: "image_filter_status"; data: ImageFilterStatus } | { kind: "app_icons"; data: AppIcon[] };
 
 export type ExceptionRule = {
 	id: string,
@@ -503,6 +505,15 @@ export type ImageFilter = "off" |
 "balanced" | 
 /**  Also mildly suggestive pictures: cleavage, lingerie, posed selfies. */
 "strict";
+
+/**  Where the image filter's models are, as the settings page shows it. */
+export type ImageFilterStatus = 
+/**  No active list has the filter on; nothing is loaded. */
+{ state: "off" } | 
+/**  Fetching the models the first time, in megabytes. */
+{ state: "downloading"; done_mb: number; total_mb: number } | 
+/**  On disk, being loaded onto the GPU. */
+{ state: "loading" } | { state: "ready" } | { state: "failed"; error: string };
 
 /**
  *  How a protection window can be ended early — Cold Turkey calls this a

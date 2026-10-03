@@ -10,6 +10,7 @@ import { Allowances } from "@/routes/allowances";
 import { Apps } from "@/routes/apps";
 import { BlockLists } from "@/routes/block-lists";
 import { Dashboard } from "@/routes/dashboard";
+import { Images } from "@/routes/images";
 import { Schedule } from "@/routes/schedule";
 import { Settings } from "@/routes/settings";
 import { Websites } from "@/routes/websites";
@@ -41,6 +42,7 @@ const router = createHashRouter([
       { path: "block-lists", element: <BlockLists /> },
       { path: "websites", element: <Websites /> },
       { path: "apps", element: <Apps /> },
+      { path: "images", element: <Images /> },
       { path: "schedule", element: <Schedule /> },
       { path: "allowances", element: <Allowances /> },
       // Split out: the charting library is a third of the bundle and most

@@ -14,18 +14,9 @@ use std::sync::{Mutex, OnceLock};
 
 use focuser_common::types::ImageFilter;
 use focuser_vision::{Classifier, models};
-use serde::Serialize;
 use tracing::{error, info};
 
-#[derive(Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Status {
-    Off,
-    Downloading { done: u64, total: u64 },
-    Loading,
-    Ready,
-    Failed { error: String },
-}
+pub use focuser_common::types::ImageFilterStatus as Status;
 
 enum State {
     Off,
@@ -92,7 +83,13 @@ fn start(svc: &'static Service) {
                 // A status update per megabyte is plenty.
                 if done == total || done - last >= 1 << 20 {
                     last = done;
-                    set(svc, State::Starting(Status::Downloading { done, total }));
+                    set(
+                        svc,
+                        State::Starting(Status::Downloading {
+                            done_mb: (done >> 20) as u32,
+                            total_mb: (total >> 20) as u32,
+                        }),
+                    );
                 }
             });
             if let Err(e) = downloaded {

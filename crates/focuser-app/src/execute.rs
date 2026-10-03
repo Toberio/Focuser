@@ -824,6 +824,16 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             ))
         }
 
+        Command::GetImageFilterStatus => {
+            // The extension's rules poll is what normally starts the models;
+            // asking from the app starts them too, so the page never says
+            // "off" for a list that is on just because no browser is open.
+            let level = engine.compile_extension_rules().image_filter;
+            Ok(CommandResult::ImageFilterStatus(
+                ctx.image_filter_status(level),
+            ))
+        }
+
         Command::GetBrowserStatus => {
             let running = ctx.running_browsers();
             let connected = ctx.connected_browsers();

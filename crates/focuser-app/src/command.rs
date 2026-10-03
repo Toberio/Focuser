@@ -303,6 +303,8 @@ pub enum Command {
     },
     /// Which known browsers are running, and which have the extension.
     GetBrowserStatus,
+    /// Where the image filter's models are: off, downloading, loading, ready.
+    GetImageFilterStatus,
     /// Icons for application rules, read from the executables on disk.
     ///
     /// Batched because the caller wants a whole list at once and these are
@@ -447,6 +449,7 @@ pub enum CommandResult {
     /// Free text — an exported configuration document, or a version string.
     Text(String),
     BrowserStatus(Vec<BrowserStatus>),
+    ImageFilterStatus(focuser_common::types::ImageFilterStatus),
     AppIcons(Vec<AppIcon>),
 }
 

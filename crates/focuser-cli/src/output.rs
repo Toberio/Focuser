@@ -240,6 +240,10 @@ pub fn print_human(result: &CommandResult) {
 
         // A terminal cannot show the image, so report whether one was found.
         // `--json` carries the data URI itself for anything that wants it.
+        CommandResult::ImageFilterStatus(status) => {
+            // The models run in the desktop app, never here.
+            println!("{}", serde_json::to_string(status).unwrap_or_default());
+        }
         CommandResult::AppIcons(icons) => {
             for i in icons {
                 println!(

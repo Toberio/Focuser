@@ -66,6 +66,14 @@ impl focuser_app::SystemSync for HostsSync {
             .collect()
     }
 
+    fn image_filter_status(
+        &self,
+        level: focuser_common::types::ImageFilter,
+    ) -> focuser_common::types::ImageFilterStatus {
+        image_filter::sync(level);
+        image_filter::status()
+    }
+
     fn hosts_writable(&self) -> bool {
         blocker::hosts_writable()
     }
