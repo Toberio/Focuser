@@ -5,6 +5,7 @@
  * error rather than an `undefined` at runtime.
  */
 
+import type { Verdict } from "./image-filter";
 import type { BlockMatch, RuleSet } from "./rules";
 
 /** Everything the block page renders, resolved in the background. */
@@ -25,7 +26,15 @@ export type Message =
   // Both are sent by the block page, which is a content script and so cannot
   // close its own tab or reach the desktop app directly.
   | { type: "close-tab" }
-  | { type: "open-app" };
+  | { type: "open-app" }
+  // From the image filter to the background. `src` is a URL the classifier
+  // can fetch, or a data URL the content script copied out of the page.
+  | { type: "classify-image"; src: string }
+  // From the background to the classifier page. A separate type so the
+  // classifier never answers a content script's request a second time.
+  | { type: "classifier-run"; src: string }
+  // From the background to open tabs, when the last list using it goes off.
+  | { type: "image-filter-off" };
 
 export type MessageReply =
   | { type: "check-url"; blocked: boolean }
@@ -38,7 +47,10 @@ export type MessageReply =
     }
   | { type: "refresh"; ok: boolean }
   | { type: "close-tab"; ok: boolean }
-  | { type: "open-app"; ok: boolean };
+  | { type: "open-app"; ok: boolean }
+  | { type: "classify-image"; verdict: Verdict }
+  | { type: "classifier-run"; verdict: Verdict }
+  | { type: "image-filter-off"; ok: boolean };
 
 /** Send a message and get the reply narrowed to its request type. */
 export async function send<T extends Message["type"]>(
