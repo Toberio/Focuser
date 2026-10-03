@@ -39,15 +39,28 @@ describe("isExplicit", () => {
     expect(hiddenAt(0.48, { Porn: 0.3, Neutral: 0.7 })).toEqual(["balanced", "strict"]);
   });
 
-  it("lets the ViT overrule NSFWJS's false alarms", () => {
-    // Real scores: abstract wallpapers NSFWJS called porn.
-    expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual([]);
-    expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual([]);
+  it("lets the ViT overrule NSFWJS's false alarms below strict", () => {
+    // Real scores: abstract wallpapers NSFWJS called porn. Strict hides them,
+    // because real slips look the same to both models (next test).
+    expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual(["strict"]);
+    expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual(["strict"]);
   });
 
-  it("catches suggestive pictures, which the ViT is only unsure about", () => {
-    expect(hiddenAt(0.22, { Sexy: 0.55, Neutral: 0.45 })).toEqual(["strict"]);
-    expect(hiddenAt(0.35, { Sexy: 0.75, Neutral: 0.25 })).toEqual(["balanced", "strict"]);
+  it("hides at strict what only NSFWJS sees", () => {
+    // Real scores from images that slipped through on a feed.
+    expect(hiddenAt(0.11, { Porn: 0.79, Sexy: 0.14, Neutral: 0.07 })).toEqual(["strict"]);
+    expect(hiddenAt(0.1, { Sexy: 0.98, Neutral: 0.02 })).toEqual(["balanced", "strict"]);
+    expect(hiddenAt(0.09, { Sexy: 0.98, Neutral: 0.02 })).toEqual(["balanced", "strict"]);
+  });
+
+  it("catches suggestive pictures, which the ViT calls safe", () => {
+    // Real scores: a cleavage shot that should be hidden at strict.
+    expect(hiddenAt(0.13, { Porn: 0.03, Sexy: 0.41, Neutral: 0.56 })).toEqual(["strict"]);
+    expect(hiddenAt(0.2, { Sexy: 0.8, Neutral: 0.2 })).toEqual(["balanced", "strict"]);
+  });
+
+  it("leaves a suggestive grade alone below strict when the ViT is sure it is safe", () => {
+    expect(hiddenAt(0.06, { Sexy: 0.7, Neutral: 0.3 })).toEqual(["strict"]);
   });
 
   it("does not count suggestive at the explicit-only level", () => {
