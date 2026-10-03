@@ -166,10 +166,6 @@
   "statistics_table_empty_description": "Les chiffres apparaîtront ici dès qu'une liste de blocage commencera à refuser des choses.",
   "settings_title": "Paramètres",
   "settings_description": "Comment Focuser se comporte sur cet ordinateur.",
-  "settings_section_startup": "Démarrage",
-  "settings_autostart": "Lancer à l'ouverture de session",
-  "settings_autostart_description": "Focuser démarre avec votre ordinateur, ainsi les blocages sont en place avant que vous puissiez vous convaincre du contraire.",
-  "settings_autostart_unsupported": "Disponible uniquement dans l'application de bureau.",
   "settings_section_browsers": "Navigateurs",
   "settings_browsers_description": "L'extension bloque correctement les pages. Sans elle, seuls des domaines entiers peuvent être arrêtés.",
   "settings_close_browsers": "Fermer les navigateurs sans l'extension",
@@ -450,6 +446,5 @@
   "focus_preset_sprint": "Sprint",
   "update_available": "Mise à jour disponible",
   "update_version_ready": "La version {version} est prête",
-  "update_installing": "Installation…",
-  "settings_autostart_pending": "Enregistré. Le programme d'installation a aussi créé une tâche de démarrage qui exige des droits d'administrateur, ce réglage finira donc de s'appliquer au prochain démarrage de Focuser."
+  "update_installing": "Installation…"
 }

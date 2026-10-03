@@ -166,10 +166,6 @@
   "statistics_table_empty_description": "I numeri compariranno qui appena una lista di blocco inizierà a respingere qualcosa.",
   "settings_title": "Impostazioni",
   "settings_description": "Come si comporta Focuser su questo computer.",
-  "settings_section_startup": "Avvio",
-  "settings_autostart": "Avvia all'accesso",
-  "settings_autostart_description": "Focuser parte con il computer, così i blocchi sono già in piedi prima che tu riesca a convincerti del contrario.",
-  "settings_autostart_unsupported": "Disponibile solo nell'app desktop.",
   "settings_section_browsers": "Browser",
   "settings_browsers_description": "L'estensione blocca le pagine come si deve. Senza, si possono fermare solo interi domini.",
   "settings_close_browsers": "Chiudi i browser senza l'estensione",
@@ -450,6 +446,5 @@
   "focus_preset_sprint": "Sprint",
   "update_available": "Aggiornamento disponibile",
   "update_version_ready": "La versione {version} è pronta",
-  "update_installing": "Installazione…",
-  "settings_autostart_pending": "Salvato. Il programma di installazione ha anche registrato un'attività di avvio che richiede diritti di amministratore per essere modificata, quindi l'impostazione verrà applicata del tutto al prossimo avvio di Focuser."
+  "update_installing": "Installazione…"
 }

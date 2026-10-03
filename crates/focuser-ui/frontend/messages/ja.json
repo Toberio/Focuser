@@ -162,10 +162,6 @@
   "statistics_table_empty_description": "ブロックリストが何かを止め始めると、ここに数値が表示されます。",
   "settings_title": "設定",
   "settings_description": "このパソコンでの Focuser の動作です。",
-  "settings_section_startup": "起動",
-  "settings_autostart": "ログイン時に起動",
-  "settings_autostart_description": "Focuser がパソコンと一緒に起動するので、自分に言い訳をする前にブロックが働きます。",
-  "settings_autostart_unsupported": "デスクトップアプリでのみ利用できます。",
   "settings_section_browsers": "ブラウザー",
   "settings_browsers_description": "拡張機能を使うとページを正しくブロックできます。なければドメイン全体しか止められません。",
   "settings_close_browsers": "拡張機能のないブラウザーを閉じる",
@@ -434,6 +430,5 @@
   "focus_preset_sprint": "スプリント",
   "update_available": "更新があります",
   "update_version_ready": "バージョン {version} の準備ができました",
-  "update_installing": "インストール中…",
-  "settings_autostart_pending": "保存しました。インストーラーが登録した起動タスクの変更には管理者権限が必要なため、この設定は次回 Focuser を起動したときに適用が完了します。"
+  "update_installing": "インストール中…"
 }

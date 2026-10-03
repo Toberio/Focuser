@@ -159,10 +159,6 @@
   "statistics_table_empty_description": "Los números aparecerán aquí en cuanto una lista de bloqueo empiece a rechazar cosas.",
   "settings_title": "Ajustes",
   "settings_description": "Cómo se comporta Focuser en este equipo.",
-  "settings_section_startup": "Inicio",
-  "settings_autostart": "Abrir al iniciar sesión",
-  "settings_autostart_description": "Focuser arranca con el equipo, así que los bloqueos ya están puestos antes de que puedas convencerte de lo contrario.",
-  "settings_autostart_unsupported": "Solo disponible en la aplicación de escritorio.",
   "settings_section_browsers": "Navegadores",
   "settings_browsers_description": "La extensión bloquea las páginas correctamente. Sin ella solo se pueden detener dominios enteros.",
   "settings_close_browsers": "Cerrar navegadores sin la extensión",
@@ -450,6 +446,5 @@
   "focus_preset_sprint": "Sprint",
   "update_available": "Actualización disponible",
   "update_version_ready": "La versión {version} está lista",
-  "update_installing": "Instalando…",
-  "settings_autostart_pending": "Guardado. El instalador también registró una tarea de inicio que necesita permisos de administrador para cambiarse, así que esto terminará de aplicarse la próxima vez que arranque Focuser."
+  "update_installing": "Instalando…"
 }

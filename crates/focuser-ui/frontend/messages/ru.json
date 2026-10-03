@@ -168,10 +168,6 @@
   "statistics_table_empty_description": "Цифры появятся здесь, как только список блокировки начнёт что-то отклонять.",
   "settings_title": "Настройки",
   "settings_description": "Как Focuser ведёт себя на этом компьютере.",
-  "settings_section_startup": "Запуск",
-  "settings_autostart": "Запускать при входе в систему",
-  "settings_autostart_description": "Focuser запускается вместе с компьютером, так что блокировки уже на месте до того, как вы успеете себя переубедить.",
-  "settings_autostart_unsupported": "Доступно только в настольном приложении.",
   "settings_section_browsers": "Браузеры",
   "settings_browsers_description": "Расширение блокирует страницы как надо. Без него можно останавливать только целые домены.",
   "settings_close_browsers": "Закрывать браузеры без расширения",
@@ -458,6 +454,5 @@
   "focus_preset_sprint": "Спринт",
   "update_available": "Доступно обновление",
   "update_version_ready": "Версия {version} готова",
-  "update_installing": "Установка…",
-  "settings_autostart_pending": "Сохранено. Установщик также создал задачу автозапуска, для изменения которой нужны права администратора, поэтому настройка окончательно применится при следующем запуске Focuser."
+  "update_installing": "Установка…"
 }

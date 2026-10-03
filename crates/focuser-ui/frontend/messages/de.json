@@ -164,10 +164,6 @@
   "statistics_table_empty_description": "Zahlen erscheinen hier, sobald eine Sperrliste anfängt, etwas abzuweisen.",
   "settings_title": "Einstellungen",
   "settings_description": "Wie sich Focuser auf diesem Rechner verhält.",
-  "settings_section_startup": "Start",
-  "settings_autostart": "Beim Anmelden starten",
-  "settings_autostart_description": "Focuser startet mit dem Rechner, damit die Sperren stehen, bevor du dich davon abbringen kannst.",
-  "settings_autostart_unsupported": "Nur in der Desktop-App verfügbar.",
   "settings_section_browsers": "Browser",
   "settings_browsers_description": "Die Erweiterung blockiert Seiten richtig. Ohne sie lassen sich nur ganze Domains stoppen.",
   "settings_close_browsers": "Browser ohne die Erweiterung schließen",
@@ -442,6 +438,5 @@
   "focus_preset_sprint": "Sprint",
   "update_available": "Update verfügbar",
   "update_version_ready": "Version {version} ist bereit",
-  "update_installing": "Wird installiert…",
-  "settings_autostart_pending": "Gespeichert. Das Installationsprogramm hat außerdem eine Startaufgabe angelegt, deren Änderung Administratorrechte braucht. Die Einstellung wird beim nächsten Start von Focuser fertig übernommen."
+  "update_installing": "Wird installiert…"
 }

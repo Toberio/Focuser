@@ -26,9 +26,6 @@
         }
       ]
     },
-    "autostart:allow-enable",
-    "autostart:allow-disable",
-    "autostart:allow-is-enabled",
     "dialog:allow-open",
     "dialog:allow-save",
     "updater:default"

@@ -162,10 +162,6 @@
   "statistics_table_empty_description": "차단 목록이 무언가를 막기 시작하면 여기에 숫자가 나타납니다.",
   "settings_title": "설정",
   "settings_description": "이 컴퓨터에서 Focuser가 동작하는 방식입니다.",
-  "settings_section_startup": "시작",
-  "settings_autostart": "로그인할 때 실행",
-  "settings_autostart_description": "Focuser가 컴퓨터와 함께 켜지므로, 스스로를 설득하기 전에 이미 차단이 걸려 있습니다.",
-  "settings_autostart_unsupported": "데스크톱 앱에서만 사용할 수 있습니다.",
   "settings_section_browsers": "브라우저",
   "settings_browsers_description": "확장 프로그램이 있으면 페이지를 제대로 차단합니다. 없으면 도메인 전체만 막을 수 있습니다.",
   "settings_close_browsers": "확장 프로그램이 없는 브라우저 닫기",
@@ -434,6 +430,5 @@
   "focus_preset_sprint": "스프린트",
   "update_available": "업데이트가 있습니다",
   "update_version_ready": "버전 {version} 준비 완료",
-  "update_installing": "설치 중…",
-  "settings_autostart_pending": "저장했습니다. 설치 프로그램이 만든 시작 작업을 바꾸려면 관리자 권한이 필요해서, 이 설정은 다음에 Focuser를 시작할 때 적용이 끝납니다."
+  "update_installing": "설치 중…"
 }

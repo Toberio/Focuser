@@ -12,7 +12,6 @@ import { Page } from "@/components/ui/page";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { UpdateCheck } from "@/components/update-check";
-import { useAutostart } from "@/lib/autostart";
 import {
   useAppVersion,
   useDeleteAllData,
@@ -30,12 +29,10 @@ import {
 import { m } from "@/paraglide/messages.js";
 
 export function Settings() {
-  const autostart = useAutostart();
   const enforceBrowsers = useBooleanSetting(SETTING_KEYS.blockUnsupportedBrowsers, true);
   const gracePeriod = useNumberSetting(SETTING_KEYS.extensionGracePeriod, 60);
   const language = useLanguage();
 
-  const autostartLock = useSettingLock(SETTING_KEYS.autostart, m.settings_autostart());
   const enforceBrowsersLock = useSettingLock(
     SETTING_KEYS.blockUnsupportedBrowsers,
     m.settings_close_browsers(),
@@ -61,37 +58,6 @@ export function Settings() {
     // position on the page carried no meaning — you had to scan both sides.
     <Page>
       <PageHeader title={m.settings_title()} description={m.settings_description()} />
-
-      <SettingsSection title={m.settings_section_startup()}>
-        <SettingRow
-          label={m.settings_autostart()}
-          description={
-            autostart.needsAdmin
-              ? m.settings_autostart_pending()
-              : autostart.supported
-                ? m.settings_autostart_description()
-                : m.settings_autostart_unsupported()
-          }
-          control={
-            <div className="flex items-center gap-1">
-              {autostartLock.badge}
-              <Switch
-                checked={autostart.value}
-                onCheckedChange={autostart.set}
-                disabled={
-                  !autostart.supported ||
-                  autostart.isPending ||
-                  autostart.isSaving ||
-                  autostartLock.locked
-                }
-                aria-label={m.settings_autostart()}
-              />
-              {autostart.supported && autostartLock.button}
-            </div>
-          }
-        />
-        {autostart.supported && autostartLock.panel}
-      </SettingsSection>
 
       <SettingsSection
         title={m.settings_section_browsers()}
@@ -225,7 +191,6 @@ export function Settings() {
 
       <InlineError
         error={
-          autostart.error ??
           enforceBrowsers.error ??
           gracePeriod.error ??
           setRetention.error ??

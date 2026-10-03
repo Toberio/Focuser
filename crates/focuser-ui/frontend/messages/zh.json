@@ -162,10 +162,6 @@
   "statistics_table_empty_description": "拦截列表开始拦截内容后，这里就会出现数据。",
   "settings_title": "设置",
   "settings_description": "Focuser 在这台电脑上的行为方式。",
-  "settings_section_startup": "启动",
-  "settings_autostart": "登录时启动",
-  "settings_autostart_description": "Focuser 随电脑一起启动，这样在你说服自己放弃之前，拦截就已经就位了。",
-  "settings_autostart_unsupported": "仅在桌面应用中可用。",
   "settings_section_browsers": "浏览器",
   "settings_browsers_description": "扩展能正确拦截页面。没有它就只能拦截整个域名。",
   "settings_close_browsers": "关闭没有装扩展的浏览器",
@@ -434,6 +430,5 @@
   "focus_preset_sprint": "冲刺",
   "update_available": "有可用更新",
   "update_version_ready": "版本 {version} 已就绪",
-  "update_installing": "正在安装…",
-  "settings_autostart_pending": "已保存。安装程序还注册了一个启动任务，修改它需要管理员权限，因此该设置会在下次启动 Focuser 时完成应用。"
+  "update_installing": "正在安装…"
 }

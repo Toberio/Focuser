@@ -116,8 +116,12 @@ fn main() {
     let state_for_blocker = Arc::clone(&state);
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Another instance tried to launch — bring existing window to front
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Another instance tried to launch — bring existing window to front,
+            // unless it was a login launcher racing the one already running.
+            if autostart::launched_at_login(&args) {
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -129,7 +133,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
+            Some(vec![autostart::FLAG]),
         ))
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -142,19 +146,9 @@ fn main() {
             native::open_browser_url,
             native::check_for_update,
             native::do_update,
-            autostart::is_autostart_enabled,
-            autostart::set_autostart,
         ])
         .setup(move |app| {
-            // Once, on a fresh install. This used to re-enable autostart on
-            // every launch whenever it found it off, which meant nobody could
-            // ever turn it off — see #10.
-            // Applies the first-run default, then finishes any autostart change
-            // the UI could not make itself. If the logon task launched us we are
-            // elevated here, which is the one moment schtasks will cooperate.
-            if let Ok(engine) = state_for_blocker.engine.lock() {
-                autostart::reconcile(app.handle(), engine.db());
-            }
+            autostart::ensure_enabled(app.handle());
 
             // Spawn background blocking loop
             let blocker_state = Arc::clone(&state_for_blocker);
@@ -294,9 +288,16 @@ fn main() {
                 }
             });
 
+            // The window starts hidden (tauri.conf.json); a login launch stays
+            // in the tray, anything else is the user opening Focuser.
+            let window = app.get_webview_window("main").unwrap();
+            if !autostart::launched_at_login(std::env::args()) {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
             // Close to tray instead of quitting
             let app_handle = app.handle().clone();
-            let window = app.get_webview_window("main").unwrap();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
