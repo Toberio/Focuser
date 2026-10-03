@@ -12,6 +12,7 @@ tauri-build = { version = "2", features = [] }
 focuser-common = { workspace = true }
 focuser-core = { workspace = true }
 focuser-app = { workspace = true }
+focuser-vision = { workspace = true }
 directories = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

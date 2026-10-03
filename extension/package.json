@@ -20,11 +20,8 @@
     "preview": "vite --config preview/vite.config.ts"
   },
   "dependencies": {
-    "@tensorflow/tfjs": "^4.22.0",
     "@wxt-dev/i18n": "^0.2.6",
-    "buffer": "^6.0.3",
     "lucide-react": "^1.27.0",
-    "nsfwjs": "^4.4.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
