@@ -148,7 +148,7 @@ impl BlockEngine {
                 continue;
             }
 
-            rules.filter_explicit_images |= list.filter_explicit_images;
+            rules.image_filter = rules.image_filter.max(list.image_filter);
 
             // Compile website rules by type
             for rule in &list.websites {
@@ -291,7 +291,7 @@ impl BlockEngine {
         rules.allowed_wildcards.hash(&mut hasher);
         rules.allowed_url_paths.hash(&mut hasher);
         rules.allowance_domains.hash(&mut hasher);
-        rules.filter_explicit_images.hash(&mut hasher);
+        rules.image_filter.hash(&mut hasher);
         serde_json::to_string(&rules.scopes)
             .unwrap_or_default()
             .hash(&mut hasher);
@@ -502,20 +502,29 @@ mod tests {
 
     #[test]
     fn image_filter_follows_active_lists_and_changes_the_version() {
+        use focuser_common::types::ImageFilter;
+
         let db = Database::open_in_memory().unwrap();
         let mut list = BlockList::new("Images");
         list.websites.push(WebsiteRule::domain("reddit.com"));
         db.create_block_list(&list).unwrap();
+        let mut other = BlockList::new("Other");
+        other.image_filter = ImageFilter::Explicit;
+        other.enabled = false;
+        db.create_block_list(&other).unwrap();
         let mut engine = BlockEngine::new(db).unwrap();
         let before = engine.compile_extension_rules();
-        assert!(!before.filter_explicit_images);
+        assert!(before.image_filter.is_off());
         assert!(!before.requires_extension());
 
-        list.filter_explicit_images = true;
+        list.image_filter = ImageFilter::Strict;
         engine.db().update_block_list(&list).unwrap();
+        other.enabled = true;
+        engine.db().update_block_list(&other).unwrap();
         engine.refresh().unwrap();
         let after = engine.compile_extension_rules();
-        assert!(after.filter_explicit_images);
+        // Two active lists ask for different levels: the stricter wins.
+        assert_eq!(after.image_filter, ImageFilter::Strict);
         // Nothing but the extension can hide an image.
         assert!(after.requires_extension());
         // The extension only re-applies rules when the version moves.
@@ -525,7 +534,10 @@ mod tests {
         list.enabled = false;
         engine.db().update_block_list(&list).unwrap();
         engine.refresh().unwrap();
-        assert!(!engine.compile_extension_rules().filter_explicit_images);
+        assert_eq!(
+            engine.compile_extension_rules().image_filter,
+            ImageFilter::Explicit
+        );
     }
 
     #[test]

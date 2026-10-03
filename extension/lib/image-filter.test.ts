@@ -1,35 +1,63 @@
 import { describe, expect, it } from "vitest";
 import {
+  type FilterLevel,
+  formatScores,
   isExplicit,
   MIN_SIDE,
   type Prediction,
+  ScoreCache,
+  scoresOf,
   sourceKind,
-  VerdictCache,
   worthChecking,
 } from "./image-filter";
 
 const scores = (s: Partial<Record<string, number>>): Prediction[] =>
   Object.entries(s).map(([className, probability]) => ({ className, probability: probability ?? 0 }));
 
+const LEVELS: FilterLevel[] = ["explicit", "balanced", "strict"];
+
 describe("isExplicit", () => {
-  it("hides what the model calls porn or hentai", () => {
-    expect(isExplicit(scores({ Porn: 0.9, Neutral: 0.1 }))).toBe(true);
-    expect(isExplicit(scores({ Hentai: 0.8, Drawing: 0.2 }))).toBe(true);
+  const hiddenAt = (s: Partial<Record<string, number>>) =>
+    LEVELS.filter((level) => isExplicit(scoresOf(scores(s)), level));
+
+  it("hides porn and hentai at every level", () => {
+    expect(hiddenAt({ Porn: 0.9, Neutral: 0.1 })).toEqual(LEVELS);
+    expect(hiddenAt({ Hentai: 0.8, Drawing: 0.2 })).toEqual(LEVELS);
   });
 
   it("adds porn and hentai, since the model splits between them", () => {
-    expect(isExplicit(scores({ Porn: 0.25, Hentai: 0.2, Neutral: 0.55 }))).toBe(true);
+    expect(hiddenAt({ Porn: 0.3, Hentai: 0.25, Neutral: 0.45 })).toEqual(LEVELS);
   });
 
-  it("leaves swimwear-level 'sexy' alone unless explicit scores join it", () => {
-    expect(isExplicit(scores({ Sexy: 0.6, Neutral: 0.4 }))).toBe(false);
-    expect(isExplicit(scores({ Sexy: 0.5, Porn: 0.25, Neutral: 0.25 }))).toBe(true);
+  it("leaves suggestive pictures to the stricter levels", () => {
+    // A cleavage selfie on a feed.
+    expect(hiddenAt({ Sexy: 0.45, Neutral: 0.55 })).toEqual(["strict"]);
+    expect(hiddenAt({ Sexy: 0.7, Neutral: 0.3 })).toEqual(["balanced", "strict"]);
   });
 
-  it("shows neutral pictures and drawings", () => {
-    expect(isExplicit(scores({ Neutral: 0.95, Sexy: 0.05 }))).toBe(false);
-    expect(isExplicit(scores({ Drawing: 0.9, Hentai: 0.1 }))).toBe(false);
-    expect(isExplicit([])).toBe(false);
+  it("shows neutral pictures and drawings at every level", () => {
+    expect(hiddenAt({ Neutral: 0.9, Sexy: 0.1 })).toEqual([]);
+    expect(hiddenAt({ Drawing: 0.85, Hentai: 0.1, Neutral: 0.05 })).toEqual([]);
+    expect(hiddenAt({})).toEqual([]);
+  });
+
+  it("hides at a level everything the level below it hides", () => {
+    for (let p = 0; p <= 1; p += 0.05) {
+      for (let s = 0; s <= 1 - p; s += 0.05) {
+        const hidden = hiddenAt({ Porn: p, Sexy: s });
+        // Once a level hides it, every stricter one does too.
+        const first = hidden[0] ? LEVELS.indexOf(hidden[0]) : LEVELS.length;
+        expect(hidden).toEqual(LEVELS.slice(first));
+      }
+    }
+  });
+});
+
+describe("formatScores", () => {
+  it("is explicit/suggestive to two places", () => {
+    expect(formatScores(scoresOf(scores({ Porn: 0.1, Hentai: 0.05, Sexy: 0.333 })))).toBe(
+      "0.15/0.33",
+    );
   });
 });
 
@@ -74,21 +102,16 @@ describe("sourceKind", () => {
   });
 });
 
-describe("VerdictCache", () => {
+describe("ScoreCache", () => {
   it("drops the least recently used entry", () => {
-    const cache = new VerdictCache(2);
-    cache.set("a", "clear");
-    cache.set("b", "hidden");
+    const cache = new ScoreCache(2);
+    const s = { explicit: 0, suggestive: 0 };
+    cache.set("a", s);
+    cache.set("b", s);
     cache.get("a");
-    cache.set("c", "clear");
-    expect(cache.get("a")).toBe("clear");
+    cache.set("c", s);
+    expect(cache.get("a")).toBe(s);
     expect(cache.get("b")).toBeUndefined();
     expect(cache.size).toBe(2);
-  });
-
-  it("does not remember failures, so they are retried", () => {
-    const cache = new VerdictCache();
-    cache.set("a", "error");
-    expect(cache.get("a")).toBeUndefined();
   });
 });

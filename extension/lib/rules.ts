@@ -8,6 +8,8 @@
  * extension is the preferred blocking path.
  */
 
+import type { FilterLevel } from "./image-filter";
+
 /** The rule set exactly as the desktop app serves it. */
 export interface RuleSet {
   scopes?: { rules: RuleSet; shared_permits: boolean | null; scheduled: boolean }[];
@@ -23,8 +25,8 @@ export interface RuleSet {
   /** Sites an allowance is keeping open. Sent with `scopes`. */
   allowance_domains?: string[];
   domain_categories?: Record<string, string>;
-  /** Blur images until the classifier clears them. Absent means off. */
-  filter_explicit_images?: boolean;
+  /** Blur images until the classifier clears them, this strictly. Absent means off. */
+  image_filter?: FilterLevel;
   version?: number;
 }
 
