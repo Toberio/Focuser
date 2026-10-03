@@ -89,6 +89,8 @@ export type FilterLevel = "explicit" | "balanced" | "strict";
 interface Rule {
   vit: number;
   nsfwjs: number;
+  /** NSFWJS's Sexy must also reach this. */
+  suggestive?: number;
 }
 
 export const THRESHOLDS: Record<
@@ -107,21 +109,27 @@ export const THRESHOLDS: Record<
     explicit: { vit: 0.3, nsfwjs: 0.7 },
     suggestive: { vit: 0.08, nsfwjs: 0.75 },
   },
-  // At strict, NSFWJS alone decides its two rules. Pictures that should be
-  // hidden scored as low on the ViT as wallpapers that should not (0.10–0.13
-  // against 0.06–0.16), with the same NSFWJS profile, so no ViT floor can keep
-  // one and lose the other. Strict errs on hiding; balanced keeps the floors.
+  // At strict, the ViT gets no say in NSFWJS's two rules. Pictures that should
+  // be hidden scored as low on the ViT as ones that should not (0.10–0.13
+  // against 0.05–0.16), so no ViT floor keeps one and loses the other. What
+  // did separate them: a real photo NSFWJS calls Porn also carries some Sexy
+  // (0.14), while its false alarms on abstract art and objects put nearly all
+  // of it on Porn (Sexy 0.03 in all three). Fitted on four images, so expect
+  // to move it.
   strict: {
     sure: 0.65,
     agree: { vit: 0.3, nsfwjs: 0.15 },
-    explicit: { vit: 0, nsfwjs: 0.5 },
+    explicit: { vit: 0, nsfwjs: 0.5, suggestive: 0.08 },
     suggestive: { vit: 0, nsfwjs: 0.35 },
   },
 };
 
 export function isExplicit(scores: Scores, level: FilterLevel): boolean {
   const t = THRESHOLDS[level];
-  const meets = (rule: Rule, nsfwjs: number) => scores.nsfw >= rule.vit && nsfwjs >= rule.nsfwjs;
+  const meets = (rule: Rule, nsfwjs: number) =>
+    scores.nsfw >= rule.vit &&
+    nsfwjs >= rule.nsfwjs &&
+    scores.suggestive >= (rule.suggestive ?? 0);
   return (
     scores.nsfw >= t.sure ||
     // At "explicit", NSFWJS's agreement means Porn or Hentai, never Sexy.
