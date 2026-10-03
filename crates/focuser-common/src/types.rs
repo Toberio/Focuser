@@ -33,6 +33,25 @@ pub enum ImageFilter {
     Strict,
 }
 
+/// Where the image filter's models are, as the settings page shows it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ImageFilterStatus {
+    /// No active list has the filter on; nothing is loaded.
+    Off,
+    /// Fetching the models the first time, in megabytes.
+    Downloading {
+        done_mb: u32,
+        total_mb: u32,
+    },
+    /// On disk, being loaded onto the GPU.
+    Loading,
+    Ready,
+    Failed {
+        error: String,
+    },
+}
+
 impl ImageFilter {
     pub fn is_off(&self) -> bool {
         *self == ImageFilter::Off

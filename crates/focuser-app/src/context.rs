@@ -50,6 +50,16 @@ pub trait SystemSync: Send + Sync {
     fn hosts_writable(&self) -> bool {
         true
     }
+
+    /// Where the image filter's models are, given the level the rules ask
+    /// for; asking also starts them if that level wants them. They run in the
+    /// GUI process, so any other context has none loaded.
+    fn image_filter_status(
+        &self,
+        _level: focuser_common::types::ImageFilter,
+    ) -> focuser_common::types::ImageFilterStatus {
+        focuser_common::types::ImageFilterStatus::Off
+    }
 }
 
 /// Does nothing. For tests and for headless contexts with no hosts access.
@@ -110,6 +120,13 @@ impl AppContext {
 
     pub fn connected_browsers(&self) -> Vec<String> {
         self.system.connected_browsers()
+    }
+
+    pub fn image_filter_status(
+        &self,
+        level: focuser_common::types::ImageFilter,
+    ) -> focuser_common::types::ImageFilterStatus {
+        self.system.image_filter_status(level)
     }
 
     /// Domains currently exempt from blocking because an allowance still has

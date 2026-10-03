@@ -1,6 +1,5 @@
-import { Ban, EyeOff, Globe, Plus, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Ban, Globe, Plus, ShieldCheck, TriangleAlert } from "lucide-react";
 import { type FormEvent, useState } from "react";
-import type { ImageFilter as ImageFilterLevel } from "@/bindings";
 import { ListPicker, resolveSelected } from "@/components/list-picker";
 import { RuleTable } from "@/components/rule-table";
 import { StarterLists } from "@/components/starter-lists";
@@ -18,10 +17,8 @@ import {
   useBlockingHealth,
   useBlockLists,
   useBulkImportWebsites,
-  useProtectionStatus,
   useRemoveException,
   useRemoveWebsiteRule,
-  useSetImageFilter,
 } from "@/lib/commands";
 import {
   describeException,
@@ -92,7 +89,6 @@ const CATCH_ALL = /^[*.\s]+$/;
 export function Websites() {
   const lists = useBlockLists();
   const health = useBlockingHealth();
-  const protection = useProtectionStatus();
   const [rawSelected, setSelected] = useState("");
   const [tab, setTab] = useState<Tab>("blocked");
 
@@ -127,11 +123,6 @@ export function Websites() {
           />
         ) : (
           <>
-            <ImageFilter
-              listId={list.id}
-              level={list.image_filter ?? "off"}
-              locked={(protection.data ?? []).some((p) => p.block_list_id === list.id)}
-            />
             <Tabs
               className="mb-5"
               value={tab}
@@ -156,87 +147,6 @@ export function Websites() {
         )}
       </QueryState>
     </Page>
-  );
-}
-
-const FILTER_LEVELS = [
-  "off",
-  "explicit",
-  "balanced",
-  "strict",
-] as const satisfies readonly ImageFilterLevel[];
-
-/** Called during render, for the same reason as `KIND_LABEL`. */
-function filterLevelLabel(level: ImageFilterLevel): { label: string; hint: string } {
-  switch (level) {
-    case "off":
-      return { label: m.websites_image_filter_off(), hint: m.websites_image_filter_off_hint() };
-    case "explicit":
-      return {
-        label: m.websites_image_filter_explicit(),
-        hint: m.websites_image_filter_explicit_hint(),
-      };
-    case "balanced":
-      return {
-        label: m.websites_image_filter_balanced(),
-        hint: m.websites_image_filter_balanced_hint(),
-      };
-    case "strict":
-      return {
-        label: m.websites_image_filter_strict(),
-        hint: m.websites_image_filter_strict_hint(),
-      };
-  }
-}
-
-/**
- * The browser image filter for one list.
- *
- * A lock may only tighten, so a locked list is offered only its current level
- * and stricter ones. The backend refuses a looser one either way; leaving it
- * out of the menu says so before anyone tries.
- */
-function ImageFilter({
-  listId,
-  level,
-  locked,
-}: {
-  listId: string;
-  level: ImageFilterLevel;
-  locked: boolean;
-}) {
-  const set = useSetImageFilter();
-  const current = FILTER_LEVELS.indexOf(level);
-  const options = FILTER_LEVELS.filter((_, i) => !locked || i >= current).map((value) => ({
-    value,
-    ...filterLevelLabel(value),
-  }));
-
-  return (
-    <Card className="mb-5" padding="md" elevation="raised">
-      <div className="flex items-center justify-between gap-6">
-        <div className="min-w-0">
-          <p className="flex items-center gap-2 font-medium text-foreground text-sm">
-            <EyeOff aria-hidden className="size-4 text-muted-foreground" />
-            {m.websites_image_filter_title()}
-          </p>
-          <p className="mt-1 text-muted-foreground text-xs">
-            {locked && level !== "off"
-              ? m.websites_image_filter_locked()
-              : m.websites_image_filter_description()}
-          </p>
-        </div>
-        <Select
-          value={level}
-          onValueChange={(next) => set.mutate({ listId, level: next })}
-          options={options}
-          disabled={set.isPending}
-          aria-label={m.websites_image_filter_title()}
-          className="w-44 shrink-0"
-        />
-      </div>
-      <InlineError error={set.error} />
-    </Card>
   );
 }
 

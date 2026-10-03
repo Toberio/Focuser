@@ -79,6 +79,7 @@ export const queryKeys = {
   events: (from: string, to: string) => ["events", from, to] as const,
   retention: ["stats-retention"] as const,
   browsers: ["browsers"] as const,
+  imageFilterStatus: ["image-filter-status"] as const,
   setting: (key: string) => ["setting", key] as const,
   appIcons: (targets: string[]) => ["app-icons", ...targets] as const,
 };
@@ -341,6 +342,14 @@ export const useConfigureSharedAllowance = () =>
     cmd: "configure_shared_allowance",
     args: { list_id: a.listId, minutes: a.minutes },
   }));
+
+export function useImageFilterStatus() {
+  return useQuery({
+    queryKey: queryKeys.imageFilterStatus,
+    queryFn: async () =>
+      expect(await run({ cmd: "get_image_filter_status" }), "image_filter_status").data,
+  });
+}
 
 export const useSetImageFilter = () =>
   useBlockListMutation<{ listId: string; level: ImageFilter }>((a) => ({
