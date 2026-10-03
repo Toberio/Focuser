@@ -1,6 +1,63 @@
 use focuser_common::error::{FocuserError, Result};
+use focuser_common::types::BlockList;
 use rusqlite::Connection;
 use tracing::info;
+
+/// One migration step: either schema SQL, or a data transform that needs
+/// Rust to deserialize and rewrite rows (SQLite alone cannot rewrite the
+/// JSON `data` column against Serde's rules).
+enum Step {
+    Sql(&'static str),
+    Code(fn(&Connection) -> Result<()>),
+}
+
+/// Reclassify website rules that were stored as the wrong match type —
+/// `Wildcard("*word*")` into `Keyword("word")`, and any `Domain` value that
+/// was typed with a `*` in it into `Wildcard` or `Keyword` — see
+/// [`focuser_common::types::WebsiteMatchType::simplify`].
+///
+/// Idempotent, so it is safe to run again as a later migration when
+/// `simplify` itself grows to catch more shapes: rules `simplify` already
+/// fixed just come back unchanged.
+fn reclassify_mistyped_website_rules(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT id, data FROM block_lists")
+        .map_err(|e| FocuserError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| FocuserError::Database(e.to_string()))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| FocuserError::Database(e.to_string()))?;
+    drop(stmt);
+
+    for (id, json) in rows {
+        let Ok(mut list) = serde_json::from_str::<BlockList>(&json) else {
+            continue;
+        };
+
+        let mut changed = false;
+        for rule in &mut list.websites {
+            let before = rule.match_type.clone();
+            rule.match_type.simplify();
+            changed |= rule.match_type != before;
+        }
+        if !changed {
+            continue;
+        }
+
+        let updated =
+            serde_json::to_string(&list).map_err(|e| FocuserError::Database(e.to_string()))?;
+        conn.execute(
+            "UPDATE block_lists SET data = ?1 WHERE id = ?2",
+            rusqlite::params![updated, id],
+        )
+        .map_err(|e| FocuserError::Database(e.to_string()))?;
+    }
+
+    Ok(())
+}
 
 /// Run all database migrations.
 pub fn run_all(conn: &Connection) -> Result<()> {
@@ -19,10 +76,11 @@ pub fn run_all(conn: &Connection) -> Result<()> {
         )
         .unwrap_or(0);
 
-    let migrations: &[(&str, &str)] = &[
+    let migrations: &[(&str, Step)] = &[
         (
             "v1: block_lists and statistics",
-            "CREATE TABLE IF NOT EXISTS block_lists (
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS block_lists (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 data TEXT NOT NULL,
@@ -52,10 +110,12 @@ pub fn run_all(conn: &Connection) -> Result<()> {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );",
+            ),
         ),
         (
             "v2: blocked_events for fine-grained timeline",
-            "CREATE TABLE IF NOT EXISTS blocked_events (
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS blocked_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 domain_or_app TEXT NOT NULL,
                 timestamp TEXT NOT NULL
@@ -65,10 +125,12 @@ pub fn run_all(conn: &Connection) -> Result<()> {
                 ON blocked_events(timestamp);
             CREATE INDEX IF NOT EXISTS idx_blocked_events_domain
                 ON blocked_events(domain_or_app);",
+            ),
         ),
         (
             "v3: pomodoro sessions and phase log",
-            "CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS pomodoro_sessions (
                 id TEXT PRIMARY KEY,
                 block_list_id TEXT NOT NULL,
                 work_secs INTEGER NOT NULL,
@@ -99,10 +161,12 @@ pub fn run_all(conn: &Connection) -> Result<()> {
 
             CREATE INDEX IF NOT EXISTS idx_pomodoro_phases_session
                 ON pomodoro_phases(session_id);",
+            ),
         ),
         (
             "v4: allowances and daily usage",
-            "CREATE TABLE IF NOT EXISTS allowances (
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS allowances (
                 id TEXT PRIMARY KEY,
                 match_type TEXT NOT NULL,
                 match_value TEXT NOT NULL,
@@ -124,15 +188,30 @@ pub fn run_all(conn: &Connection) -> Result<()> {
 
             CREATE INDEX IF NOT EXISTS idx_allowance_usage_date
                 ON allowance_usage(usage_date);",
+            ),
+        ),
+        (
+            "v5: reclassify *word* wildcards stored before Keyword existed as such",
+            Step::Code(reclassify_mistyped_website_rules),
+        ),
+        (
+            "v6: also reclassify Domain rules that were typed with a * in them",
+            Step::Code(reclassify_mistyped_website_rules),
         ),
     ];
 
-    for (i, (name, sql)) in migrations.iter().enumerate() {
+    for (i, (name, step)) in migrations.iter().enumerate() {
         let version = (i + 1) as i64;
         if version > current_version {
             info!("Running migration {version}: {name}");
-            conn.execute_batch(sql)
-                .map_err(|e| FocuserError::Database(format!("Migration {version} failed: {e}")))?;
+            match step {
+                Step::Sql(sql) => conn.execute_batch(sql).map_err(|e| {
+                    FocuserError::Database(format!("Migration {version} failed: {e}"))
+                })?,
+                Step::Code(f) => f(conn).map_err(|e| {
+                    FocuserError::Database(format!("Migration {version} failed: {e}"))
+                })?,
+            }
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?1)",
                 rusqlite::params![version],
@@ -142,4 +221,142 @@ pub fn run_all(conn: &Connection) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use focuser_common::types::{WebsiteMatchType, WebsiteRule};
+
+    /// Just the `block_lists` table, as it looked before migration v5 —
+    /// enough to exercise [`reclassify_mistyped_website_rules`] on its own,
+    /// without going through `run_all` (which would apply it to an empty
+    /// table and leave nothing to reclassify).
+    fn conn_with_a_stored_list(list: &BlockList) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE block_lists (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                data TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO block_lists (id, name, data, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            rusqlite::params![
+                list.id.to_string(),
+                list.name,
+                serde_json::to_string(list).unwrap(),
+                list.enabled,
+                list.created_at.to_rfc3339(),
+            ],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn stored_match_type(
+        conn: &Connection,
+        id: focuser_common::types::EntityId,
+    ) -> WebsiteMatchType {
+        let json: String = conn
+            .query_row(
+                "SELECT data FROM block_lists WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<BlockList>(&json).unwrap().websites[0]
+            .match_type
+            .clone()
+    }
+
+    #[test]
+    fn a_star_word_star_wildcard_already_in_the_database_becomes_a_keyword() {
+        let mut list = BlockList::new("Distractions");
+        list.websites.push(WebsiteRule::wildcard("*avadumbdumb*"));
+        let conn = conn_with_a_stored_list(&list);
+
+        reclassify_mistyped_website_rules(&conn).unwrap();
+
+        assert_eq!(
+            stored_match_type(&conn, list.id),
+            WebsiteMatchType::Keyword("avadumbdumb".into())
+        );
+    }
+
+    #[test]
+    fn a_real_glob_wildcard_is_left_alone() {
+        let mut list = BlockList::new("Distractions");
+        list.websites.push(WebsiteRule::wildcard("*.reddit.com"));
+        let conn = conn_with_a_stored_list(&list);
+
+        reclassify_mistyped_website_rules(&conn).unwrap();
+
+        assert_eq!(
+            stored_match_type(&conn, list.id),
+            WebsiteMatchType::Wildcard("*.reddit.com".into())
+        );
+    }
+
+    #[test]
+    fn a_list_with_nothing_to_reclassify_is_not_rewritten() {
+        let mut list = BlockList::new("Distractions");
+        list.websites.push(WebsiteRule::domain("reddit.com"));
+        let conn = conn_with_a_stored_list(&list);
+
+        reclassify_mistyped_website_rules(&conn).unwrap();
+
+        assert_eq!(
+            stored_match_type(&conn, list.id),
+            WebsiteMatchType::Domain("reddit.com".into())
+        );
+    }
+
+    #[test]
+    fn a_domain_typed_with_a_star_word_star_becomes_a_keyword() {
+        let mut list = BlockList::new("Distractions");
+        list.websites.push(WebsiteRule::domain("*avadumbdumb*"));
+        let conn = conn_with_a_stored_list(&list);
+
+        reclassify_mistyped_website_rules(&conn).unwrap();
+
+        assert_eq!(
+            stored_match_type(&conn, list.id),
+            WebsiteMatchType::Keyword("avadumbdumb".into())
+        );
+    }
+
+    #[test]
+    fn a_domain_typed_with_a_real_glob_moves_to_wildcard() {
+        let mut list = BlockList::new("Distractions");
+        list.websites.push(WebsiteRule::domain("*ai*nsfw*"));
+        let conn = conn_with_a_stored_list(&list);
+
+        reclassify_mistyped_website_rules(&conn).unwrap();
+
+        assert_eq!(
+            stored_match_type(&conn, list.id),
+            WebsiteMatchType::Wildcard("*ai*nsfw*".into())
+        );
+    }
+
+    #[test]
+    fn a_domain_too_short_to_safely_promote_is_left_exactly_as_broken_as_it_was() {
+        let mut list = BlockList::new("Distractions");
+        list.websites.push(WebsiteRule::domain("*r"));
+        let conn = conn_with_a_stored_list(&list);
+
+        reclassify_mistyped_website_rules(&conn).unwrap();
+
+        assert_eq!(
+            stored_match_type(&conn, list.id),
+            WebsiteMatchType::Domain("*r".into())
+        );
+    }
 }

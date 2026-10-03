@@ -89,7 +89,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             let key = website_key(&created);
             let mut out = created.clone();
 
-            mutate_list(ctx, &mut engine, list_id, |list| {
+            mutate_list_for_addition(ctx, &mut engine, list_id, |list| {
                 // Adding the same site twice should not make two rules.
                 match list.websites.iter().find(|r| website_key(r) == key) {
                     Some(existing) => out = existing.clone(),
@@ -113,7 +113,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             kind,
         } => {
             let mut added = 0u32;
-            mutate_list(ctx, &mut engine, list_id, |list| {
+            mutate_list_for_addition(ctx, &mut engine, list_id, |list| {
                 for raw in &values {
                     let value = raw.trim().to_lowercase();
                     // Blank lines and `#` comments come from pasted host files
@@ -158,7 +158,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 enabled: true,
             };
             let out = created.clone();
-            mutate_list(ctx, &mut engine, list_id, |list| {
+            mutate_list_for_addition(ctx, &mut engine, list_id, |list| {
                 list.applications.push(created);
                 Ok(())
             })?;
@@ -867,6 +867,30 @@ fn mutate_list(
     Ok(())
 }
 
+/// Load a list, apply `edit`, persist, refresh, re-sync hosts — with no
+/// protection check.
+///
+/// For additions only: a locked or protected list exists to stop someone
+/// from escaping a commitment by loosening it, and a brand-new block rule
+/// only makes blocking stricter, so there is nothing for the lock to guard
+/// against. [`mutate_list`] still gates removals, since those do loosen
+/// coverage.
+fn mutate_list_for_addition(
+    ctx: &AppContext,
+    engine: &mut BlockEngine,
+    list_id: EntityId,
+    edit: impl FnOnce(&mut BlockList) -> CommandOutcome<()>,
+) -> CommandOutcome<()> {
+    let mut list = engine.db().get_block_list(list_id)?;
+    edit(&mut list)?;
+    list.updated_at = chrono::Utc::now();
+
+    engine.db().update_block_list(&list)?;
+    engine.refresh()?;
+    ctx.sync_hosts(engine);
+    Ok(())
+}
+
 /// Remove the element with `id`, or report it missing.
 ///
 /// The old commands used `retain`, which silently succeeded when the id did not
@@ -947,6 +971,7 @@ fn normalize(match_type: &mut WebsiteMatchType) {
     if let WebsiteMatchType::Domain(d) = match_type {
         *d = canonical_host(d);
     }
+    match_type.simplify();
 }
 
 /// Reject mutations to a block list whose protection window is still open,
@@ -1133,6 +1158,50 @@ mod tests {
         assert!(matches!(
             &stored[0].match_type,
             WebsiteMatchType::Keyword(k) if k == "casino"
+        ));
+    }
+
+    #[test]
+    fn a_star_word_star_wildcard_is_added_as_a_keyword() {
+        let ctx = ctx();
+        let list = create(&ctx, "Sites");
+
+        execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Wildcard("*avadumbdumb*".into()),
+            },
+        )
+        .unwrap();
+
+        let stored = &lists(&ctx)[0].websites;
+        assert_eq!(stored.len(), 1);
+        assert!(matches!(
+            &stored[0].match_type,
+            WebsiteMatchType::Keyword(k) if k == "avadumbdumb"
+        ));
+    }
+
+    #[test]
+    fn a_domain_typed_with_star_word_star_is_added_as_a_keyword() {
+        let ctx = ctx();
+        let list = create(&ctx, "Sites");
+
+        execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("*avadumbdumb*".into()),
+            },
+        )
+        .unwrap();
+
+        let stored = &lists(&ctx)[0].websites;
+        assert_eq!(stored.len(), 1);
+        assert!(matches!(
+            &stored[0].match_type,
+            WebsiteMatchType::Keyword(k) if k == "avadumbdumb"
         ));
     }
 
@@ -1597,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn protection_blocks_modification_and_disabling_but_not_enabling() {
+    fn protection_blocks_disabling_and_removal_but_not_adding_or_enabling() {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
         protect(&ctx, list.id).unwrap();
@@ -1613,19 +1682,33 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code(), "protected");
 
-        // So would deleting it, or editing its rules.
+        // So would deleting it.
         assert_eq!(
             execute(&ctx, Command::DeleteBlockList { id: list.id })
                 .unwrap_err()
                 .code(),
             "protected"
         );
+
+        // Adding a new rule only makes blocking stricter, so it stays allowed.
+        let CommandResult::WebsiteRule(added) = execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("x.com".into()),
+            },
+        )
+        .unwrap() else {
+            panic!("expected a website rule back");
+        };
+
+        // But removing one would loosen coverage, so that stays blocked.
         assert_eq!(
             execute(
                 &ctx,
-                Command::AddWebsiteRule {
+                Command::RemoveWebsiteRule {
                     list_id: list.id,
-                    rule: WebsiteMatchType::Domain("x.com".into()),
+                    rule_id: added.id,
                 },
             )
             .unwrap_err()
@@ -1694,7 +1777,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_lock_blocks_modification_and_disabling_but_not_enabling() {
+    fn typing_lock_blocks_disabling_and_removal_but_not_adding_or_enabling() {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
         typing_lock(&ctx, list.id, 32).unwrap();
@@ -1715,12 +1798,27 @@ mod tests {
                 .code(),
             "protected"
         );
+
+        // Adding a new rule only makes blocking stricter, so it stays allowed
+        // even while the list is typing-locked.
+        let CommandResult::WebsiteRule(added) = execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("x.com".into()),
+            },
+        )
+        .unwrap() else {
+            panic!("expected a website rule back");
+        };
+
+        // Removing one would loosen coverage, so that stays blocked.
         assert_eq!(
             execute(
                 &ctx,
-                Command::AddWebsiteRule {
+                Command::RemoveWebsiteRule {
                     list_id: list.id,
-                    rule: WebsiteMatchType::Domain("x.com".into()),
+                    rule_id: added.id,
                 },
             )
             .unwrap_err()
@@ -1737,6 +1835,73 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_locked_list_accepts_new_app_rules_and_bulk_imports_but_refuses_removal() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        typing_lock(&ctx, list.id, 32).unwrap();
+
+        let CommandResult::AppRule(added) = execute(
+            &ctx,
+            Command::AddAppRule {
+                list_id: list.id,
+                rule: AppMatchType::ExecutableName("steam.exe".into()),
+            },
+        )
+        .unwrap() else {
+            panic!("expected an app rule back");
+        };
+
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::RemoveAppRule {
+                    list_id: list.id,
+                    rule_id: added.id,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+
+        let CommandResult::Count(imported) = execute(
+            &ctx,
+            Command::BulkImportWebsites {
+                list_id: list.id,
+                values: vec!["reddit.com".into()],
+                kind: WebsiteRuleKind::Domain,
+            },
+        )
+        .unwrap() else {
+            panic!("expected an import count back");
+        };
+        assert_eq!(imported, 1);
+    }
+
+    #[test]
+    fn a_locked_list_still_refuses_new_exceptions() {
+        // Unlike a new block rule, a new exception loosens coverage — it is a
+        // carve-out, the same direction as removing a rule — so it must stay
+        // gated the same as removal.
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        typing_lock(&ctx, list.id, 32).unwrap();
+
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::AddException {
+                    list_id: list.id,
+                    exception: ExceptionType::Domain("docs.example.com".into()),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
     }
 
     #[test]
