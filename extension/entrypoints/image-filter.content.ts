@@ -3,12 +3,17 @@ import type { Message, MessageReply } from "@/lib/messages";
 import { send } from "@/lib/messages";
 
 /**
- * Blurs every image and video, then shows each one the classifier clears.
+ * Blurs the images and videos the classifier finds explicit.
  *
  * Registered by the background only while a list has the filter on, so a page
- * pays nothing for it otherwise. It runs at `document_start` so the blur is in
- * place before the first image can paint: hiding an image after it has been
- * seen would be no filter at all.
+ * pays nothing for it otherwise.
+ *
+ * Images show until judged, and are blurred if the verdict says so. Blurring
+ * everything first and revealing what passes would never show an explicit
+ * image even for a moment, and was the first design. In use it made ordinary
+ * sites misbehave: a filter and clip on every image and video, the whole time
+ * they waited. A verdict takes tens of milliseconds on a GPU, and a cached
+ * one none, so the window it trades away is short.
  *
  * Images are judged once per source. Videos are judged on their poster and
  * then on a frame every few seconds while they play, since a clip that opens
@@ -22,7 +27,7 @@ import { send } from "@/lib/messages";
 const ATTR = "data-focuser-image";
 /** The scores behind a verdict, readable in DevTools, for tuning the thresholds. */
 const SCORE_ATTR = "data-focuser-score";
-const STYLE = `:is(img,video):not([${ATTR}="clear"]){filter:blur(28px) grayscale(1)!important;clip-path:inset(0)!important}`;
+const STYLE = `:is(img,video)[${ATTR}="hidden"]{filter:blur(28px) grayscale(1)!important;clip-path:inset(0)!important}`;
 /** Start judging an image this far before it scrolls into view. */
 const LOOKAHEAD = "100% 0px";
 /** How often a playing, visible video has a frame checked. */
@@ -188,7 +193,7 @@ export default defineContentScript({
       nearView.observe(el);
     }
 
-    /** A changed source is a new image, and it is blurred again until judged. */
+    /** A changed source is a new image, and the old verdict does not apply to it. */
     function forget(el: Media) {
       judged.delete(el);
       el.removeAttribute(ATTR);
@@ -217,7 +222,8 @@ export default defineContentScript({
     document.addEventListener("playing", onLoad, true);
     document.addEventListener("emptied", onEmptied, true);
 
-    // Runs before the next paint, so a swapped-in image never shows unjudged.
+    // Runs before the next paint, so an image swapped in for a hidden one is
+    // not blurred for its predecessor's sake, nor shown with its blur kept.
     const mutations = new MutationObserver((records) => {
       for (const record of records) {
         if (record.type === "childList") {
@@ -267,12 +273,13 @@ export default defineContentScript({
     ) => {
       const type = (raw as Message).type;
       if (type === "image-filter-rejudge") {
-        // The classifier keeps its scores, so this is quick: each image is
-        // blurred again for as long as a cached lookup takes.
+        // The classifier keeps its scores, so this is quick. Each verdict
+        // stays in place until its replacement arrives, so nothing hidden is
+        // shown while the new level is applied.
         verdicts.clear();
         for (const el of Array.from(document.querySelectorAll(`[${ATTR}]`))) {
           if (el instanceof HTMLImageElement || el instanceof HTMLVideoElement) {
-            forget(el);
+            judged.delete(el);
             consider(el);
           }
         }

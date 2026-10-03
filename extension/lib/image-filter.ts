@@ -72,11 +72,13 @@ export type FilterLevel = "explicit" | "balanced" | "strict";
  * - `agree`: both lean that way. In the ViT's uncertain middle it hides only
  *   if NSFWJS also sees something. Each model has false alarms the other does
  *   not share: glossy abstract art got 0.48 from the ViT and 0.02 from NSFWJS;
- *   an abstract wallpaper got 0.16 from the ViT and 0.88 from NSFWJS.
- * - `nsfwjsSure`: NSFWJS is sure and the ViT is not sure it is safe. This is
- *   how suggestive pictures, which the ViT folds into safe or unsafe, are caught.
- *
- * At "explicit" NSFWJS counts only its Porn and Hentai, never Sexy.
+ *   an abstract wallpaper got 0.16 from the ViT and 0.88 Porn from NSFWJS.
+ * - `explicit`: NSFWJS's Porn plus Hentai is high and the ViT is not sure the
+ *   image is safe.
+ * - `suggestive`: NSFWJS's Sexy is high and the ViT gives it more than its
+ *   floor. This is the only way a cleavage shot is caught: the ViT was trained
+ *   on nudity against everything else, and scored them 0.10–0.13. NSFWJS's
+ *   false alarms so far were all Porn, with Sexy near zero.
  *
  * Every threshold falls as the level rises, so each level hides everything
  * the one before it does.
@@ -84,42 +86,48 @@ export type FilterLevel = "explicit" | "balanced" | "strict";
  * The ViT was trained with label smoothing, so it rarely says much below 0.05
  * or above 0.95: plain landscapes score about 0.06.
  */
+interface Rule {
+  vit: number;
+  nsfwjs: number;
+}
+
 export const THRESHOLDS: Record<
   FilterLevel,
-  {
-    sure: number;
-    agree: { vit: number; nsfwjs: number };
-    nsfwjsSure: { nsfwjs: number; vit: number };
-    countSuggestive: boolean;
-  }
+  { sure: number; agree: Rule; explicit: Rule; suggestive: Rule }
 > = {
   explicit: {
     sure: 0.85,
     agree: { vit: 0.6, nsfwjs: 0.3 },
-    nsfwjsSure: { nsfwjs: Number.POSITIVE_INFINITY, vit: 1 },
-    countSuggestive: false,
+    explicit: { vit: 1, nsfwjs: Number.POSITIVE_INFINITY },
+    suggestive: { vit: 1, nsfwjs: Number.POSITIVE_INFINITY },
   },
   balanced: {
     sure: 0.75,
     agree: { vit: 0.45, nsfwjs: 0.25 },
-    nsfwjsSure: { nsfwjs: 0.7, vit: 0.3 },
-    countSuggestive: true,
+    explicit: { vit: 0.3, nsfwjs: 0.7 },
+    suggestive: { vit: 0.08, nsfwjs: 0.75 },
   },
+  // At strict, NSFWJS alone decides its two rules. Pictures that should be
+  // hidden scored as low on the ViT as wallpapers that should not (0.10–0.13
+  // against 0.06–0.16), with the same NSFWJS profile, so no ViT floor can keep
+  // one and lose the other. Strict errs on hiding; balanced keeps the floors.
   strict: {
     sure: 0.65,
     agree: { vit: 0.3, nsfwjs: 0.15 },
-    nsfwjsSure: { nsfwjs: 0.5, vit: 0.2 },
-    countSuggestive: true,
+    explicit: { vit: 0, nsfwjs: 0.5 },
+    suggestive: { vit: 0, nsfwjs: 0.35 },
   },
 };
 
 export function isExplicit(scores: Scores, level: FilterLevel): boolean {
   const t = THRESHOLDS[level];
-  const nsfwjs = scores.explicit + (t.countSuggestive ? scores.suggestive : 0);
+  const meets = (rule: Rule, nsfwjs: number) => scores.nsfw >= rule.vit && nsfwjs >= rule.nsfwjs;
   return (
     scores.nsfw >= t.sure ||
-    (scores.nsfw >= t.agree.vit && nsfwjs >= t.agree.nsfwjs) ||
-    (nsfwjs >= t.nsfwjsSure.nsfwjs && scores.nsfw >= t.nsfwjsSure.vit)
+    // At "explicit", NSFWJS's agreement means Porn or Hentai, never Sexy.
+    meets(t.agree, scores.explicit + (level === "explicit" ? 0 : scores.suggestive)) ||
+    meets(t.explicit, scores.explicit) ||
+    meets(t.suggestive, scores.suggestive)
   );
 }
 
