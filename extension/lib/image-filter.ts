@@ -66,29 +66,60 @@ export function scoresOf(predictions: Prediction[]): Omit<Scores, "nsfw"> {
 export type FilterLevel = "explicit" | "balanced" | "strict";
 
 /**
- * Per level, hide when either:
- * - the ViT's NSFW probability reaches `nsfw`, or
- * - NSFWJS's explicit plus suggestive reaches `nsfwjs` *and* the ViT gives it
- *   at least `floor`, so a picture the ViT is sure is safe stays shown.
+ * Per level, hide when any of these holds:
+ *
+ * - `sure`: the ViT alone is sure.
+ * - `agree`: both lean that way. In the ViT's uncertain middle it hides only
+ *   if NSFWJS also sees something. Each model has false alarms the other does
+ *   not share: glossy abstract art got 0.48 from the ViT and 0.02 from NSFWJS;
+ *   an abstract wallpaper got 0.16 from the ViT and 0.88 from NSFWJS.
+ * - `nsfwjsSure`: NSFWJS is sure and the ViT is not sure it is safe. This is
+ *   how suggestive pictures, which the ViT folds into safe or unsafe, are caught.
+ *
+ * At "explicit" NSFWJS counts only its Porn and Hentai, never Sexy.
  *
  * Every threshold falls as the level rises, so each level hides everything
  * the one before it does.
  *
  * The ViT was trained with label smoothing, so it rarely says much below 0.05
- * or above 0.95: plain landscapes score about 0.06. The floors sit well clear
- * of that. An abstract wallpaper NSFWJS called 0.88 porn got 0.16 from the ViT.
+ * or above 0.95: plain landscapes score about 0.06.
  */
-export const THRESHOLDS: Record<FilterLevel, { nsfw: number; nsfwjs: number; floor: number }> = {
-  explicit: { nsfw: 0.7, nsfwjs: Number.POSITIVE_INFINITY, floor: 1 },
-  balanced: { nsfw: 0.5, nsfwjs: 0.6, floor: 0.25 },
-  strict: { nsfw: 0.35, nsfwjs: 0.4, floor: 0.2 },
+export const THRESHOLDS: Record<
+  FilterLevel,
+  {
+    sure: number;
+    agree: { vit: number; nsfwjs: number };
+    nsfwjsSure: { nsfwjs: number; vit: number };
+    countSuggestive: boolean;
+  }
+> = {
+  explicit: {
+    sure: 0.85,
+    agree: { vit: 0.6, nsfwjs: 0.3 },
+    nsfwjsSure: { nsfwjs: Number.POSITIVE_INFINITY, vit: 1 },
+    countSuggestive: false,
+  },
+  balanced: {
+    sure: 0.75,
+    agree: { vit: 0.45, nsfwjs: 0.25 },
+    nsfwjsSure: { nsfwjs: 0.7, vit: 0.3 },
+    countSuggestive: true,
+  },
+  strict: {
+    sure: 0.65,
+    agree: { vit: 0.3, nsfwjs: 0.15 },
+    nsfwjsSure: { nsfwjs: 0.5, vit: 0.2 },
+    countSuggestive: true,
+  },
 };
 
 export function isExplicit(scores: Scores, level: FilterLevel): boolean {
   const t = THRESHOLDS[level];
+  const nsfwjs = scores.explicit + (t.countSuggestive ? scores.suggestive : 0);
   return (
-    scores.nsfw >= t.nsfw ||
-    (scores.explicit + scores.suggestive >= t.nsfwjs && scores.nsfw >= t.floor)
+    scores.nsfw >= t.sure ||
+    (scores.nsfw >= t.agree.vit && nsfwjs >= t.agree.nsfwjs) ||
+    (nsfwjs >= t.nsfwjsSure.nsfwjs && scores.nsfw >= t.nsfwjsSure.vit)
   );
 }
 
