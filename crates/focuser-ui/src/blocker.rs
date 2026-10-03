@@ -351,12 +351,24 @@ fn enforce_browser_extension(
         if !proc.is_killable() {
             continue;
         }
-        if let Some(info) = identify_browser(&proc.name) {
-            running
-                .entry(info.browser_type.clone())
-                .or_default()
-                .push(proc.pid);
+        let Some(info) = identify_browser(&proc.name) else {
+            continue;
+        };
+        // Chromium's renderer, GPU, zygote, and utility subprocesses exec the
+        // same binary as the browser itself, so on Linux they report the
+        // identical `/proc/[pid]/comm` name as the top-level process — there
+        // is no way to tell them apart by name. Killing them individually
+        // bypasses the browser's own shutdown path entirely and reads as a
+        // crash, not a close. Every subprocess carries `--type=...`; the
+        // top-level process never does.
+        let is_subprocess = process::cmdline(proc.pid).is_some_and(|cmd| cmd.contains("--type="));
+        if is_subprocess {
+            continue;
         }
+        running
+            .entry(info.browser_type.clone())
+            .or_default()
+            .push(proc.pid);
     }
 
     // Generous 2-minute window: extensions use chrome.alarms, which fires
