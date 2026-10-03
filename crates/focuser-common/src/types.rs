@@ -117,7 +117,7 @@ impl BlockList {
         }
         Some(Protection {
             started_at,
-            expires_at,
+            expires_at: Some(expires_at),
             prevent_modification: true,
             prevent_service_stop: true,
             prevent_uninstall: true,
@@ -142,7 +142,7 @@ impl BlockList {
         if self
             .protection
             .as_ref()
-            .is_some_and(|p| p.prevent_modification && now.with_timezone(&Utc) < p.expires_at)
+            .is_some_and(|p| p.prevent_modification && p.is_active_at(now.with_timezone(&Utc)))
         {
             return ScheduledLockState::Locked;
         }
@@ -167,7 +167,8 @@ impl BlockList {
                 p.prevent_modification |= s.prevent_modification;
                 p.prevent_service_stop |= s.prevent_service_stop;
                 p.prevent_uninstall |= s.prevent_uninstall;
-                p.expires_at = p.expires_at.max(s.expires_at);
+                // `None` (until unlocked) outlasts any end time.
+                p.expires_at = p.expires_at.zip(s.expires_at).map(|(a, b)| a.max(b));
                 Some(p)
             }
             (p, s) => p.or(s),
@@ -467,7 +468,9 @@ pub struct Protection {
     pub prevent_service_stop: bool,
     pub prevent_modification: bool,
     pub started_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    /// `None` means until unlocked: no timer, the list's lock is the only way
+    /// out. Only ever set together with a lock, so there always is one.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl Protection {
@@ -478,17 +481,29 @@ impl Protection {
             prevent_service_stop: true,
             prevent_modification: true,
             started_at: now,
-            expires_at: now + chrono::Duration::minutes(minutes as i64),
+            expires_at: Some(now + chrono::Duration::minutes(minutes as i64)),
+        }
+    }
+
+    pub fn until_unlocked() -> Self {
+        Self {
+            expires_at: None,
+            ..Self::for_duration(0)
         }
     }
 
     pub fn is_active(&self) -> bool {
-        Utc::now() < self.expires_at
+        self.is_active_at(Utc::now())
     }
 
-    pub fn remaining_seconds(&self) -> u64 {
-        let remaining = self.expires_at - Utc::now();
-        remaining.num_seconds().max(0) as u64
+    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_none_or(|end| now < end)
+    }
+
+    /// `None` while it runs until unlocked.
+    pub fn remaining_seconds(&self) -> Option<u64> {
+        self.expires_at
+            .map(|end| (end - Utc::now()).num_seconds().max(0) as u64)
     }
 }
 
@@ -522,9 +537,10 @@ pub enum Lock {
 
 impl Lock {
     /// A challenge shorter than this is typed too easily to add real
-    /// friction; longer than this is just a typo generator.
+    /// friction. The ceiling is high on purpose: for a lock with no timer,
+    /// a long text is the whole point.
     pub const MIN_RANDOM_TEXT_LEN: u32 = 6;
-    pub const MAX_RANDOM_TEXT_LEN: u32 = 256;
+    pub const MAX_RANDOM_TEXT_LEN: u32 = 5000;
 
     /// Characters that stay unambiguous in a UI font — no `0`/`O`, `1`/`l`/`I`.
     /// A challenge that is impossible to transcribe correctly defeats the

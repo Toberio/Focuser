@@ -1,5 +1,5 @@
 use focuser_common::error::{FocuserError, Result};
-use focuser_common::types::BlockList;
+use focuser_common::types::{BlockList, Lock, Protection};
 use rusqlite::Connection;
 use tracing::info;
 
@@ -20,6 +20,40 @@ enum Step {
 /// `simplify` itself grows to catch more shapes: rules `simplify` already
 /// fixed just come back unchanged.
 fn reclassify_mistyped_website_rules(conn: &Connection) -> Result<()> {
+    rewrite_block_lists(conn, |list| {
+        let mut changed = false;
+        for rule in &mut list.websites {
+            let before = rule.match_type.clone();
+            rule.match_type.simplify();
+            changed |= rule.match_type != before;
+        }
+        changed
+    })
+}
+
+/// Turn the old typing lock into a protection that runs until unlocked.
+///
+/// Before upstream's lock model was merged, a list was typing-locked by its
+/// `lock` alone (`RandomText`, no `protection`), and that held it until the
+/// text was typed. Upstream only honours `lock` during a protection window,
+/// so without this such a list would come out of the upgrade unlocked. It
+/// held editing, quitting and uninstalling, so all three are kept.
+fn typing_locks_to_protection(conn: &Connection) -> Result<()> {
+    rewrite_block_lists(conn, |list| {
+        if list.protection.is_some() || !matches!(list.lock, Some(Lock::RandomText { .. })) {
+            return false;
+        }
+        list.protection = Some(Protection::until_unlocked());
+        true
+    })
+}
+
+/// Load every block list, let `edit` change it, and write back the ones it
+/// reports as changed. Rows that no longer deserialize are left alone.
+fn rewrite_block_lists(
+    conn: &Connection,
+    mut edit: impl FnMut(&mut BlockList) -> bool,
+) -> Result<()> {
     let mut stmt = conn
         .prepare("SELECT id, data FROM block_lists")
         .map_err(|e| FocuserError::Database(e.to_string()))?;
@@ -36,14 +70,7 @@ fn reclassify_mistyped_website_rules(conn: &Connection) -> Result<()> {
         let Ok(mut list) = serde_json::from_str::<BlockList>(&json) else {
             continue;
         };
-
-        let mut changed = false;
-        for rule in &mut list.websites {
-            let before = rule.match_type.clone();
-            rule.match_type.simplify();
-            changed |= rule.match_type != before;
-        }
-        if !changed {
+        if !edit(&mut list) {
             continue;
         }
 
@@ -224,6 +251,10 @@ pub fn run_all(conn: &Connection) -> Result<()> {
             "v8: reclassify mistyped website rules (*word* wildcards, Domain values with a *)",
             Step::Code(reclassify_mistyped_website_rules),
         ),
+        (
+            "v9: old typing locks become protection until unlocked",
+            Step::Code(typing_locks_to_protection),
+        ),
     ];
 
     for (i, (name, step)) in migrations.iter().enumerate() {
@@ -384,5 +415,62 @@ mod tests {
             stored_match_type(&conn, list.id),
             WebsiteMatchType::Domain("*r".into())
         );
+    }
+    fn stored_list(conn: &Connection, id: focuser_common::types::EntityId) -> BlockList {
+        let json: String = conn
+            .query_row(
+                "SELECT data FROM block_lists WHERE id = ?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn an_old_typing_lock_stays_locked_until_unlocked() {
+        let mut list = BlockList::new("Full block");
+        list.lock = Some(Lock::RandomText { length: 200 });
+        let conn = conn_with_a_stored_list(&list);
+
+        typing_locks_to_protection(&conn).unwrap();
+
+        let stored = stored_list(&conn, list.id);
+        let protection = stored.protection.expect("the lock must carry over");
+        assert!(protection.expires_at.is_none());
+        assert!(protection.is_active());
+        assert!(protection.prevent_modification);
+        assert!(protection.prevent_service_stop);
+        assert!(protection.prevent_uninstall);
+        assert!(matches!(
+            stored.lock,
+            Some(Lock::RandomText { length: 200 })
+        ));
+    }
+
+    #[test]
+    fn a_timed_protection_and_its_lock_are_left_alone() {
+        let mut list = BlockList::new("Work");
+        list.protection = Some(Protection::for_duration(30));
+        list.lock = Some(Lock::RandomText { length: 20 });
+        let expires_at = list.protection.as_ref().unwrap().expires_at;
+        let conn = conn_with_a_stored_list(&list);
+
+        typing_locks_to_protection(&conn).unwrap();
+
+        assert_eq!(
+            stored_list(&conn, list.id).protection.unwrap().expires_at,
+            expires_at
+        );
+    }
+
+    #[test]
+    fn a_list_with_no_lock_gets_no_protection() {
+        let list = BlockList::new("Plain");
+        let conn = conn_with_a_stored_list(&list);
+
+        typing_locks_to_protection(&conn).unwrap();
+
+        assert!(stored_list(&conn, list.id).protection.is_none());
     }
 }
