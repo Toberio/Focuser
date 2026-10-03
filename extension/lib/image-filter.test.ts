@@ -25,24 +25,34 @@ describe("isExplicit", () => {
   });
 
   it("hides what the ViT is less sure of only at stricter levels", () => {
-    expect(hiddenAt(0.55)).toEqual(["balanced", "strict"]);
-    expect(hiddenAt(0.4)).toEqual(["strict"]);
+    expect(hiddenAt(0.8)).toEqual(["balanced", "strict"]);
+    expect(hiddenAt(0.7)).toEqual(["strict"]);
   });
 
   it("shows what both models call safe", () => {
     expect(hiddenAt(0.06, { Neutral: 0.95 })).toEqual([]);
   });
 
+  it("needs NSFWJS to agree when the ViT is unsure", () => {
+    // Real scores: glossy abstract art the ViT half-suspected.
+    expect(hiddenAt(0.48, { Porn: 0.02, Neutral: 0.98 })).toEqual([]);
+    expect(hiddenAt(0.48, { Porn: 0.3, Neutral: 0.7 })).toEqual(["balanced", "strict"]);
+  });
+
   it("lets the ViT overrule NSFWJS's false alarms", () => {
-    // Real scores: an abstract wallpaper NSFWJS called porn.
+    // Real scores: abstract wallpapers NSFWJS called porn.
     expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual([]);
     expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual([]);
   });
 
-  it("lets NSFWJS's suggestive grade count when the ViT has doubts", () => {
-    // A cleavage selfie: not nude, so the ViT is unsure rather than certain.
-    expect(hiddenAt(0.22, { Sexy: 0.45, Neutral: 0.55 })).toEqual(["strict"]);
-    expect(hiddenAt(0.3, { Sexy: 0.7, Neutral: 0.3 })).toEqual(["balanced", "strict"]);
+  it("catches suggestive pictures, which the ViT is only unsure about", () => {
+    expect(hiddenAt(0.22, { Sexy: 0.55, Neutral: 0.45 })).toEqual(["strict"]);
+    expect(hiddenAt(0.35, { Sexy: 0.75, Neutral: 0.25 })).toEqual(["balanced", "strict"]);
+  });
+
+  it("does not count suggestive at the explicit-only level", () => {
+    expect(hiddenAt(0.65, { Sexy: 0.9 })).not.toContain("explicit");
+    expect(hiddenAt(0.65, { Porn: 0.4 })).toContain("explicit");
   });
 
   it("hides at a level everything the level below it hides", () => {
