@@ -87,7 +87,8 @@ interface Inputs {
   nsfwjs: ImageBitmap;
 }
 
-async function decode(src: string): Promise<Inputs> {
+async function decode(src: string, bytes?: ArrayBuffer): Promise<Inputs> {
+  if (bytes) return shape(await createImageBitmap(new Blob([bytes])));
   return withFetchSlot(async () => {
     // `force-cache` reuses this profile's copy where there is one. The page's
     // own cache is partitioned away from extensions, so a cross-origin image
@@ -95,7 +96,12 @@ async function decode(src: string): Promise<Inputs> {
     // CORS from every image host on the web.
     const response = await fetch(src, { cache: "force-cache", credentials: "include" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const full = await createImageBitmap(await response.blob());
+    return shape(await createImageBitmap(await response.blob()));
+  });
+}
+
+async function shape(full: ImageBitmap): Promise<Inputs> {
+  {
     try {
       const side = Math.min(full.width, full.height);
       const [vit, nsfwjs] = await Promise.all([
@@ -117,16 +123,16 @@ async function decode(src: string): Promise<Inputs> {
     } finally {
       full.close();
     }
-  });
+  }
 }
 
-async function judge(src: string): Promise<Scores | undefined> {
+async function judge(src: string, bytes?: ArrayBuffer): Promise<Scores | undefined> {
   try {
     const loading = getModels();
     // Awaited below; this only keeps a failed download from also reporting
     // the model's failure as unhandled.
     loading.catch(() => undefined);
-    const inputs = await decode(src);
+    const inputs = await decode(src, bytes);
     const run = inferenceChain.then(async (): Promise<Scores> => {
       try {
         const { nsfwjs, vit } = await loading;
@@ -155,7 +161,7 @@ async function judge(src: string): Promise<Scores | undefined> {
   }
 }
 
-function classify(src: string): Promise<Scores | undefined> {
+function classify(src: string, bytes?: ArrayBuffer): Promise<Scores | undefined> {
   const cacheable = src.length <= MAX_CACHE_KEY;
   const known = cacheable ? cache.get(src) : undefined;
   if (known) return Promise.resolve(known);
@@ -164,7 +170,7 @@ function classify(src: string): Promise<Scores | undefined> {
   const pending = inFlight.get(src);
   if (pending) return pending;
 
-  const job = judge(src).then((scores) => {
+  const job = judge(src, bytes).then((scores) => {
     inFlight.delete(src);
     // A failure may be a network blip, so it is not remembered.
     if (cacheable && scores) cache.set(src, scores);
@@ -181,7 +187,9 @@ browser.runtime.onMessage.addListener(
     // runtime message goes to every extension page. The background answers
     // those; this page only answers the background.
     if (message.type !== "classifier-run") return false;
-    void classify(message.src).then((scores) => sendResponse({ type: "classifier-run", scores }));
+    void classify(message.src, message.bytes).then((scores) =>
+      sendResponse({ type: "classifier-run", scores }),
+    );
     return true;
   },
 );
