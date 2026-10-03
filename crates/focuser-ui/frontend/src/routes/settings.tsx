@@ -5,20 +5,13 @@ import { ConfigTransfer } from "@/components/config-transfer";
 import { useSettingLock } from "@/components/setting-lock";
 import { SettingRow, SettingsSection } from "@/components/setting-row";
 import { PageHeader } from "@/components/ui/card";
-import { ConfirmButton } from "@/components/ui/confirm-button";
 import { InlineError } from "@/components/ui/feedback";
 import { NumberField } from "@/components/ui/number-field";
 import { Page } from "@/components/ui/page";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { UpdateCheck } from "@/components/update-check";
-import {
-  useAppVersion,
-  useDeleteAllData,
-  useResetSettings,
-  useSetStatsRetention,
-  useStatsRetention,
-} from "@/lib/commands";
+import { useAppVersion, useSetStatsRetention, useStatsRetention } from "@/lib/commands";
 import { useLanguage } from "@/lib/language";
 import {
   MAX_RETENTION_DAYS,
@@ -40,8 +33,6 @@ export function Settings() {
 
   const retention = useStatsRetention();
   const setRetention = useSetStatsRetention();
-  const reset = useResetSettings();
-  const deleteAll = useDeleteAllData();
   const version = useAppVersion();
 
   // The sidebar badge links here promising the update button, so find it.
@@ -133,30 +124,6 @@ export function Settings() {
           description={m.settings_config_file_description()}
           control={<ConfigTransfer />}
         />
-        <SettingRow
-          label={m.settings_reset()}
-          description={m.settings_reset_description()}
-          control={
-            <ConfirmButton variant="outline" size="sm" onConfirm={() => reset.mutate()}>
-              {m.settings_reset_action()}
-            </ConfirmButton>
-          }
-        />
-        <SettingRow
-          label={m.settings_delete_all()}
-          description={m.settings_delete_all_description()}
-          control={
-            <ConfirmButton
-              variant="outline"
-              size="sm"
-              confirmLabel={m.config_confirm_delete()}
-              onConfirm={() => deleteAll.mutate()}
-              disabled={deleteAll.isPending}
-            >
-              {m.settings_delete_all_action()}
-            </ConfirmButton>
-          }
-        />
       </SettingsSection>
 
       <SettingsSection title={m.settings_section_language()}>
@@ -189,15 +156,7 @@ export function Settings() {
         </div>
       </SettingsSection>
 
-      <InlineError
-        error={
-          enforceBrowsers.error ??
-          gracePeriod.error ??
-          setRetention.error ??
-          reset.error ??
-          deleteAll.error
-        }
-      />
+      <InlineError error={enforceBrowsers.error ?? gracePeriod.error ?? setRetention.error} />
     </Page>
   );
 }
