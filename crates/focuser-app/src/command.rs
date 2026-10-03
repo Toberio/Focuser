@@ -193,6 +193,12 @@ pub enum Command {
         minutes: Option<u32>,
     },
     GetSharedAllowanceStatus,
+    /// Turn the browser image filter on or off for one list. Turning it on is
+    /// always allowed; turning it off is refused while the list is locked.
+    SetImageFilter {
+        list_id: EntityId,
+        enabled: bool,
+    },
     GetProtectionStatus,
     /// Issue a fresh random-text challenge for a protected list. Only valid
     /// on a list whose lock is [`focuser_common::types::Lock::RandomText`].

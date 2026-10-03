@@ -148,6 +148,8 @@ impl BlockEngine {
                 continue;
             }
 
+            rules.filter_explicit_images |= list.filter_explicit_images;
+
             // Compile website rules by type
             for rule in &list.websites {
                 if !rule.enabled {
@@ -289,6 +291,7 @@ impl BlockEngine {
         rules.allowed_wildcards.hash(&mut hasher);
         rules.allowed_url_paths.hash(&mut hasher);
         rules.allowance_domains.hash(&mut hasher);
+        rules.filter_explicit_images.hash(&mut hasher);
         serde_json::to_string(&rules.scopes)
             .unwrap_or_default()
             .hash(&mut hasher);
@@ -495,6 +498,34 @@ mod tests {
         assert!(rules.requires_extension());
         assert!(rules.block_entire_internet);
         assert!(rules.allowed_domains.contains(&"github.com".to_string()));
+    }
+
+    #[test]
+    fn image_filter_follows_active_lists_and_changes_the_version() {
+        let db = Database::open_in_memory().unwrap();
+        let mut list = BlockList::new("Images");
+        list.websites.push(WebsiteRule::domain("reddit.com"));
+        db.create_block_list(&list).unwrap();
+        let mut engine = BlockEngine::new(db).unwrap();
+        let before = engine.compile_extension_rules();
+        assert!(!before.filter_explicit_images);
+        assert!(!before.requires_extension());
+
+        list.filter_explicit_images = true;
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+        let after = engine.compile_extension_rules();
+        assert!(after.filter_explicit_images);
+        // Nothing but the extension can hide an image.
+        assert!(after.requires_extension());
+        // The extension only re-applies rules when the version moves.
+        assert_ne!(before.version, after.version);
+
+        // A disabled list asks for nothing.
+        list.enabled = false;
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+        assert!(!engine.compile_extension_rules().filter_explicit_images);
     }
 
     #[test]

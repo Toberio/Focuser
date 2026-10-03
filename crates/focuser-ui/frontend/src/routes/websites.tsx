@@ -1,4 +1,4 @@
-import { Ban, Globe, Plus, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Ban, EyeOff, Globe, Plus, ShieldCheck, TriangleAlert } from "lucide-react";
 import { type FormEvent, useState } from "react";
 import { ListPicker, resolveSelected } from "@/components/list-picker";
 import { RuleTable } from "@/components/rule-table";
@@ -10,6 +10,7 @@ import { InlineError, QueryState } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import { Page } from "@/components/ui/page";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs } from "@/components/ui/tabs";
 import {
   useAddException,
@@ -17,8 +18,10 @@ import {
   useBlockingHealth,
   useBlockLists,
   useBulkImportWebsites,
+  useProtectionStatus,
   useRemoveException,
   useRemoveWebsiteRule,
+  useSetImageFilter,
 } from "@/lib/commands";
 import {
   describeException,
@@ -89,6 +92,7 @@ const CATCH_ALL = /^[*.\s]+$/;
 export function Websites() {
   const lists = useBlockLists();
   const health = useBlockingHealth();
+  const protection = useProtectionStatus();
   const [rawSelected, setSelected] = useState("");
   const [tab, setTab] = useState<Tab>("blocked");
 
@@ -123,6 +127,11 @@ export function Websites() {
           />
         ) : (
           <>
+            <ImageFilter
+              listId={list.id}
+              enabled={list.filter_explicit_images ?? false}
+              locked={(protection.data ?? []).some((p) => p.block_list_id === list.id)}
+            />
             <Tabs
               className="mb-5"
               value={tab}
@@ -147,6 +156,48 @@ export function Websites() {
         )}
       </QueryState>
     </Page>
+  );
+}
+
+/**
+ * The browser image filter for one list.
+ *
+ * A lock may only tighten, so a locked list can turn the filter on but not off
+ * — the backend refuses it either way, and the switch says so up front.
+ */
+function ImageFilter({
+  listId,
+  enabled,
+  locked,
+}: {
+  listId: string;
+  enabled: boolean;
+  locked: boolean;
+}) {
+  const set = useSetImageFilter();
+  const frozen = locked && enabled;
+
+  return (
+    <Card className="mb-5" padding="md" elevation="raised">
+      <div className="flex items-center justify-between gap-6">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 font-medium text-foreground text-sm">
+            <EyeOff aria-hidden className="size-4 text-muted-foreground" />
+            {m.websites_image_filter_title()}
+          </p>
+          <p className="mt-1 text-muted-foreground text-xs">
+            {frozen ? m.websites_image_filter_locked() : m.websites_image_filter_description()}
+          </p>
+        </div>
+        <Switch
+          checked={enabled}
+          onCheckedChange={(on) => set.mutate({ listId, enabled: on })}
+          disabled={frozen || set.isPending}
+          aria-label={m.websites_image_filter_title()}
+        />
+      </div>
+      <InlineError error={set.error} />
+    </Card>
   );
 }
 

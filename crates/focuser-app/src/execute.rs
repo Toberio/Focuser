@@ -60,6 +60,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             list.scheduled_protection = stored.scheduled_protection;
             list.schedule_unlocked_until = stored.schedule_unlocked_until;
             list.shared_allowance = stored.shared_allowance;
+            // Owned by `SetImageFilter`, which knows a lock may only tighten.
+            list.filter_explicit_images = stored.filter_explicit_images;
             list.reconcile_schedule_bypass();
 
             engine.db().update_block_list(&list)?;
@@ -390,6 +392,19 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 ensure_schedule_ends(&list)?;
             }
             list.shared_allowance = config;
+            list.updated_at = chrono::Utc::now();
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            Ok(CommandResult::Unit)
+        }
+        Command::SetImageFilter { list_id, enabled } => {
+            // Hiding more is a tightening, which a lock never stands in the
+            // way of. Showing more again is a loosening, which it does.
+            if !enabled {
+                ensure_unprotected(&engine, list_id)?;
+            }
+            let mut list = engine.db().get_block_list(list_id)?;
+            list.filter_explicit_images = enabled;
             list.updated_at = chrono::Utc::now();
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
@@ -3147,6 +3162,58 @@ mod tests {
             .code(),
             "validation"
         );
+    }
+
+    #[test]
+    fn a_lock_lets_the_image_filter_go_on_but_not_off() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        let set = |enabled| Command::SetImageFilter {
+            list_id: list.id,
+            enabled,
+        };
+
+        execute(&ctx, set(true)).unwrap();
+        assert!(lists(&ctx)[0].filter_explicit_images);
+        execute(&ctx, set(false)).unwrap();
+        assert!(!lists(&ctx)[0].filter_explicit_images);
+
+        protect(&ctx, list.id).unwrap();
+        // Hiding more only tightens the commitment.
+        execute(&ctx, set(true)).unwrap();
+        // Showing more again would loosen it.
+        assert_eq!(execute(&ctx, set(false)).unwrap_err().code(), "protected");
+        assert!(lists(&ctx)[0].filter_explicit_images);
+    }
+
+    #[test]
+    fn update_block_list_leaves_the_image_filter_alone() {
+        let ctx = ctx();
+        let list = create(&ctx, "Images");
+        execute(
+            &ctx,
+            Command::SetImageFilter {
+                list_id: list.id,
+                enabled: true,
+            },
+        )
+        .unwrap();
+
+        // A stale copy from before the filter went on must not switch it off.
+        let mut stale = lists(&ctx)[0].clone();
+        stale.filter_explicit_images = false;
+        stale.name = "Renamed".into();
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(stale),
+            },
+        )
+        .unwrap();
+
+        let stored = &lists(&ctx)[0];
+        assert_eq!(stored.name, "Renamed");
+        assert!(stored.filter_explicit_images);
     }
 
     #[test]

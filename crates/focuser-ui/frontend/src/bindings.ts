@@ -118,6 +118,12 @@ export type BlockList = {
 	breaks: BreakConfig | null,
 	/**  Optional shared budget per merged weekly schedule occurrence. */
 	shared_allowance?: SharedAllowanceConfig | null,
+	/**
+	 *  Hide explicit images in the browser while this list is active. The
+	 *  extension does the work: it blurs images until a local classifier has
+	 *  cleared them. Lists saved before this existed load with it off.
+	 */
+	filter_explicit_images?: boolean,
 	created_at: string,
 	updated_at: string,
 };
@@ -318,7 +324,15 @@ export type Command =
 } } | { cmd: "get_scheduled_protection_status" } | { cmd: "configure_shared_allowance"; args: {
 	list_id: string,
 	minutes: number | null,
-} } | { cmd: "get_shared_allowance_status" } | { cmd: "get_protection_status" } | 
+} } | { cmd: "get_shared_allowance_status" } | 
+/**
+ *  Turn the browser image filter on or off for one list. Turning it on is
+ *  always allowed; turning it off is refused while the list is locked.
+ */
+{ cmd: "set_image_filter"; args: {
+	list_id: string,
+	enabled: boolean,
+} } | { cmd: "get_protection_status" } | 
 /**
  *  Issue a fresh random-text challenge for a protected list. Only valid
  *  on a list whose lock is [`focuser_common::types::Lock::RandomText`].
