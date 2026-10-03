@@ -274,6 +274,8 @@ export default defineContentScript({
           const payload = src && sourceKind(src) === "url" ? src : toDataUrl(el);
           if (!payload) return false;
           const reply = await send({ type: "image-feedback", src: payload, label });
+          // Do what the user asked straight away, logged or not.
+          el.setAttribute(ATTR, label === "show" ? "clear" : "hidden");
           return reply?.ok === true;
         })
       : () => {};
