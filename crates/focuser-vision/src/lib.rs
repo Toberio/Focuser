@@ -13,12 +13,13 @@
 mod classifier;
 pub mod models;
 mod preprocess;
+pub mod probe;
 pub mod prompts;
 mod verdict;
 pub mod vit;
 pub mod weights;
 
-pub use classifier::Classifier;
+pub use classifier::{Classifier, Judged};
 pub use verdict::{Scores, is_hidden};
 
 #[derive(Debug, thiserror::Error)]
