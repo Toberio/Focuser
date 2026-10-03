@@ -46,9 +46,10 @@ struct Thresholds {
 /// hides everything the one before it does.
 ///
 /// Calibrated on a small set: four suggestive photos that should hide
-/// (CLIP suggestive 0.73–0.92) against 53 that should not, including athletes,
-/// dancers, a festival crowd and abstract art (at most 0.43, and Marqo at most
-/// 0.17).
+/// (CLIP suggestive 0.72–0.92) against 56 that should not, including athletes,
+/// dancers, a festival crowd, abstract art (suggestive at most 0.43, Marqo at
+/// most 0.17) and three ordinary fashion photos (suggestive up to
+/// 0.66, nudity up to 0.47 with Marqo 0.24–0.48).
 fn thresholds(level: ImageFilter) -> Option<Thresholds> {
     let t = |nsfw, nudity, nudity_floor, suggestive| Thresholds {
         nsfw,
@@ -58,9 +59,9 @@ fn thresholds(level: ImageFilter) -> Option<Thresholds> {
     };
     match level {
         ImageFilter::Off => None,
-        ImageFilter::Explicit => Some(t(0.7, 0.6, 0.3, f32::INFINITY)),
-        ImageFilter::Balanced => Some(t(0.6, 0.5, 0.25, 0.85)),
-        ImageFilter::Strict => Some(t(0.5, 0.4, 0.2, 0.6)),
+        ImageFilter::Explicit => Some(t(0.7, 0.6, 0.4, f32::INFINITY)),
+        ImageFilter::Balanced => Some(t(0.6, 0.55, 0.35, 0.85)),
+        ImageFilter::Strict => Some(t(0.5, 0.5, 0.3, 0.7)),
     }
 }
 
@@ -109,7 +110,7 @@ mod tests {
     #[test]
     fn nudity_is_hidden_at_every_level() {
         assert_eq!(hidden_at(0.9, 0.1, 0.0), LEVELS);
-        assert_eq!(hidden_at(0.35, 0.8, 0.1), LEVELS);
+        assert_eq!(hidden_at(0.45, 0.8, 0.1), LEVELS);
     }
 
     #[test]
@@ -127,6 +128,14 @@ mod tests {
             hidden_at(0.06, 0.01, 0.92),
             [ImageFilter::Balanced, ImageFilter::Strict]
         );
+    }
+
+    #[test]
+    fn ordinary_fashion_photos_stay_shown() {
+        // Real scores, labelled by hand.
+        assert!(hidden_at(0.48, 0.17, 0.66).is_empty());
+        assert!(hidden_at(0.38, 0.44, 0.52).is_empty());
+        assert!(hidden_at(0.24, 0.47, 0.34).is_empty());
     }
 
     #[test]
