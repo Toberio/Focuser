@@ -3,11 +3,12 @@ import { load, type NSFWJS } from "nsfwjs/core";
 import { MobileNetV2Model } from "nsfwjs/models/mobilenet_v2";
 import {
   MAX_CACHE_KEY,
-  MODEL_SIZE,
+  NSFWJS_SIZE,
   ScoreCache,
   type Scores,
   scoresOf,
 } from "@/lib/image-filter";
+import { VIT_SIZE, Vit, type VitManifest } from "@/lib/vit";
 import type { Message, MessageReply } from "@/lib/messages";
 
 /**
@@ -18,14 +19,21 @@ import type { Message, MessageReply } from "@/lib/messages";
  * model warm. Chrome hosts this as an offscreen document; Firefox, whose
  * background is a page already, as a frame inside it.
  *
- * Only the 3.5 MB MobileNetV2 model is bundled. NSFWJS ships two bigger ones
- * as well, which its default `load` would pull into the build.
+ * Two models judge each image; `Scores` in `lib/image-filter.ts` says why and
+ * how they are combined. NSFWJS's 3.5 MB MobileNetV2 is the only one of its
+ * models bundled (its default `load` would pull in two more), and Marqo's ViT
+ * is 11 MB of float16 weights in `public/models/`.
  */
 
 /** Downloads in flight at once. Inference itself runs one at a time. */
 const FETCH_CONCURRENCY = 6;
 
-let model: Promise<NSFWJS> | null = null;
+interface Models {
+  nsfwjs: NSFWJS;
+  vit: Vit;
+}
+
+let models: Promise<Models> | null = null;
 const cache = new ScoreCache();
 const inFlight = new Map<string, Promise<Scores | undefined>>();
 
@@ -34,16 +42,30 @@ const waiting: Array<() => void> = [];
 /** Inference is serialised: parallel WebGL work only competes for the GPU. */
 let inferenceChain: Promise<unknown> = Promise.resolve();
 
-function getModel(): Promise<NSFWJS> {
-  model ??= (async () => {
+async function loadVit(): Promise<Vit> {
+  const base = "/models/marqo-nsfw-384/";
+  const url = (file: string) => browser.runtime.getURL(`${base}${file}` as never);
+  const [manifest, weights] = await Promise.all([
+    fetch(url("manifest.json")).then((r) => r.json() as Promise<VitManifest>),
+    fetch(url("weights.bin")).then((r) => r.arrayBuffer()),
+  ]);
+  return Vit.fromBuffers(manifest, weights);
+}
+
+function getModels(): Promise<Models> {
+  models ??= (async () => {
     await tf.ready();
-    return load("MobileNetV2", { modelDefinitions: [MobileNetV2Model] });
+    const [nsfwjs, vit] = await Promise.all([
+      load("MobileNetV2", { modelDefinitions: [MobileNetV2Model] }),
+      loadVit(),
+    ]);
+    return { nsfwjs, vit };
   })().catch((error) => {
     // Let the next request try again rather than failing for ever.
-    model = null;
+    models = null;
     throw error;
   });
-  return model;
+  return models;
 }
 
 async function withFetchSlot<T>(task: () => Promise<T>): Promise<T> {
@@ -57,8 +79,15 @@ async function withFetchSlot<T>(task: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Download and decode straight to the model's input size. */
-async function decode(src: string): Promise<ImageBitmap> {
+/** One image, decoded once and shaped the way each model was trained on. */
+interface Inputs {
+  /** Short side to 384, centre-cropped: timm's eval transform for the ViT. */
+  vit: ImageBitmap;
+  /** Squashed to 224, as NSFWJS resizes. */
+  nsfwjs: ImageBitmap;
+}
+
+async function decode(src: string): Promise<Inputs> {
   return withFetchSlot(async () => {
     // `force-cache` reuses this profile's copy where there is one. The page's
     // own cache is partitioned away from extensions, so a cross-origin image
@@ -66,37 +95,61 @@ async function decode(src: string): Promise<ImageBitmap> {
     // CORS from every image host on the web.
     const response = await fetch(src, { cache: "force-cache", credentials: "include" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    return createImageBitmap(blob, {
-      resizeWidth: MODEL_SIZE,
-      resizeHeight: MODEL_SIZE,
-      resizeQuality: "medium",
-    });
+    const full = await createImageBitmap(await response.blob());
+    try {
+      const side = Math.min(full.width, full.height);
+      const [vit, nsfwjs] = await Promise.all([
+        createImageBitmap(
+          full,
+          Math.floor((full.width - side) / 2),
+          Math.floor((full.height - side) / 2),
+          side,
+          side,
+          { resizeWidth: VIT_SIZE, resizeHeight: VIT_SIZE, resizeQuality: "high" },
+        ),
+        createImageBitmap(full, {
+          resizeWidth: NSFWJS_SIZE,
+          resizeHeight: NSFWJS_SIZE,
+          resizeQuality: "medium",
+        }),
+      ]);
+      return { vit, nsfwjs };
+    } finally {
+      full.close();
+    }
   });
 }
 
 async function judge(src: string): Promise<Scores | undefined> {
   try {
-    const loading = getModel();
+    const loading = getModels();
     // Awaited below; this only keeps a failed download from also reporting
     // the model's failure as unhandled.
     loading.catch(() => undefined);
-    const bitmap = await decode(src);
-    const run = inferenceChain.then(async () => {
+    const inputs = await decode(src);
+    const run = inferenceChain.then(async (): Promise<Scores> => {
       try {
-        const nsfw = await loading;
-        const input = tf.browser.fromPixels(bitmap);
+        const { nsfwjs, vit } = await loading;
+        const small = tf.browser.fromPixels(inputs.nsfwjs);
+        const large = tf.browser.fromPixels(inputs.vit);
         try {
-          return await nsfw.classify(input, 5);
+          const predictions = await nsfwjs.classify(small, 5);
+          return {
+            nsfw: await vit.nsfwProbability(large),
+            ...scoresOf(predictions),
+            backend: tf.getBackend(),
+          };
         } finally {
-          input.dispose();
+          small.dispose();
+          large.dispose();
         }
       } finally {
-        bitmap.close();
+        inputs.vit.close();
+        inputs.nsfwjs.close();
       }
     });
     inferenceChain = run.catch(() => undefined);
-    return scoresOf(await run);
+    return await run;
   } catch {
     return undefined;
   }
@@ -133,5 +186,5 @@ browser.runtime.onMessage.addListener(
   },
 );
 
-// Load the model now, so the first image on the first page does not wait for it.
-void getModel().catch(() => undefined);
+// Load the models now, so the first image on the first page does not wait for them.
+void getModels().catch(() => undefined);

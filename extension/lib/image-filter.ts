@@ -9,8 +9,9 @@
  * - The background then registers the `image-filter` content script, which
  *   blurs every image from `document_start` and lifts the blur one image at a
  *   time as verdicts come back.
- * - Verdicts come from `classifier.html`, an extension page running NSFWJS
- *   (MobileNetV2, MIT) on WebGL. Chrome hosts it as an offscreen document,
+ * - Verdicts come from `classifier.html`, an extension page running two models
+ *   on WebGL: Marqo's nsfw-image-detection-384 (ViT-tiny, Apache-2.0) and
+ *   NSFWJS (MobileNetV2, MIT). See `Scores` for how they are combined. Chrome hosts it as an offscreen document,
  *   Firefox as a frame in the background page. Images are decoded and judged
  *   there, on this machine, and nothing about them is sent anywhere.
  */
@@ -32,15 +33,30 @@ export interface Prediction {
  */
 export type Verdict = "clear" | "hidden" | "error";
 
-/** The two numbers a verdict rests on, each 0–1. */
+/**
+ * What a verdict rests on, each 0–1. Two models look at every image:
+ *
+ * - Marqo's ViT (`nsfw`) is the judge. It is far better at telling skin from
+ *   things that merely look like it: NSFWJS scored a red paper-spiral
+ *   wallpaper 0.74 porn.
+ * - NSFWJS (`explicit`, `suggestive`) is the only one of the two that grades
+ *   *suggestive*, which the ViT folds into plain safe or unsafe. Its view only
+ *   counts at the stricter levels, and only when the ViT is not sure the image
+ *   is safe, so the ViT can overrule its false alarms.
+ */
 export interface Scores {
-  /** Porn plus Hentai. Summed because the model splits a borderline image between them. */
+  /** Marqo ViT: probability the image is NSFW. */
+  nsfw: number;
+  /** NSFWJS Porn plus Hentai. Summed because it splits a borderline image between them. */
   explicit: number;
-  /** Sexy: no nudity, but posed or dressed to arouse. */
+  /** NSFWJS Sexy: no nudity, but posed or dressed to arouse. */
   suggestive: number;
+  /** Where TF.js ran: `webgl` is the GPU, `cpu` and `wasm` are not. For the readout. */
+  backend?: string;
 }
 
-export function scoresOf(predictions: Prediction[]): Scores {
+/** NSFWJS's half of the scores. */
+export function scoresOf(predictions: Prediction[]): Omit<Scores, "nsfw"> {
   const p = (name: NsfwClass) =>
     predictions.find((x) => x.className === name)?.probability ?? 0;
   return { explicit: p("Porn") + p("Hentai"), suggestive: p("Sexy") };
@@ -50,28 +66,41 @@ export function scoresOf(predictions: Prediction[]): Scores {
 export type FilterLevel = "explicit" | "balanced" | "strict";
 
 /**
- * Per level: hide when the explicit score passes `explicit`, or explicit plus
- * suggestive passes `combined`.
+ * Per level, hide when either:
+ * - the ViT's NSFW probability reaches `nsfw`, or
+ * - NSFWJS's explicit plus suggestive reaches `nsfwjs` *and* the ViT gives it
+ *   at least `floor`, so a picture the ViT is sure is safe stays shown.
  *
- * Each level hides everything the one before it does. "Strict" is low on
- * purpose: people turn it on to stop being drawn in, and what does that on a
- * feed is mostly suggestive, not nude. On a real Pinterest feed, a bar that let
- * "Sexy" alone through let most of it through.
+ * Every threshold falls as the level rises, so each level hides everything
+ * the one before it does.
+ *
+ * The ViT was trained with label smoothing, so it rarely says much below 0.05
+ * or above 0.95: plain landscapes score about 0.06. The floors sit well clear
+ * of that. An abstract wallpaper NSFWJS called 0.88 porn got 0.16 from the ViT.
  */
-export const THRESHOLDS: Record<FilterLevel, { explicit: number; combined: number }> = {
-  explicit: { explicit: 0.5, combined: Number.POSITIVE_INFINITY },
-  balanced: { explicit: 0.35, combined: 0.6 },
-  strict: { explicit: 0.25, combined: 0.4 },
+export const THRESHOLDS: Record<FilterLevel, { nsfw: number; nsfwjs: number; floor: number }> = {
+  explicit: { nsfw: 0.7, nsfwjs: Number.POSITIVE_INFINITY, floor: 1 },
+  balanced: { nsfw: 0.5, nsfwjs: 0.6, floor: 0.25 },
+  strict: { nsfw: 0.35, nsfwjs: 0.4, floor: 0.2 },
 };
 
 export function isExplicit(scores: Scores, level: FilterLevel): boolean {
   const t = THRESHOLDS[level];
-  return scores.explicit >= t.explicit || scores.explicit + scores.suggestive >= t.combined;
+  return (
+    scores.nsfw >= t.nsfw ||
+    (scores.explicit + scores.suggestive >= t.nsfwjs && scores.nsfw >= t.floor)
+  );
 }
 
-/** Compact form for the `data-focuser-score` attribute: `explicit/suggestive`. */
+/** Compact form for the `data-focuser-score` attribute. */
 export function formatScores(scores: Scores): string {
-  return `${scores.explicit.toFixed(2)}/${scores.suggestive.toFixed(2)}`;
+  const parts = [
+    `vit ${scores.nsfw.toFixed(2)}`,
+    `explicit ${scores.explicit.toFixed(2)}`,
+    `suggestive ${scores.suggestive.toFixed(2)}`,
+  ];
+  if (scores.backend) parts.push(scores.backend);
+  return parts.join(" · ");
 }
 
 /** A verdict, and the scores behind it when the model produced any. */
@@ -127,8 +156,14 @@ export function sourceKind(src: string): "url" | "pixels" | "skip" {
   return "skip";
 }
 
-/** Side length NSFWJS's MobileNetV2 takes. Decoding straight to it saves memory. */
-export const MODEL_SIZE = 224;
+/** Side length NSFWJS's MobileNetV2 takes. */
+export const NSFWJS_SIZE = 224;
+
+/**
+ * Longest side of the copy a content script makes of an image only the page
+ * can read. The ViT's input size, so neither model gets less than it uses.
+ */
+export const COPY_SIZE = 384;
 
 /** A small LRU. `Map` keeps insertion order, so the first key is the oldest. */
 export class ScoreCache {

@@ -1,4 +1,4 @@
-import { type Judgement, MODEL_SIZE, sourceKind, worthChecking } from "@/lib/image-filter";
+import { COPY_SIZE, type Judgement, sourceKind, worthChecking } from "@/lib/image-filter";
 import type { Message, MessageReply } from "@/lib/messages";
 import { send } from "@/lib/messages";
 
@@ -20,7 +20,7 @@ import { send } from "@/lib/messages";
  */
 
 const ATTR = "data-focuser-image";
-/** The scores behind a verdict, `explicit/suggestive`, for tuning the thresholds. */
+/** The scores behind a verdict, readable in DevTools, for tuning the thresholds. */
 const SCORE_ATTR = "data-focuser-score";
 const STYLE = `:is(img,video):not([${ATTR}="clear"]){filter:blur(28px) grayscale(1)!important;clip-path:inset(0)!important}`;
 /** Start judging an image this far before it scrolls into view. */
@@ -62,10 +62,15 @@ export default defineContentScript({
     /** Copy what only this page can read into something the classifier can. */
     function toDataUrl(el: Media): string | null {
       try {
+        const width = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth;
+        const height = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight;
+        if (!width || !height) return null;
+        // Shape kept: each model crops or squashes it its own way.
+        const scale = Math.min(1, COPY_SIZE / Math.max(width, height));
         const canvas = document.createElement("canvas");
-        canvas.width = MODEL_SIZE;
-        canvas.height = MODEL_SIZE;
-        canvas.getContext("2d")?.drawImage(el, 0, 0, MODEL_SIZE, MODEL_SIZE);
+        canvas.width = Math.max(1, Math.round(width * scale));
+        canvas.height = Math.max(1, Math.round(height * scale));
+        canvas.getContext("2d")?.drawImage(el, 0, 0, canvas.width, canvas.height);
         // Throws on a cross-origin image or video served without CORS.
         return canvas.toDataURL("image/jpeg", 0.9);
       } catch {
