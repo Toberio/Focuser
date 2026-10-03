@@ -28,7 +28,7 @@ import {
   type RuleSet,
   trackingKey,
 } from "@/lib/rules";
-import type { Verdict } from "@/lib/image-filter";
+import { type FilterLevel, formatScores, isExplicit, type Judgement } from "@/lib/image-filter";
 import type { BlockContext, Message, MessageReply } from "@/lib/messages";
 import { SharedActivity } from "@/lib/shared-activity";
 
@@ -130,7 +130,7 @@ export default defineBackground(() => {
       rawRules = next;
       rules = compile(next);
       await enforceOnOpenTabs();
-      await syncImageFilter(next.filter_explicit_images === true);
+      await syncImageFilter(next.image_filter ?? null);
     }
     if (connected !== wasConnected) updateBadge();
     else if (connected) updateBadge();
@@ -247,7 +247,7 @@ export default defineBackground(() => {
 
   // ─── Image filter ─────────────────────────────────────────────────
 
-  let imageFilterOn = false;
+  let imageFilter: FilterLevel | null = null;
   let imageFilterSync: Promise<void> = Promise.resolve();
 
   /**
@@ -256,8 +256,10 @@ export default defineBackground(() => {
    * Checked against the browser rather than a flag of ours: a Chrome service
    * worker restarts with its variables reset, but the registration survives.
    */
-  function syncImageFilter(on: boolean): Promise<void> {
-    imageFilterOn = on;
+  function syncImageFilter(level: FilterLevel | null): Promise<void> {
+    const previous = imageFilter;
+    imageFilter = level;
+    const on = level !== null;
     imageFilterSync = imageFilterSync.then(async () => {
       try {
         const registered = await browser.scripting.getRegisteredContentScripts({
@@ -265,9 +267,20 @@ export default defineBackground(() => {
         });
         // Load the model before the first page asks, not when it does.
         if (on) void ensureClassifier().catch(() => undefined);
-        if (on === registered.length > 0) return;
-
         const tabs = await browser.tabs.query({});
+        if (on === registered.length > 0) {
+          // Still on, at another level: what was cleared may not be now.
+          if (on && previous !== null && previous !== level) {
+            for (const tab of tabs) {
+              if (tab.id === undefined) continue;
+              browser.tabs
+                .sendMessage(tab.id, { type: "image-filter-rejudge" })
+                .catch(() => undefined);
+            }
+          }
+          return;
+        }
+
         if (on) {
           await browser.scripting.registerContentScripts([
             {
@@ -349,9 +362,10 @@ export default defineBackground(() => {
     if (browser.offscreen) await browser.offscreen.closeDocument().catch(() => undefined);
   }
 
-  async function classifyImage(src: string): Promise<Verdict> {
+  async function classifyImage(src: string): Promise<Judgement> {
     // A tab that has not heard the filter went off yet: nothing to hide.
-    if (!imageFilterOn) return "clear";
+    const level = imageFilter;
+    if (level === null) return { verdict: "clear" };
     // The page's listener may not be up the moment the page is, so a refused
     // first message is retried rather than taken as an answer.
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -360,13 +374,19 @@ export default defineBackground(() => {
         const reply = (await browser.runtime.sendMessage({ type: "classifier-run", src })) as
           | Extract<MessageReply, { type: "classifier-run" }>
           | undefined;
-        if (reply?.verdict) return reply.verdict;
+        if (reply?.type === "classifier-run") {
+          if (!reply.scores) return { verdict: "error" };
+          return {
+            verdict: isExplicit(reply.scores, level) ? "hidden" : "clear",
+            score: formatScores(reply.scores),
+          };
+        }
       } catch {
         /* not listening yet */
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    return "error";
+    return { verdict: "error" };
   }
 
   // ─── Allowances ───────────────────────────────────────────────────
@@ -475,14 +495,15 @@ export default defineBackground(() => {
           return false;
         }
         case "classify-image": {
-          void classifyImage(message.src).then((verdict) =>
-            sendResponse({ type: "classify-image", verdict }),
+          void classifyImage(message.src).then((judgement) =>
+            sendResponse({ type: "classify-image", ...judgement }),
           );
           return true;
         }
         // Handled by the classifier page and the content scripts.
         case "classifier-run":
         case "image-filter-off":
+        case "image-filter-rejudge":
           return false;
         case "refresh": {
           void refreshRules().then(() => sendResponse({ type: "refresh", ok: true }));

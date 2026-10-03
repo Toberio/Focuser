@@ -13,6 +13,32 @@ pub fn new_id() -> EntityId {
     Uuid::new_v4()
 }
 
+/// How strict the browser image filter is.
+///
+/// Ordered from least to most strict, and each level hides everything the one
+/// before it does. That order is what a lock enforces: a locked list may move
+/// up it, never down.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Type,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFilter {
+    #[default]
+    Off,
+    /// Nudity and sex only.
+    Explicit,
+    /// Also strongly suggestive pictures.
+    Balanced,
+    /// Also mildly suggestive pictures: cleavage, lingerie, posed selfies.
+    Strict,
+}
+
+impl ImageFilter {
+    pub fn is_off(&self) -> bool {
+        *self == ImageFilter::Off
+    }
+}
+
 /// A named collection of blocking rules.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct BlockList {
@@ -35,11 +61,11 @@ pub struct BlockList {
     /// Optional shared budget per merged weekly schedule occurrence.
     #[serde(default)]
     pub shared_allowance: Option<crate::allowance::SharedAllowanceConfig>,
-    /// Hide explicit images in the browser while this list is active. The
-    /// extension does the work: it blurs images until a local classifier has
-    /// cleared them. Lists saved before this existed load with it off.
+    /// How hard the browser looks for explicit images while this list is
+    /// active. The extension does the work: it blurs images until a local
+    /// classifier has cleared them. Lists saved before this existed load off.
     #[serde(default)]
-    pub filter_explicit_images: bool,
+    pub image_filter: ImageFilter,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -61,7 +87,7 @@ impl BlockList {
             schedule_unlocked_until: None,
             breaks: None,
             shared_allowance: None,
-            filter_explicit_images: false,
+            image_filter: ImageFilter::Off,
             created_at: now,
             updated_at: now,
         }

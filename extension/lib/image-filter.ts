@@ -4,8 +4,8 @@
  *
  * How the parts fit together:
  *
- * - The desktop app sets `filter_explicit_images` in the rule set while an
- *   active list asks for it.
+ * - The desktop app sets `image_filter` in the rule set to the strictest
+ *   level any active list asks for.
  * - The background then registers the `image-filter` content script, which
  *   blurs every image from `document_start` and lifts the blur one image at a
  *   time as verdicts come back.
@@ -32,25 +32,52 @@ export interface Prediction {
  */
 export type Verdict = "clear" | "hidden" | "error";
 
-/**
- * Hide when explicit classes together pass this.
- *
- * Porn and Hentai are summed because the model splits a borderline image
- * between them; either alone can stay under a threshold the pair is well over.
- */
-export const EXPLICIT_THRESHOLD = 0.4;
+/** The two numbers a verdict rests on, each 0–1. */
+export interface Scores {
+  /** Porn plus Hentai. Summed because the model splits a borderline image between them. */
+  explicit: number;
+  /** Sexy: no nudity, but posed or dressed to arouse. */
+  suggestive: number;
+}
 
-/**
- * Hide when explicit plus suggestive pass this. "Sexy" on its own covers
- * swimwear and gym photos, so it only tips the balance, never decides it.
- */
-export const SUGGESTIVE_THRESHOLD = 0.7;
-
-export function isExplicit(predictions: Prediction[]): boolean {
+export function scoresOf(predictions: Prediction[]): Scores {
   const p = (name: NsfwClass) =>
     predictions.find((x) => x.className === name)?.probability ?? 0;
-  const explicit = p("Porn") + p("Hentai");
-  return explicit >= EXPLICIT_THRESHOLD || explicit + p("Sexy") >= SUGGESTIVE_THRESHOLD;
+  return { explicit: p("Porn") + p("Hentai"), suggestive: p("Sexy") };
+}
+
+/** How strict the filter is, as the desktop app sends it. Off is never sent. */
+export type FilterLevel = "explicit" | "balanced" | "strict";
+
+/**
+ * Per level: hide when the explicit score passes `explicit`, or explicit plus
+ * suggestive passes `combined`.
+ *
+ * Each level hides everything the one before it does. "Strict" is low on
+ * purpose: people turn it on to stop being drawn in, and what does that on a
+ * feed is mostly suggestive, not nude. On a real Pinterest feed, a bar that let
+ * "Sexy" alone through let most of it through.
+ */
+export const THRESHOLDS: Record<FilterLevel, { explicit: number; combined: number }> = {
+  explicit: { explicit: 0.5, combined: Number.POSITIVE_INFINITY },
+  balanced: { explicit: 0.35, combined: 0.6 },
+  strict: { explicit: 0.25, combined: 0.4 },
+};
+
+export function isExplicit(scores: Scores, level: FilterLevel): boolean {
+  const t = THRESHOLDS[level];
+  return scores.explicit >= t.explicit || scores.explicit + scores.suggestive >= t.combined;
+}
+
+/** Compact form for the `data-focuser-score` attribute: `explicit/suggestive`. */
+export function formatScores(scores: Scores): string {
+  return `${scores.explicit.toFixed(2)}/${scores.suggestive.toFixed(2)}`;
+}
+
+/** A verdict, and the scores behind it when the model produced any. */
+export interface Judgement {
+  verdict: Verdict;
+  score?: string;
 }
 
 /**
@@ -104,12 +131,12 @@ export function sourceKind(src: string): "url" | "pixels" | "skip" {
 export const MODEL_SIZE = 224;
 
 /** A small LRU. `Map` keeps insertion order, so the first key is the oldest. */
-export class VerdictCache {
-  private readonly entries = new Map<string, Verdict>();
+export class ScoreCache {
+  private readonly entries = new Map<string, Scores>();
 
   constructor(private readonly limit = 2_000) {}
 
-  get(key: string): Verdict | undefined {
+  get(key: string): Scores | undefined {
     const hit = this.entries.get(key);
     if (hit === undefined) return undefined;
     this.entries.delete(key);
@@ -117,12 +144,10 @@ export class VerdictCache {
     return hit;
   }
 
-  set(key: string, verdict: Verdict): void {
-    // A failure may be a network blip. Remembering it would show that image
-    // unjudged for the rest of the session.
-    if (verdict === "error") return;
+  /** Scores, not verdicts, so a change of level needs no second look. */
+  set(key: string, scores: Scores): void {
     this.entries.delete(key);
-    this.entries.set(key, verdict);
+    this.entries.set(key, scores);
     while (this.entries.size > this.limit) {
       const oldest = this.entries.keys().next().value;
       if (oldest === undefined) break;

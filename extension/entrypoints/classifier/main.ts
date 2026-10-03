@@ -2,11 +2,11 @@ import * as tf from "@tensorflow/tfjs";
 import { load, type NSFWJS } from "nsfwjs/core";
 import { MobileNetV2Model } from "nsfwjs/models/mobilenet_v2";
 import {
-  isExplicit,
   MAX_CACHE_KEY,
   MODEL_SIZE,
-  type Verdict,
-  VerdictCache,
+  ScoreCache,
+  type Scores,
+  scoresOf,
 } from "@/lib/image-filter";
 import type { Message, MessageReply } from "@/lib/messages";
 
@@ -26,8 +26,8 @@ import type { Message, MessageReply } from "@/lib/messages";
 const FETCH_CONCURRENCY = 6;
 
 let model: Promise<NSFWJS> | null = null;
-const cache = new VerdictCache();
-const inFlight = new Map<string, Promise<Verdict>>();
+const cache = new ScoreCache();
+const inFlight = new Map<string, Promise<Scores | undefined>>();
 
 let fetching = 0;
 const waiting: Array<() => void> = [];
@@ -75,7 +75,7 @@ async function decode(src: string): Promise<ImageBitmap> {
   });
 }
 
-async function judge(src: string): Promise<Verdict> {
+async function judge(src: string): Promise<Scores | undefined> {
   try {
     const loading = getModel();
     // Awaited below; this only keeps a failed download from also reporting
@@ -96,13 +96,13 @@ async function judge(src: string): Promise<Verdict> {
       }
     });
     inferenceChain = run.catch(() => undefined);
-    return isExplicit(await run) ? "hidden" : "clear";
+    return scoresOf(await run);
   } catch {
-    return "error";
+    return undefined;
   }
 }
 
-function classify(src: string): Promise<Verdict> {
+function classify(src: string): Promise<Scores | undefined> {
   const cacheable = src.length <= MAX_CACHE_KEY;
   const known = cacheable ? cache.get(src) : undefined;
   if (known) return Promise.resolve(known);
@@ -111,10 +111,11 @@ function classify(src: string): Promise<Verdict> {
   const pending = inFlight.get(src);
   if (pending) return pending;
 
-  const job = judge(src).then((verdict) => {
+  const job = judge(src).then((scores) => {
     inFlight.delete(src);
-    if (cacheable) cache.set(src, verdict);
-    return verdict;
+    // A failure may be a network blip, so it is not remembered.
+    if (cacheable && scores) cache.set(src, scores);
+    return scores;
   });
   inFlight.set(src, job);
   return job;
@@ -127,9 +128,7 @@ browser.runtime.onMessage.addListener(
     // runtime message goes to every extension page. The background answers
     // those; this page only answers the background.
     if (message.type !== "classifier-run") return false;
-    void classify(message.src).then((verdict) =>
-      sendResponse({ type: "classifier-run", verdict }),
-    );
+    void classify(message.src).then((scores) => sendResponse({ type: "classifier-run", scores }));
     return true;
   },
 );

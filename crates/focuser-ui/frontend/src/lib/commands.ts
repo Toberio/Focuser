@@ -19,6 +19,7 @@ import type {
   Command,
   CommandResult,
   ExceptionType,
+  ImageFilter,
   LockSetup,
   PomodoroConfig,
   PomodoroStatus,
@@ -41,6 +42,7 @@ export type {
   Command,
   CommandResult,
   ExceptionType,
+  ImageFilter,
   LockSetup,
   PomodoroConfig,
   PomodoroStatus,
@@ -341,9 +343,9 @@ export const useConfigureSharedAllowance = () =>
   }));
 
 export const useSetImageFilter = () =>
-  useBlockListMutation<{ listId: string; enabled: boolean }>((a) => ({
+  useBlockListMutation<{ listId: string; level: ImageFilter }>((a) => ({
     cmd: "set_image_filter",
-    args: { list_id: a.listId, enabled: a.enabled },
+    args: { list_id: a.listId, level: a.level },
   }));
 
 export const useRelockScheduledProtection = () =>

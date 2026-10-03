@@ -61,7 +61,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             list.schedule_unlocked_until = stored.schedule_unlocked_until;
             list.shared_allowance = stored.shared_allowance;
             // Owned by `SetImageFilter`, which knows a lock may only tighten.
-            list.filter_explicit_images = stored.filter_explicit_images;
+            list.image_filter = stored.image_filter;
             list.reconcile_schedule_bypass();
 
             engine.db().update_block_list(&list)?;
@@ -397,14 +397,14 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             engine.refresh()?;
             Ok(CommandResult::Unit)
         }
-        Command::SetImageFilter { list_id, enabled } => {
+        Command::SetImageFilter { list_id, level } => {
+            let mut list = engine.db().get_block_list(list_id)?;
             // Hiding more is a tightening, which a lock never stands in the
             // way of. Showing more again is a loosening, which it does.
-            if !enabled {
+            if level < list.image_filter {
                 ensure_unprotected(&engine, list_id)?;
             }
-            let mut list = engine.db().get_block_list(list_id)?;
-            list.filter_explicit_images = enabled;
+            list.image_filter = level;
             list.updated_at = chrono::Utc::now();
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
@@ -3165,25 +3165,31 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_lets_the_image_filter_go_on_but_not_off() {
+    fn a_lock_lets_the_image_filter_get_stricter_but_not_looser() {
+        use focuser_common::types::ImageFilter;
+
         let ctx = ctx();
         let list = create(&ctx, "Committed");
-        let set = |enabled| Command::SetImageFilter {
+        let set = |level| Command::SetImageFilter {
             list_id: list.id,
-            enabled,
+            level,
         };
 
-        execute(&ctx, set(true)).unwrap();
-        assert!(lists(&ctx)[0].filter_explicit_images);
-        execute(&ctx, set(false)).unwrap();
-        assert!(!lists(&ctx)[0].filter_explicit_images);
+        execute(&ctx, set(ImageFilter::Strict)).unwrap();
+        execute(&ctx, set(ImageFilter::Off)).unwrap();
+        assert_eq!(lists(&ctx)[0].image_filter, ImageFilter::Off);
 
+        execute(&ctx, set(ImageFilter::Explicit)).unwrap();
         protect(&ctx, list.id).unwrap();
         // Hiding more only tightens the commitment.
-        execute(&ctx, set(true)).unwrap();
-        // Showing more again would loosen it.
-        assert_eq!(execute(&ctx, set(false)).unwrap_err().code(), "protected");
-        assert!(lists(&ctx)[0].filter_explicit_images);
+        execute(&ctx, set(ImageFilter::Balanced)).unwrap();
+        // Staying put is not a loosening either.
+        execute(&ctx, set(ImageFilter::Balanced)).unwrap();
+        // Showing more again would loosen it, by a step or all the way.
+        for looser in [ImageFilter::Explicit, ImageFilter::Off] {
+            assert_eq!(execute(&ctx, set(looser)).unwrap_err().code(), "protected");
+        }
+        assert_eq!(lists(&ctx)[0].image_filter, ImageFilter::Balanced);
     }
 
     #[test]
@@ -3194,14 +3200,14 @@ mod tests {
             &ctx,
             Command::SetImageFilter {
                 list_id: list.id,
-                enabled: true,
+                level: focuser_common::types::ImageFilter::Strict,
             },
         )
         .unwrap();
 
         // A stale copy from before the filter went on must not switch it off.
         let mut stale = lists(&ctx)[0].clone();
-        stale.filter_explicit_images = false;
+        stale.image_filter = focuser_common::types::ImageFilter::Off;
         stale.name = "Renamed".into();
         execute(
             &ctx,
@@ -3213,7 +3219,10 @@ mod tests {
 
         let stored = &lists(&ctx)[0];
         assert_eq!(stored.name, "Renamed");
-        assert!(stored.filter_explicit_images);
+        assert_eq!(
+            stored.image_filter,
+            focuser_common::types::ImageFilter::Strict
+        );
     }
 
     #[test]

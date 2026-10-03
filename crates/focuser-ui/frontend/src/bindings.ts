@@ -119,11 +119,11 @@ export type BlockList = {
 	/**  Optional shared budget per merged weekly schedule occurrence. */
 	shared_allowance?: SharedAllowanceConfig | null,
 	/**
-	 *  Hide explicit images in the browser while this list is active. The
-	 *  extension does the work: it blurs images until a local classifier has
-	 *  cleared them. Lists saved before this existed load with it off.
+	 *  How hard the browser looks for explicit images while this list is
+	 *  active. The extension does the work: it blurs images until a local
+	 *  classifier has cleared them. Lists saved before this existed load off.
 	 */
-	filter_explicit_images?: boolean,
+	image_filter?: ImageFilter,
 	created_at: string,
 	updated_at: string,
 };
@@ -326,12 +326,13 @@ export type Command =
 	minutes: number | null,
 } } | { cmd: "get_shared_allowance_status" } | 
 /**
- *  Turn the browser image filter on or off for one list. Turning it on is
- *  always allowed; turning it off is refused while the list is locked.
+ *  Set how strict the browser image filter is for one list. Making it
+ *  stricter is always allowed; making it looser is refused while the list
+ *  is locked.
  */
 { cmd: "set_image_filter"; args: {
 	list_id: string,
-	enabled: boolean,
+	level: ImageFilter,
 } } | { cmd: "get_protection_status" } | 
 /**
  *  Issue a fresh random-text challenge for a protected list. Only valid
@@ -487,6 +488,21 @@ export type ExceptionType =
 ({ Wildcard: string }) & { Domain?: never; UrlPath?: never } | 
 /**  Allow local file:// URLs */
 "LocalFiles";
+
+/**
+ *  How strict the browser image filter is.
+ * 
+ *  Ordered from least to most strict, and each level hides everything the one
+ *  before it does. That order is what a lock enforces: a locked list may move
+ *  up it, never down.
+ */
+export type ImageFilter = "off" | 
+/**  Nudity and sex only. */
+"explicit" | 
+/**  Also strongly suggestive pictures. */
+"balanced" | 
+/**  Also mildly suggestive pictures: cleavage, lingerie, posed selfies. */
+"strict";
 
 /**
  *  How a protection window can be ended early — Cold Turkey calls this a

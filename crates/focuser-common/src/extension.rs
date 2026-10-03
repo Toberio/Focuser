@@ -41,6 +41,8 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use crate::types::ImageFilter;
+
 // ─── Messages from Service → Extension ──────────────────────────────
 
 /// A compiled set of rules pushed to the extension.
@@ -77,11 +79,11 @@ pub struct ExtensionRuleSet {
     /// exceptions, and scoped matching must tell the two apart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowance_domains: Vec<String>,
-    /// Blur images until the extension's classifier has cleared them. Set when
-    /// any active list asks for it. Left out when off, so an extension that
-    /// predates it sees exactly the payload it always did.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub filter_explicit_images: bool,
+    /// Blur images until the extension's classifier has cleared them, at the
+    /// strictest level any active list asks for. Left out when off, so an
+    /// extension that predates it sees exactly the payload it always did.
+    #[serde(default, skip_serializing_if = "ImageFilter::is_off")]
+    pub image_filter: ImageFilter,
 }
 
 impl ExtensionRuleSet {
@@ -98,7 +100,7 @@ impl ExtensionRuleSet {
             allowed_wildcards: Vec::new(),
             allowed_url_paths: Vec::new(),
             allowance_domains: Vec::new(),
-            filter_explicit_images: false,
+            image_filter: ImageFilter::Off,
         }
     }
 
@@ -109,7 +111,7 @@ impl ExtensionRuleSet {
             || !self.blocked_wildcards.is_empty()
             || !self.blocked_url_paths.is_empty()
             || self.block_entire_internet
-            || self.filter_explicit_images
+            || !self.image_filter.is_off()
     }
 }
 
@@ -249,14 +251,14 @@ mod tests {
     fn image_filter_is_only_sent_when_on() {
         let mut rules = ExtensionRuleSet::empty();
         let off = serde_json::to_value(&rules).unwrap();
-        assert!(off.get("filter_explicit_images").is_none());
+        assert!(off.get("image_filter").is_none());
 
-        rules.filter_explicit_images = true;
+        rules.image_filter = ImageFilter::Balanced;
         let on = serde_json::to_value(&rules).unwrap();
-        assert_eq!(on["filter_explicit_images"], true);
+        assert_eq!(on["image_filter"], "balanced");
 
         // And an app that sends nothing reads back as off.
         let back: ExtensionRuleSet = serde_json::from_value(off).unwrap();
-        assert!(!back.filter_explicit_images);
+        assert!(back.image_filter.is_off());
     }
 }
