@@ -14,6 +14,23 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+/// Read a stored list, upgrading the image filter of a pre-release build.
+///
+/// That build stored `filter_explicit_images: true`; levels replaced it with
+/// `image_filter`. Read as off, it would silently switch the filter off on a
+/// locked list, so it is read as the strictest level instead. Local to this
+/// fork: upstream never had the old field.
+fn parse_block_list(json: &str) -> Result<BlockList> {
+    let mut value: serde_json::Value = serde_json::from_str(json)?;
+    if let Some(object) = value.as_object_mut()
+        && object.remove("filter_explicit_images") == Some(serde_json::Value::Bool(true))
+        && !object.contains_key("image_filter")
+    {
+        object.insert("image_filter".into(), "strict".into());
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
 impl Database {
     /// Open (or create) the database at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -155,8 +172,7 @@ impl Database {
                 }
                 _ => FocuserError::Database(e.to_string()),
             })?;
-        let list: BlockList = serde_json::from_str(&json)?;
-        Ok(list)
+        parse_block_list(&json)
     }
 
     pub fn list_block_lists(&self) -> Result<Vec<BlockList>> {
@@ -174,7 +190,7 @@ impl Database {
             })
             .map_err(|e| FocuserError::Database(e.to_string()))?
             .filter_map(|r| r.ok())
-            .filter_map(|json| serde_json::from_str::<BlockList>(&json).ok())
+            .filter_map(|json| parse_block_list(&json).ok())
             .collect();
         Ok(lists)
     }
@@ -552,6 +568,33 @@ mod tests {
             assert!(!engine.has_service_protection());
             assert!(engine.active_protection_info().is_empty());
         }
+    }
+
+    #[test]
+    fn a_pre_release_image_filter_flag_reads_as_strict() {
+        let db = Database::open_in_memory().unwrap();
+        let list = BlockList::new("Old");
+        db.create_block_list(&list).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let json: String = conn
+                .query_row("SELECT data FROM block_lists", [], |r| r.get(0))
+                .unwrap();
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.remove("image_filter");
+            object.insert("filter_explicit_images".into(), true.into());
+            conn.execute("UPDATE block_lists SET data = ?1", [value.to_string()])
+                .unwrap();
+        }
+        assert_eq!(
+            db.get_block_list(list.id).unwrap().image_filter,
+            focuser_common::types::ImageFilter::Strict
+        );
+        assert_eq!(
+            db.list_block_lists().unwrap()[0].image_filter,
+            focuser_common::types::ImageFilter::Strict
+        );
     }
 
     #[test]
