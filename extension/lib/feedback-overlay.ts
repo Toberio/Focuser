@@ -3,8 +3,9 @@
  * the filter's mistakes on real pages.
  *
  * Hovering an image the filter judged shows "Hide" (it was shown) or "Show"
- * (it was blurred). The first click asks for confirmation, the second sends
- * the label. The button lives in its own closed shadow root, so the page's
+ * (it was hidden). The first click previews the change, so the image can be
+ * looked at properly; the second confirms and sends the label. Not confirmed
+ * within a few seconds, the preview is undone. The button lives in its own closed shadow root, so the page's
  * styles cannot reach it, and it finds the image under the pointer through
  * whatever overlays the page puts on top (Pinterest covers every pin).
  *
@@ -39,6 +40,8 @@ export function startFeedbackOverlay(
 
   let target: Media | null = null;
   let armed = false;
+  /** While previewing: the label being previewed and the verdict to undo to. */
+  let preview: { label: FeedbackLabel; before: string | null } | null = null;
   let busy = false;
   let disarm: ReturnType<typeof setTimeout> | undefined;
   let frame = 0;
@@ -56,7 +59,16 @@ export function startFeedbackOverlay(
     button.style.display = "block";
   }
 
+  function undoPreview() {
+    if (target && preview) {
+      if (preview.before === null) target.removeAttribute(attr);
+      else target.setAttribute(attr, preview.before);
+    }
+    preview = null;
+  }
+
   function reset(el: Media) {
+    undoPreview();
     target = el;
     armed = false;
     clearTimeout(disarm);
@@ -66,7 +78,8 @@ export function startFeedbackOverlay(
   }
 
   function hide() {
-    if (busy) return;
+    // A preview waits for its confirmation even when the pointer wanders.
+    if (busy || armed) return;
     target = null;
     armed = false;
     button.style.display = "none";
@@ -101,15 +114,26 @@ export function startFeedbackOverlay(
     e.preventDefault();
     e.stopPropagation();
     if (!target || busy) return;
-    const label = labelFor(target);
     if (!armed) {
+      const label = labelFor(target);
       armed = true;
+      // Show what the label would do, so the image can be judged by eye.
+      preview = { label, before: target.getAttribute(attr) };
+      target.setAttribute(attr, label === "show" ? "clear" : "hidden");
       button.className = "armed";
       button.textContent = label === "show" ? "Confirm: should show" : "Confirm: should hide";
-      disarm = setTimeout(() => target && reset(target), 4_000);
+      disarm = setTimeout(() => {
+        armed = false;
+        if (target) reset(target);
+        hide();
+      }, 6_000);
       return;
     }
     clearTimeout(disarm);
+    const label = preview?.label ?? labelFor(target);
+    // Confirmed: the preview stays.
+    preview = null;
+    armed = false;
     busy = true;
     button.textContent = "Saving…";
     const el = target;
