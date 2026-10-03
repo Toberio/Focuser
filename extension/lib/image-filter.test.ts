@@ -39,11 +39,11 @@ describe("isExplicit", () => {
     expect(hiddenAt(0.48, { Porn: 0.3, Neutral: 0.7 })).toEqual(["balanced", "strict"]);
   });
 
-  it("lets the ViT overrule NSFWJS's false alarms below strict", () => {
-    // Real scores: abstract wallpapers NSFWJS called porn. Strict hides them,
-    // because real slips look the same to both models (next test).
-    expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual(["strict"]);
-    expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual(["strict"]);
+  it("shows what NSFWJS calls porn with no suggestive grade at all", () => {
+    // Real scores: two abstract wallpapers and an ordinary picture.
+    expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual([]);
+    expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual([]);
+    expect(hiddenAt(0.05, { Porn: 0.69, Sexy: 0.03, Neutral: 0.28 })).toEqual([]);
   });
 
   it("hides at strict what only NSFWJS sees", () => {
