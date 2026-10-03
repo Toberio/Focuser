@@ -32,7 +32,7 @@ export type Message =
   | { type: "classify-image"; src: string }
   // From the background to the classifier page. A separate type so the
   // classifier never answers a content script's request a second time.
-  | { type: "classifier-run"; src: string }
+  | { type: "classifier-run"; src: string; bytes?: ArrayBuffer }
   // From the background to open tabs, when the last list using it goes off.
   | { type: "image-filter-off" }
   // From the background to open tabs, when the level changes: judge again.

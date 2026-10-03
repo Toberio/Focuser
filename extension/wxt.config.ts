@@ -44,8 +44,12 @@ export default defineConfig({
       "alarms",
       "idle",
       // The explicit-image filter's classifier needs a page, and a Chrome
-      // service worker is not one. Firefox's background already is.
-      ...(browser === "firefox" ? [] : ["offscreen"]),
+      // service worker is not one. Firefox's background already is, and
+      // Firefox alone lets the filter copy images from the page's own
+      // downloads instead of fetching each one again.
+      ...(browser === "firefox"
+        ? ["webRequest", "webRequestBlocking", "webRequestFilterResponse"]
+        : ["offscreen"]),
     ],
     host_permissions: ["<all_urls>"],
     icons: ICONS,

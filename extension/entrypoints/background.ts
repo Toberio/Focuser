@@ -30,6 +30,7 @@ import {
 } from "@/lib/rules";
 import { type FilterLevel, formatScores, isExplicit, type Judgement } from "@/lib/image-filter";
 import type { BlockContext, Message, MessageReply } from "@/lib/messages";
+import { isTappable, MAX_IMAGE_BYTES, ResponseTap } from "@/lib/response-tap";
 import { SharedActivity } from "@/lib/shared-activity";
 
 /**
@@ -260,6 +261,7 @@ export default defineBackground(() => {
     const previous = imageFilter;
     imageFilter = level;
     const on = level !== null;
+    setTapping(on);
     imageFilterSync = imageFilterSync.then(async () => {
       try {
         const registered = await browser.scripting.getRegisteredContentScripts({
@@ -317,6 +319,77 @@ export default defineBackground(() => {
     return imageFilterSync;
   }
 
+  // ─── Firefox: copy images from the page's own downloads ──────────
+
+  interface StreamFilter {
+    ondata: ((event: { data: ArrayBuffer }) => void) | null;
+    onstop: (() => void) | null;
+    onerror: (() => void) | null;
+    write(data: ArrayBuffer): void;
+    close(): void;
+    disconnect(): void;
+  }
+  type HeadersDetails = {
+    requestId: string;
+    url: string;
+    type: string;
+    responseHeaders?: Array<{ name: string; value?: string }>;
+  };
+  const webRequest = (
+    browser as unknown as {
+      webRequest?: {
+        filterResponseData?: (requestId: string) => StreamFilter;
+        onHeadersReceived: {
+          addListener(cb: (d: HeadersDetails) => void, filter: object, extra: string[]): void;
+          removeListener(cb: (d: HeadersDetails) => void): void;
+        };
+      };
+    }
+  ).webRequest;
+  const tap = webRequest?.filterResponseData ? new ResponseTap() : null;
+
+  function tapResponse(details: HeadersDetails) {
+    if (!tap || !webRequest?.filterResponseData) return;
+    const header = (name: string) =>
+      details.responseHeaders?.find((h) => h.name.toLowerCase() === name)?.value;
+    if (!isTappable(header("content-type"), header("content-length"))) return;
+
+    const filter = webRequest.filterResponseData(details.requestId);
+    const chunks: ArrayBuffer[] = [];
+    let size = 0;
+    tap.started(details.url);
+    filter.ondata = ({ data }) => {
+      // Straight on to the page first: it must not wait for us.
+      filter.write(data);
+      size += data.byteLength;
+      if (size <= MAX_IMAGE_BYTES) chunks.push(data);
+    };
+    filter.onstop = () => {
+      filter.close();
+      if (size > MAX_IMAGE_BYTES) return tap.finished(details.url, null);
+      const all = new Uint8Array(size);
+      let at = 0;
+      for (const chunk of chunks) {
+        all.set(new Uint8Array(chunk), at);
+        at += chunk.byteLength;
+      }
+      tap.finished(details.url, all.buffer);
+    };
+    filter.onerror = () => tap.finished(details.url, null);
+  }
+
+  /** Copy image downloads only while the filter is on: otherwise it is all cost. */
+  function setTapping(on: boolean) {
+    if (!tap || !webRequest) return;
+    webRequest.onHeadersReceived.removeListener(tapResponse);
+    if (on)
+      webRequest.onHeadersReceived.addListener(
+        tapResponse,
+        { urls: ["<all_urls>"], types: ["image", "imageset"] },
+        ["blocking", "responseHeaders"],
+      );
+  }
+
   let classifierFrame: HTMLIFrameElement | null = null;
   let openingClassifier: Promise<void> | null = null;
 
@@ -366,19 +439,28 @@ export default defineBackground(() => {
     // A tab that has not heard the filter went off yet: nothing to hide.
     const level = imageFilter;
     if (level === null) return { verdict: "clear" };
+    const started = performance.now();
+    // The page's own download, when Firefox let us copy it. The page asks
+    // once the image has loaded, so it has nearly always finished streaming.
+    const bytes = tap && src.startsWith("http") ? await tap.take(src, 1_500) : null;
     // The page's listener may not be up the moment the page is, so a refused
     // first message is retried rather than taken as an answer.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await ensureClassifier();
-        const reply = (await browser.runtime.sendMessage({ type: "classifier-run", src })) as
+        const reply = (await browser.runtime.sendMessage({
+          type: "classifier-run",
+          src,
+          ...(bytes ? { bytes } : {}),
+        })) as
           | Extract<MessageReply, { type: "classifier-run" }>
           | undefined;
         if (reply?.type === "classifier-run") {
           if (!reply.scores) return { verdict: "error" };
+          const ms = Math.round(performance.now() - started);
           return {
             verdict: isExplicit(reply.scores, level) ? "hidden" : "clear",
-            score: formatScores(reply.scores),
+            score: `${formatScores(reply.scores)} · ${ms} ms · ${bytes ? "tap" : "fetch"}`,
           };
         }
       } catch {
