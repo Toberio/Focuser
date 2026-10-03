@@ -28,7 +28,7 @@ type Inputs = (Vec<f32>, Vec<f32>);
 struct Job {
     marqo: Vec<f32>,
     clip: Vec<f32>,
-    reply: mpsc::Sender<Result<Scores>>,
+    reply: mpsc::Sender<Result<Judged>>,
 }
 
 /// A handle to the worker. Cheap to clone; every clone feeds the same queue.
@@ -83,6 +83,12 @@ impl Classifier {
     /// Judge one image. Decoding runs here, on the caller's thread, so many
     /// requests decode in parallel; the GPU work is batched by the worker.
     pub fn classify(&self, bytes: &[u8]) -> Result<Scores> {
+        self.judge(bytes).map(|j| j.scores)
+    }
+
+    /// The scores and CLIP's embedding of the image: a unit vector of 512
+    /// numbers describing what is in it, for learning from labels.
+    pub fn judge(&self, bytes: &[u8]) -> Result<Judged> {
         let img = preprocess::decode(bytes)?;
         let job_marqo = preprocess::square(&img, MARQO);
         let job_clip = preprocess::square(&img, CLIP);
@@ -98,6 +104,13 @@ impl Classifier {
             .recv_timeout(TIMEOUT)
             .map_err(|_| VisionError::Model("image filter timed out".into()))?
     }
+}
+
+/// Everything the models say about one image.
+#[derive(Debug, Clone)]
+pub struct Judged {
+    pub scores: Scores,
+    pub embedding: Vec<f32>,
 }
 
 struct Models {
@@ -142,7 +155,7 @@ impl Models {
         Ok(models)
     }
 
-    fn run(&self, batch: &[Inputs], device: &WgpuDevice) -> Result<Vec<Scores>> {
+    fn run(&self, batch: &[Inputs], device: &WgpuDevice) -> Result<Vec<Judged>> {
         let n = batch.len();
         let stack = |size: usize, pick: &dyn Fn(&Inputs) -> &Vec<f32>| {
             let flat: Vec<f32> = batch.iter().flat_map(|b| pick(b).iter().copied()).collect();
@@ -152,7 +165,12 @@ impl Models {
         let nsfw = activation::softmax(self.marqo.forward(stack(384, &|b| &b.0)), 1);
         let embeds = self.clip.forward(stack(224, &|b| &b.1));
         let embeds = embeds.clone() / embeds.powi_scalar(2).sum_dim(1).sqrt();
-        let logits = embeds.matmul(self.prompts.clone().transpose()) * self.logit_scale;
+        let logits = embeds.clone().matmul(self.prompts.clone().transpose()) * self.logit_scale;
+        let dim = embeds.dims()[1];
+        let embeds = embeds
+            .into_data()
+            .to_vec::<f32>()
+            .map_err(|e| VisionError::Model(format!("{e:?}")))?;
 
         let nsfw = nsfw
             .into_data()
@@ -168,10 +186,14 @@ impl Models {
                 let (nudity, suggestive) =
                     prompts::shares(&logits[i * p..(i + 1) * p], &self.groups);
                 // Marqo's class 0 is NSFW.
-                Scores {
-                    nsfw: nsfw[i * 2],
-                    nudity,
-                    suggestive,
+                Judged {
+                    scores: Scores {
+                        nsfw: nsfw[i * 2],
+                        nudity,
+                        suggestive,
+                        personal: None,
+                    },
+                    embedding: embeds[i * dim..(i + 1) * dim].to_vec(),
                 }
             })
             .collect())

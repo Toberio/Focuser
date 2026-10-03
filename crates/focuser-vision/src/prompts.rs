@@ -46,6 +46,13 @@ pub const PROMPTS: &[(Group, &str)] = &[
     (Group::Neutral, "a photo of a building or a city"),
     (Group::Neutral, "a screenshot or a picture of text"),
     (Group::Neutral, "a colourful abstract wallpaper"),
+    // From the user's own labels: what these models took for nudity or
+    // suggestive was mostly art, tattoos on skin, and women in activewear.
+    (Group::Neutral, "a painting or drawing of a person"),
+    (Group::Neutral, "a digital illustration or anime artwork"),
+    (Group::Neutral, "a close-up photo of a tattoo on skin"),
+    (Group::Neutral, "a woman doing yoga or meditating"),
+    (Group::Neutral, "a person in sportswear or a tank top"),
 ];
 
 #[derive(Deserialize)]

@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         path,
                         std::fs::read(path)
                             .map_err(Into::into)
-                            .and_then(|b| c.classify(&b)),
+                            .and_then(|b| c.judge(&b)),
                     )
                 })
             })
@@ -47,7 +47,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|n| n.to_str())
             .unwrap_or("?");
         match result {
-            Ok(s) => {
+            Ok(judged) => {
+                let s = judged.scores;
+                if let Ok(dir) = std::env::var("FOCUSER_EMBEDDINGS_DIR") {
+                    let file = std::path::Path::new(&dir).join(format!("{name}.json"));
+                    let _ = std::fs::write(
+                        file,
+                        serde_json::to_string(&judged.embedding).unwrap_or_default(),
+                    );
+                }
                 let levels: Vec<&str> = [
                     (ImageFilter::Explicit, "E"),
                     (ImageFilter::Balanced, "B"),
