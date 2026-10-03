@@ -89,6 +89,8 @@ describe("switching language", () => {
           version: "x",
           phase: "x",
           minutes: 1,
+          remaining: 1,
+          position: 1,
           time: "x",
           hour: "x",
           day: "x",
@@ -103,8 +105,6 @@ describe("switching language", () => {
           example: "x",
           added: "x",
           alreadyThere: "x",
-          length: 1,
-          typed: 1,
         });
         expect(rendered, `${name} in ${locale} has no "${category}" form`).not.toBe(name);
       }
@@ -127,6 +127,8 @@ describe("switching language", () => {
           version: "x",
           phase: "x",
           minutes: 1,
+          remaining: 1,
+          position: 1,
           time: "x",
           hour: "x",
           day: "x",
@@ -141,8 +143,6 @@ describe("switching language", () => {
           example: "x",
           added: "x",
           alreadyThere: "x",
-          length: 1,
-          typed: 1,
         });
         expect(rendered, `${name} in ${locale}`).not.toBe(name);
         expect(String(rendered).trim(), `${name} in ${locale}`).not.toBe("");

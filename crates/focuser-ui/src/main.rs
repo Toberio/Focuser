@@ -6,6 +6,7 @@ mod blocker;
 mod foreground_watcher;
 mod i18n;
 mod native;
+mod sound;
 mod typed_commands;
 
 use directories::ProjectDirs;
@@ -117,9 +118,9 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // Another instance tried to launch — bring existing window to front,
-            // unless it was a login launcher racing the one already running.
-            if autostart::launched_at_login(&args) {
+            // Another instance tried to launch — bring existing window to front.
+            // Not for the second of the two logon launches, though.
+            if launched_at_login(&args) {
                 return;
             }
             if let Some(window) = app.get_webview_window("main") {
@@ -133,7 +134,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![autostart::FLAG]),
+            Some(vec!["--autostart"]),
         ))
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -146,9 +147,21 @@ fn main() {
             native::open_browser_url,
             native::check_for_update,
             native::do_update,
+            autostart::is_autostart_enabled,
+            autostart::set_autostart,
+            sound::pick_sound_file,
+            sound::preview_sound,
         ])
         .setup(move |app| {
-            autostart::ensure_enabled(app.handle());
+            // Once, on a fresh install. This used to re-enable autostart on
+            // every launch whenever it found it off, which meant nobody could
+            // ever turn it off — see #10.
+            // Applies the first-run default, then finishes any autostart change
+            // the UI could not make itself. If the logon task launched us we are
+            // elevated here, which is the one moment schtasks will cooperate.
+            if let Ok(engine) = state_for_blocker.engine.lock() {
+                autostart::reconcile(app.handle(), engine.db());
+            }
 
             // Spawn background blocking loop
             let blocker_state = Arc::clone(&state_for_blocker);
@@ -288,16 +301,13 @@ fn main() {
                 }
             });
 
-            // The window starts hidden (tauri.conf.json); a login launch stays
-            // in the tray, anything else is the user opening Focuser.
-            let window = app.get_webview_window("main").unwrap();
-            if !autostart::launched_at_login(std::env::args()) {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-
             // Close to tray instead of quitting
             let app_handle = app.handle().clone();
+            let window = app.get_webview_window("main").unwrap();
+            // Created hidden, so a login start stays in the tray (#9).
+            if !launched_at_login(&std::env::args().collect::<Vec<_>>()) {
+                let _ = window.show();
+            }
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -317,6 +327,11 @@ fn main() {
                 let _ = blocker::remove_hosts_blocks();
             }
         });
+}
+
+/// Both logon registrations (the Run entry and the installer's task) pass this.
+fn launched_at_login(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--autostart")
 }
 
 /// Get the extension store URL for a given browser.
@@ -443,26 +458,21 @@ fn warm_app_icons(state: &Arc<AppState>) {
 
 /// Why quitting is refused right now, or `None` if it is allowed.
 ///
-/// A timer lock only counts if its "block stopping the service" box was
-/// ticked — a lock set without that is a commitment about the block list,
-/// not about the app staying up. A typing lock has no such box; it always
-/// counts, same as it always blocks uninstalling too.
+/// Only locks that asked to prevent it count. A lock set without that box
+/// ticked is a commitment about the block list, not about the app staying up.
 fn quit_blocked_by(state: &Arc<AppState>) -> Option<String> {
     let engine = state.engine.lock().ok()?;
-
-    // A typing lock has no countdown to rank against the timer locks below —
-    // it is either armed or not — so it is checked first and separately.
-    if let Some(list) = engine.block_lists().iter().find(|l| l.is_locked()) {
-        return Some(format!("{} — locked until the phrase is typed", list.name));
-    }
 
     let list = engine
         .block_lists()
         .iter()
         .filter(|l| l.has_service_protection())
-        .max_by_key(|l| l.protection.as_ref().map_or(0, |p| p.remaining_seconds()))?;
+        .max_by_key(|l| {
+            l.effective_protection()
+                .map_or(0, |p| p.remaining_seconds())
+        })?;
 
-    let remaining = list.protection.as_ref()?.remaining_seconds();
+    let remaining = list.effective_protection()?.remaining_seconds();
     Some(format!(
         "{} — {} left",
         list.name,
@@ -683,7 +693,7 @@ fn is_elevated() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use focuser_common::types::{BlockList, Lock, Protection};
+    use focuser_common::types::{BlockList, Protection};
     use focuser_core::Database;
 
     fn state_with(list: BlockList) -> Arc<AppState> {
@@ -705,6 +715,31 @@ mod tests {
             expires_at: now + chrono::Duration::minutes(minutes),
         });
         list
+    }
+
+    #[test]
+    fn scheduled_protection_holds_the_app_until_early_unlock() {
+        use chrono::Datelike;
+        use focuser_common::types::{Schedule, ScheduledProtection, TimeSlot, new_id};
+        let mut list = BlockList::new("Scheduled");
+        list.schedule = Some(Schedule {
+            id: new_id(),
+            name: "Today".into(),
+            enabled: true,
+            time_slots: vec![TimeSlot::new(
+                chrono::Local::now().weekday(),
+                chrono::NaiveTime::MIN,
+                chrono::NaiveTime::MIN,
+            )],
+        });
+        list.scheduled_protection = Some(ScheduledProtection { lock: None });
+        assert!(
+            quit_blocked_by(&state_with(list.clone()))
+                .unwrap()
+                .contains("Scheduled")
+        );
+        list.schedule_unlocked_until = Some(list.effective_protection().unwrap().expires_at);
+        assert!(quit_blocked_by(&state_with(list)).is_none());
     }
 
     #[test]
@@ -738,21 +773,6 @@ mod tests {
         let mut list = locked(true, 45);
         list.enabled = false;
         assert!(quit_blocked_by(&state_with(list)).is_none());
-    }
-
-    #[test]
-    fn a_typing_lock_blocks_quitting_with_no_checkbox_needed() {
-        // Unlike a timer lock, a typing lock has no "block stopping the
-        // service" box to tick — it always holds the app open.
-        let mut list = BlockList::new("Deep Work");
-        list.enabled = true;
-        list.lock = Some(Lock::RandomText { length: 24 });
-
-        let reason = quit_blocked_by(&state_with(list));
-        assert!(
-            reason.is_some_and(|r| r.contains("Deep Work")),
-            "a typing lock should hold the app open"
-        );
     }
 
     #[test]

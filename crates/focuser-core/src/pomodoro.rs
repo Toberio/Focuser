@@ -176,15 +176,8 @@ pub fn stop_session(eng: &mut BlockEngine) -> Result<bool> {
     let Some(session) = eng.db().get_active_pomodoro_session()? else {
         return Ok(false);
     };
-    let now = Utc::now();
-    eng.db().end_pomodoro_session(session.id, now)?;
-
-    // Restore the block list's previous enabled state.
-    if let Ok(mut bl) = eng.db().get_block_list(session.block_list_id) {
-        bl.enabled = session.prev_enabled;
-        bl.updated_at = now;
-        let _ = eng.db().update_block_list(&bl);
-    }
+    eng.db().end_pomodoro_session(session.id, Utc::now())?;
+    let _ = set_list_enabled(eng, session.block_list_id, session.prev_enabled);
     let _ = eng.refresh();
     info!(session_id = %session.id, "Pomodoro session stopped");
     Ok(true)
@@ -264,12 +257,7 @@ pub fn tick(eng: &mut BlockEngine, runtime: &mut PomodoroRuntime) -> Result<Tick
             "Pomodoro: wall-clock tamper detected, aborting session"
         );
         eng.db().end_pomodoro_session(session.id, now)?;
-        // Restore prev enabled
-        if let Ok(mut bl) = eng.db().get_block_list(session.block_list_id) {
-            bl.enabled = session.prev_enabled;
-            bl.updated_at = now;
-            let _ = eng.db().update_block_list(&bl);
-        }
+        let _ = set_list_enabled(eng, session.block_list_id, session.prev_enabled);
         let _ = eng.refresh();
         return Ok(TickOutcome::TamperDetected);
     }
@@ -299,12 +287,18 @@ pub fn tick(eng: &mut BlockEngine, runtime: &mut PomodoroRuntime) -> Result<Tick
 
 /// Toggle the linked block list's enabled flag to match the current phase.
 fn apply_phase_to_block_list(eng: &mut BlockEngine, session: &PomodoroSession) -> Result<()> {
-    let Ok(mut bl) = eng.db().get_block_list(session.block_list_id) else {
+    set_list_enabled(eng, session.block_list_id, session.current_phase.is_work())
+}
+
+/// Every way a session turns its list on or off. A locked list stays on, so a
+/// long break cannot be used to sit out a lock (#14).
+fn set_list_enabled(eng: &BlockEngine, id: EntityId, enabled: bool) -> Result<()> {
+    let Ok(mut bl) = eng.db().get_block_list(id) else {
         return Ok(());
     };
-    let should_be_enabled = session.current_phase.is_work();
-    if bl.enabled != should_be_enabled {
-        bl.enabled = should_be_enabled;
+    let enabled = enabled || bl.is_modification_protected();
+    if bl.enabled != enabled {
+        bl.enabled = enabled;
         bl.updated_at = Utc::now();
         eng.db().update_block_list(&bl)?;
     }
@@ -424,6 +418,64 @@ mod tests {
         let mut s = mk_session();
         s.paused_remaining_secs = Some(42);
         assert_eq!(s.remaining_secs(Utc::now()), 42);
+    }
+
+    fn engine_with(list: &focuser_common::types::BlockList) -> BlockEngine {
+        let db = Database::open_in_memory().unwrap();
+        db.create_block_list(list).unwrap();
+        BlockEngine::new(db).unwrap()
+    }
+
+    fn locked(enabled: bool) -> focuser_common::types::BlockList {
+        let now = Utc::now();
+        let mut list = focuser_common::types::BlockList::new("Deep Work");
+        list.enabled = enabled;
+        list.protection = Some(focuser_common::types::Protection {
+            prevent_uninstall: false,
+            prevent_service_stop: false,
+            prevent_modification: true,
+            started_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        });
+        list
+    }
+
+    fn enabled(eng: &BlockEngine, id: EntityId) -> bool {
+        eng.db().get_block_list(id).unwrap().enabled
+    }
+
+    #[test]
+    fn a_break_turns_an_unlocked_list_off() {
+        let list = focuser_common::types::BlockList::new("Social");
+        let mut eng = engine_with(&list);
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC).unwrap();
+
+        skip_phase(&mut eng).unwrap();
+        assert!(!enabled(&eng, list.id));
+    }
+
+    #[test]
+    fn a_break_cannot_switch_off_a_locked_list() {
+        let list = locked(true);
+        let mut eng = engine_with(&list);
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC).unwrap();
+
+        skip_phase(&mut eng).unwrap();
+        assert!(
+            enabled(&eng, list.id),
+            "#14: the break disabled a locked list"
+        );
+    }
+
+    #[test]
+    fn stopping_a_session_leaves_a_locked_list_on() {
+        // Off before the session, so a plain restore would switch it off.
+        let list = locked(false);
+        let mut eng = engine_with(&list);
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC).unwrap();
+
+        stop_session(&mut eng).unwrap();
+        assert!(enabled(&eng, list.id));
     }
 
     #[test]

@@ -4,10 +4,8 @@
 //! all drive the same engine through the same handle instead of each opening
 //! their own `BlockEngine`.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use focuser_common::EntityId;
 use focuser_core::BlockEngine;
 use focuser_core::allowance::AllowanceTracker;
 
@@ -78,16 +76,6 @@ pub struct AppContext {
     pub engine: Mutex<BlockEngine>,
     pub allowance_tracker: AllowanceTracker,
     pomodoro_events: Mutex<Vec<PomodoroEvent>>,
-    /// The most recently issued unlock phrase per block list.
-    ///
-    /// Held only in memory, never persisted — writing it to disk would turn
-    /// "type this phrase" into "read this phrase back from a file", which
-    /// defeats the point of a typing lock.
-    unlock_phrases: Mutex<HashMap<EntityId, String>>,
-    /// Same idea, for settings locks — keyed by settings-table key
-    /// (`"autostart"`, `"block_unsupported_browsers"`, ...) rather than a
-    /// block list id. Kept separate so the two namespaces can never collide.
-    setting_unlock_phrases: Mutex<HashMap<String, String>>,
     system: Arc<dyn SystemSync>,
 }
 
@@ -98,8 +86,6 @@ impl AppContext {
             engine: Mutex::new(engine),
             allowance_tracker: AllowanceTracker::new(),
             pomodoro_events: Mutex::new(Vec::new()),
-            unlock_phrases: Mutex::new(HashMap::new()),
-            setting_unlock_phrases: Mutex::new(HashMap::new()),
             system,
         }
     }
@@ -155,7 +141,7 @@ impl AppContext {
         if self.connected_browsers().is_empty() {
             return Vec::new();
         }
-        self.allowance_tracker.active_allowance_domains(engine.db())
+        self.allowance_tracker.active_allowance_domains(engine)
     }
 
     pub fn push_pomodoro_event(&self, event: PomodoroEvent) {
@@ -169,45 +155,6 @@ impl AppContext {
             .lock()
             .map(|mut b| std::mem::take(&mut *b))
             .unwrap_or_default()
-    }
-
-    /// Record the phrase just generated for `list_id`, replacing any
-    /// previous one — only the most recently requested phrase is ever valid.
-    pub fn set_unlock_phrase(&self, list_id: EntityId, phrase: String) {
-        if let Ok(mut phrases) = self.unlock_phrases.lock() {
-            phrases.insert(list_id, phrase);
-        }
-    }
-
-    /// Consume the stored phrase for `list_id` and compare it to `typed`.
-    ///
-    /// The stored phrase is removed whether or not it matches — a wrong
-    /// guess must request a fresh phrase rather than getting unlimited
-    /// attempts against the same one.
-    pub fn take_and_check_unlock_phrase(&self, list_id: EntityId, typed: &str) -> bool {
-        let expected = self
-            .unlock_phrases
-            .lock()
-            .ok()
-            .and_then(|mut phrases| phrases.remove(&list_id));
-        expected.is_some_and(|expected| expected == typed)
-    }
-
-    /// Same as [`Self::set_unlock_phrase`], for a settings lock.
-    pub fn set_setting_unlock_phrase(&self, key: String, phrase: String) {
-        if let Ok(mut phrases) = self.setting_unlock_phrases.lock() {
-            phrases.insert(key, phrase);
-        }
-    }
-
-    /// Same as [`Self::take_and_check_unlock_phrase`], for a settings lock.
-    pub fn take_and_check_setting_unlock_phrase(&self, key: &str, typed: &str) -> bool {
-        let expected = self
-            .setting_unlock_phrases
-            .lock()
-            .ok()
-            .and_then(|mut phrases| phrases.remove(key));
-        expected.is_some_and(|expected| expected == typed)
     }
 }
 

@@ -68,6 +68,20 @@ pub fn print_human(result: &CommandResult) {
             }
         }
 
+        CommandResult::SharedAllowanceStatus(statuses) => {
+            for s in statuses {
+                println!(
+                    "{}: {}s remaining of {}s (active: {})",
+                    s.block_list_id, s.remaining_secs, s.limit_secs, s.active
+                );
+            }
+        }
+        CommandResult::ScheduledProtectionStatus(statuses) => {
+            for status in statuses {
+                println!("{}  {:?}", status.block_list_id, status.state);
+            }
+        }
+
         CommandResult::ProtectionStatus(infos) if infos.is_empty() => {
             println!("No active protection.");
         }
@@ -79,20 +93,6 @@ pub fn print_human(result: &CommandResult) {
                     truncate(&i.block_list_name, 24),
                     format_duration(i.remaining_seconds),
                     i.expires_at.to_rfc3339(),
-                );
-            }
-        }
-
-        CommandResult::TypingLockStatus(infos) if infos.is_empty() => {
-            println!("No typing locks active.");
-        }
-        CommandResult::TypingLockStatus(infos) => {
-            for i in infos {
-                println!(
-                    "{}  {:<24} {} chars to unlock",
-                    i.block_list_id,
-                    truncate(&i.block_list_name, 24),
-                    i.phrase_length,
                 );
             }
         }

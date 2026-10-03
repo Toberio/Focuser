@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
 
+use crate::error::FocuserError;
+
 /// Unique identifier for all entities.
 pub type EntityId = Uuid;
 
@@ -23,7 +25,16 @@ pub struct BlockList {
     pub lock: Option<Lock>,
     pub protection: Option<Protection>,
     pub schedule: Option<Schedule>,
+    /// JSON defaults migrate existing lists to unprotected schedules.
+    #[serde(default)]
+    pub scheduled_protection: Option<ScheduledProtection>,
+    /// Trusted occurrence bypass; never accepted from wholesale list updates.
+    #[serde(default)]
+    pub schedule_unlocked_until: Option<DateTime<Utc>>,
     pub breaks: Option<BreakConfig>,
+    /// Optional shared budget per merged weekly schedule occurrence.
+    #[serde(default)]
+    pub shared_allowance: Option<crate::allowance::SharedAllowanceConfig>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -41,7 +52,10 @@ impl BlockList {
             lock: None,
             protection: None,
             schedule: None,
+            scheduled_protection: None,
+            schedule_unlocked_until: None,
             breaks: None,
+            shared_allowance: None,
             created_at: now,
             updated_at: now,
         }
@@ -73,46 +87,142 @@ impl BlockList {
         }
     }
 
+    /// The scheduled occurrence running at `now`, as (start, end). A schedule
+    /// with no gap has none: it never ends, so a lock or a budget tied to
+    /// "this occurrence" would never end or refill either.
+    pub fn occurrence_at<T: chrono::TimeZone>(
+        &self,
+        now: DateTime<T>,
+    ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+        self.schedule
+            .as_ref()?
+            .active_period_at(now)
+            .filter(|(_, end)| *end != DateTime::<Utc>::MAX_UTC)
+    }
+
+    pub fn scheduled_protection_at<T: chrono::TimeZone>(
+        &self,
+        now: DateTime<T>,
+    ) -> Option<Protection> {
+        self.scheduled_protection.as_ref()?;
+        if !self.enabled {
+            return None;
+        }
+        let (started_at, expires_at) = self.occurrence_at(now.clone())?;
+        if self
+            .schedule_unlocked_until
+            .is_some_and(|until| now.with_timezone(&Utc) < until)
+        {
+            return None;
+        }
+        Some(Protection {
+            started_at,
+            expires_at,
+            prevent_modification: true,
+            prevent_service_stop: true,
+            prevent_uninstall: true,
+        })
+    }
+
+    pub fn scheduled_lock_state(&self) -> ScheduledLockState {
+        self.scheduled_lock_state_at(chrono::Local::now())
+    }
+
+    pub fn scheduled_lock_state_at<T: chrono::TimeZone>(
+        &self,
+        now: DateTime<T>,
+    ) -> ScheduledLockState {
+        if self.scheduled_protection.is_none() {
+            return ScheduledLockState::Off;
+        }
+        if self.occurrence_at(now.clone()).is_none() {
+            return ScheduledLockState::Inactive;
+        }
+        // A separate manual commitment can still prohibit editing.
+        if self
+            .protection
+            .as_ref()
+            .is_some_and(|p| p.prevent_modification && now.with_timezone(&Utc) < p.expires_at)
+        {
+            return ScheduledLockState::Locked;
+        }
+        if self
+            .schedule_unlocked_until
+            .is_some_and(|end| now.with_timezone(&Utc) < end)
+        {
+            return ScheduledLockState::UnlockedForEditing;
+        }
+        if self.enabled {
+            ScheduledLockState::Locked
+        } else {
+            ScheduledLockState::Inactive
+        }
+    }
+
+    pub fn effective_protection(&self) -> Option<Protection> {
+        let manual = self.protection.as_ref().filter(|p| p.is_active()).cloned();
+        let scheduled = self.scheduled_protection_at(chrono::Local::now());
+        match (manual, scheduled) {
+            (Some(mut p), Some(s)) => {
+                p.prevent_modification |= s.prevent_modification;
+                p.prevent_service_stop |= s.prevent_service_stop;
+                p.prevent_uninstall |= s.prevent_uninstall;
+                p.expires_at = p.expires_at.max(s.expires_at);
+                Some(p)
+            }
+            (p, s) => p.or(s),
+        }
+    }
+
+    /// Manual commitments take priority when both kinds of protection overlap.
+    pub fn effective_lock(&self) -> Option<&Lock> {
+        if self.protection.as_ref().is_some_and(|p| p.is_active()) {
+            self.lock.as_ref()
+        } else {
+            self.scheduled_protection
+                .as_ref()
+                .and_then(|p| p.lock.as_ref())
+        }
+    }
+
     pub fn has_active_protection(&self) -> bool {
-        self.enabled && self.protection.as_ref().is_some_and(|p| p.is_active())
+        self.enabled && self.effective_protection().is_some()
     }
 
     pub fn is_modification_protected(&self) -> bool {
-        self.protection
-            .as_ref()
-            .is_some_and(|p| p.is_active() && p.prevent_modification)
-    }
-
-    /// Whether this list is held by a typing lock — armed until a freshly
-    /// generated random phrase is typed back exactly, with no timer to wait
-    /// out. Separate from [`Self::is_modification_protected`], which is
-    /// specifically about a [`Protection`] window.
-    ///
-    /// A typing lock has no granular checkboxes the way [`Protection`] does
-    /// (prevent uninstall / service stop / modification, chosen separately):
-    /// it implies all three at once, same as the original Focus Lock design
-    /// ("you can't disable it, delete it, or edit it") — see
-    /// [`Self::has_uninstall_protection`] and [`Self::has_service_protection`].
-    pub fn is_locked(&self) -> bool {
-        matches!(self.lock, Some(Lock::RandomText { .. }))
+        self.effective_protection()
+            .is_some_and(|p| p.prevent_modification)
     }
 
     pub fn has_uninstall_protection(&self) -> bool {
         self.enabled
-            && (self.is_locked()
-                || self
-                    .protection
-                    .as_ref()
-                    .is_some_and(|p| p.is_active() && p.prevent_uninstall))
+            && self
+                .effective_protection()
+                .is_some_and(|p| p.prevent_uninstall)
     }
 
     pub fn has_service_protection(&self) -> bool {
         self.enabled
-            && (self.is_locked()
-                || self
-                    .protection
-                    .as_ref()
-                    .is_some_and(|p| p.is_active() && p.prevent_service_stop))
+            && self
+                .effective_protection()
+                .is_some_and(|p| p.prevent_service_stop)
+    }
+
+    /// Called after edits: becoming inactive ends the occurrence bypass. Disabling
+    /// the list alone does not end it, so re-enabling permits further edits.
+    pub fn reconcile_schedule_bypass(&mut self) {
+        self.reconcile_schedule_bypass_at(chrono::Local::now());
+    }
+
+    pub fn reconcile_schedule_bypass_at<T: chrono::TimeZone>(&mut self, now: DateTime<T>) {
+        self.schedule_unlocked_until = self.schedule_unlocked_until.and_then(|until| {
+            if until <= now.with_timezone(&Utc) {
+                return None;
+            }
+            // An edit that keeps the schedule active continues this occurrence,
+            // including an extension. An inactive edit ends the bypass immediately.
+            self.occurrence_at(now).map(|(_, end)| end)
+        });
     }
 }
 
@@ -275,10 +385,38 @@ impl AppRule {
 pub enum ExceptionType {
     /// Allow a specific domain even when other rules would block it
     Domain(String),
+    /// Allow one page, and what is under it, on a site that stays blocked:
+    /// `reddit.com/r/programming`. Only the extension can see a path.
+    UrlPath(String),
     /// Allow a wildcard pattern
     Wildcard(String),
     /// Allow local file:// URLs
     LocalFiles,
+}
+
+impl ExceptionType {
+    /// The host and page this allows, when it names a page rather than a
+    /// whole site. A `Domain` typed with a path counts, as lists from before
+    /// 0.8.1 hold those.
+    pub fn page(&self) -> Option<(String, String)> {
+        match self {
+            Self::Domain(v) | Self::UrlPath(v) => crate::host::host_and_page(v),
+            Self::Wildcard(_) | Self::LocalFiles => None,
+        }
+    }
+
+    /// The form it is stored in: a bare host, or host plus page, whichever
+    /// kind was picked. `None` when there is nothing to allow.
+    pub fn normalized(self) -> Option<Self> {
+        let (Self::Domain(typed) | Self::UrlPath(typed)) = &self else {
+            return Some(self);
+        };
+        if let Some((host, page)) = self.page() {
+            return Some(Self::UrlPath(format!("{host}{page}")));
+        }
+        let host = crate::host::canonical_host(typed);
+        (!host.is_empty()).then_some(Self::Domain(host))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -304,6 +442,21 @@ impl ExceptionRule {
             enabled: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledLockState {
+    Off,
+    Inactive,
+    Locked,
+    UnlockedForEditing,
+}
+
+/// Opt-in recurring Focus Lock; reuses the existing early-unlock methods.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ScheduledProtection {
+    pub lock: Option<Lock>,
 }
 
 // ─── Protection ────────────────────────────────────────────────────
@@ -341,24 +494,94 @@ impl Protection {
 
 // ─── Locks ──────────────────────────────────────────────────────────
 
-/// How a block is enforced — determines what it takes to disable it.
+/// How a protection window can be ended early — Cold Turkey calls this a
+/// block's "lock". Meaningless on its own; it only matters while
+/// manual or scheduled protection is active, and it can only be configured
+/// through protection commands, never
+/// through a wholesale [`BlockList`] update.
+///
+/// With no lock, an active protection window simply cannot be ended early —
+/// the only way out is to wait for `expires_at`. Adding a lock is a
+/// deliberate trade: an escape hatch exists, but only through friction
+/// (retyping a random string) or a secret (a password).
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub enum Lock {
-    /// Block runs for a fixed duration, cannot be cancelled.
-    Timer {
-        duration_minutes: u32,
-        started_at: Option<DateTime<Utc>>,
-    },
-    /// Must type a long random string to unlock.
-    RandomText { length: u32 },
-    /// Locked until a specific time.
-    Until { unlock_at: DateTime<Utc> },
-    /// Requires system restart to disable (block re-enables on boot).
-    Restart,
-    /// Password-protected (hashed).
+    /// Must enter this password to unlock early. Stored as an Argon2 hash —
+    /// never the plaintext.
     Password { hash: String },
-    /// Follows the attached schedule — active during scheduled times.
-    Scheduled,
+    /// Must retype a freshly generated random string to unlock early.
+    ///
+    /// The string currently on offer is *not* stored here — it lives in the
+    /// database's `unlock_challenges` table (see `focuser_core::Database`)
+    /// keyed by block list, separate from this JSON blob. That keeps it out
+    /// of `ListBlockLists`/`ExportConfiguration`, and a wrong answer simply
+    /// requires a fresh one rather than allowing retries against the same
+    /// string.
+    RandomText { length: u32 },
+}
+
+impl Lock {
+    /// A challenge shorter than this is typed too easily to add real
+    /// friction; longer than this is just a typo generator.
+    pub const MIN_RANDOM_TEXT_LEN: u32 = 6;
+    pub const MAX_RANDOM_TEXT_LEN: u32 = 256;
+
+    /// Characters that stay unambiguous in a UI font — no `0`/`O`, `1`/`l`/`I`.
+    /// A challenge that is impossible to transcribe correctly defeats the
+    /// point, which is friction, not a puzzle.
+    const CHALLENGE_ALPHABET: &'static [u8] =
+        b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+    /// Hash `plain` with Argon2 and build a password lock. The plaintext is
+    /// never stored or returned.
+    pub fn password(plain: &str) -> Result<Self, FocuserError> {
+        use argon2::Argon2;
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(plain.as_bytes(), &salt)
+            .map_err(|e| FocuserError::PasswordHash(e.to_string()))?
+            .to_string();
+        Ok(Self::Password { hash })
+    }
+
+    /// Check `attempt` against a password lock. Always `false` for a
+    /// random-text lock — that one is verified against the issued challenge
+    /// instead, not through this method.
+    pub fn verify_password(&self, attempt: &str) -> bool {
+        use argon2::Argon2;
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+
+        let Self::Password { hash } = self else {
+            return false;
+        };
+        let Ok(parsed) = PasswordHash::new(hash) else {
+            return false;
+        };
+        Argon2::default()
+            .verify_password(attempt.as_bytes(), &parsed)
+            .is_ok()
+    }
+
+    /// How long a challenge for `length` is. Clamped because an imported
+    /// file can carry any number here.
+    pub fn challenge_len(length: u32) -> usize {
+        length.clamp(Self::MIN_RANDOM_TEXT_LEN, Self::MAX_RANDOM_TEXT_LEN) as usize
+    }
+
+    /// A fresh challenge string.
+    pub fn random_text_of_length(length: u32) -> String {
+        use argon2::password_hash::rand_core::{OsRng, RngCore};
+
+        let mut rng = OsRng;
+        (0..Self::challenge_len(length))
+            .map(|_| {
+                let idx = (rng.next_u32() as usize) % Self::CHALLENGE_ALPHABET.len();
+                Self::CHALLENGE_ALPHABET[idx] as char
+            })
+            .collect()
+    }
 }
 
 // ─── Schedules ──────────────────────────────────────────────────────
@@ -428,6 +651,65 @@ pub struct UsageStat {
 pub struct BlockedEvent {
     pub domain_or_app: String,
     pub timestamp: String,
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::Lock;
+
+    #[test]
+    fn password_hash_verifies_only_the_right_plaintext() {
+        let lock = Lock::password("correct-horse").unwrap();
+        assert!(lock.verify_password("correct-horse"));
+        assert!(!lock.verify_password("wrong"));
+    }
+
+    #[test]
+    fn stored_hash_never_contains_the_plaintext() {
+        let Lock::Password { hash } = Lock::password("super-secret").unwrap() else {
+            panic!("expected a password lock");
+        };
+        assert!(!hash.contains("super-secret"));
+    }
+
+    #[test]
+    fn random_text_challenges_have_the_requested_length_and_alphabet() {
+        let challenge = Lock::random_text_of_length(20);
+        assert_eq!(challenge.chars().count(), 20);
+        assert!(
+            challenge
+                .chars()
+                .all(|c| Lock::CHALLENGE_ALPHABET.contains(&(c as u8)))
+        );
+    }
+
+    #[test]
+    fn a_length_from_a_crafted_file_is_clamped() {
+        assert_eq!(
+            Lock::random_text_of_length(u32::MAX).len(),
+            Lock::MAX_RANDOM_TEXT_LEN as usize
+        );
+        assert_eq!(
+            Lock::random_text_of_length(0).len(),
+            Lock::MIN_RANDOM_TEXT_LEN as usize
+        );
+    }
+
+    #[test]
+    fn successive_challenges_are_not_the_same_string() {
+        // Astronomically unlikely to collide at this length; a collision here
+        // means the RNG is not actually being drawn from per call.
+        assert_ne!(
+            Lock::random_text_of_length(24),
+            Lock::random_text_of_length(24)
+        );
+    }
+
+    #[test]
+    fn a_random_text_lock_has_no_password() {
+        let text_lock = Lock::RandomText { length: 10 };
+        assert!(!text_lock.verify_password("anything"));
+    }
 }
 
 #[cfg(test)]

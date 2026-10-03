@@ -6,8 +6,10 @@ import {
   DAYS,
   describeDay,
   HOURS,
+  hasEndingHours,
   hoursOn,
   slotsToCells,
+  summarizeWeek,
   toggleDay,
   toggleHour,
 } from "./schedule";
@@ -159,5 +161,75 @@ describe("round trip", () => {
 
     // 168 selected hours should not become 168 rows in the database.
     expect(cellsToSlots(all)).toHaveLength(7);
+  });
+});
+
+describe("overnight schedule editing", () => {
+  it.each([
+    ["Fri", "Sat"],
+    ["Sun", "Mon"],
+  ] as const)("keeps %s overnight hours on %s after a round trip", (day, nextDay) => {
+    const overnight = slotsToCells([{ day, start: "22:00:00", end: "06:00:00" }]);
+    expect(overnight).toEqual(
+      new Set([
+        cellKey(day, 22),
+        cellKey(day, 23),
+        ...Array.from({ length: 6 }, (_, hour) => cellKey(nextDay, hour)),
+      ]),
+    );
+    expect(slotsToCells(cellsToSlots(overnight))).toEqual(overnight);
+  });
+});
+
+describe("hasEndingHours", () => {
+  const schedule = (cells: Set<CellKey>, enabled = true) => ({
+    id: "s",
+    name: "s",
+    enabled,
+    time_slots: cellsToSlots(cells),
+  });
+
+  it("is false for a list that is on all week", () => {
+    // No schedule, no slots, and every hour set are the same thing to a lock:
+    // there is no block of hours for it to follow.
+    expect(hasEndingHours(null)).toBe(false);
+    expect(hasEndingHours(schedule(cells()))).toBe(false);
+    expect(hasEndingHours(schedule(wholeWeek()))).toBe(false);
+  });
+
+  it("is true for hours that leave a gap in the week", () => {
+    expect(hasEndingHours(schedule(cells("Mon-9", "Mon-10")))).toBe(true);
+    const allButOne = wholeWeek();
+    allButOne.delete("Sun-3");
+    expect(hasEndingHours(schedule(allButOne))).toBe(true);
+  });
+
+  it("is false for a schedule that is switched off", () => {
+    expect(hasEndingHours(schedule(cells("Mon-9"), false))).toBe(false);
+  });
+});
+
+describe("summarizeWeek", () => {
+  const week = (...keys: CellKey[]) => summarizeWeek(cellsToSlots(cells(...keys)));
+
+  it("joins neighbouring days that have the same hours", () => {
+    const work = DAYS.slice(0, 5).flatMap((d) => [9, 10, 11].map((h) => cellKey(d, h)));
+    expect(week(...work)).toBe("Mon–Fri 9am–12pm");
+  });
+
+  it("names a single day on its own", () => {
+    expect(week("Sat-10", "Sat-11")).toBe("Sat 10am–12pm");
+  });
+
+  it("keeps days with different hours apart", () => {
+    expect(week("Mon-9", "Tue-9", "Thu-14")).toBe("Mon–Tue 9am–10am · Thu 2pm–3pm");
+  });
+
+  it("does not join days across a day that is off", () => {
+    expect(week("Mon-9", "Wed-9")).toBe("Mon 9am–10am · Wed 9am–10am");
+  });
+
+  it("says nothing for no hours", () => {
+    expect(summarizeWeek([])).toBe("");
   });
 });

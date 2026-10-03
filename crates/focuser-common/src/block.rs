@@ -34,13 +34,14 @@ impl BlockList {
         exe_path: Option<&str>,
         window_title: Option<&str>,
     ) -> bool {
-        if !self.is_effectively_active() {
-            return false;
-        }
-
-        self.applications
-            .iter()
-            .any(|rule| rule.enabled && rule.matches_process(process_name, exe_path, window_title))
+        // The rules go first. This runs for every process on the machine every
+        // few seconds, nearly all of them match nothing, and working out the
+        // hours is by far the slower half.
+        self.enabled
+            && self.applications.iter().any(|rule| {
+                rule.enabled && rule.matches_process(process_name, exe_path, window_title)
+            })
+            && self.is_effectively_active()
     }
 
     fn is_excepted_domain(&self, domain: &str) -> bool {
@@ -49,7 +50,11 @@ impl BlockList {
                 return false;
             }
             match &exc.exception_type {
-                ExceptionType::Domain(d) => host_matches(d, domain),
+                // One page is not the whole domain. Only the extension can
+                // tell them apart, so at this level the domain stays blocked.
+                ExceptionType::Domain(d) | ExceptionType::UrlPath(d) => {
+                    exc.exception_type.page().is_none() && host_matches(d, domain)
+                }
                 ExceptionType::Wildcard(pattern) => wildcard_matches(pattern, domain),
                 ExceptionType::LocalFiles => false, // N/A for domain checks
             }
@@ -148,6 +153,25 @@ mod tests {
     }
 
     #[test]
+    fn a_page_exception_does_not_free_the_whole_domain() {
+        // #21: the path was dropped, so allowing one subreddit allowed reddit.
+        let mut list = BlockList::new("Test");
+        list.websites.push(WebsiteRule::domain("youtube.com"));
+        list.websites.push(WebsiteRule::domain("reddit.com"));
+        // Typed as a domain, which is how lists from before 0.8.1 hold them.
+        for page in [
+            "https://www.youtube.com/@YouTube",
+            "reddit.com/r/programming",
+        ] {
+            list.exceptions
+                .push(crate::types::ExceptionRule::domain(page));
+        }
+
+        assert!(list.should_block_domain("youtube.com"));
+        assert!(list.should_block_domain("www.reddit.com"));
+    }
+
+    #[test]
     fn test_wildcard_rule() {
         let rule = WebsiteRule::wildcard("*.social.*");
         assert!(rule.matches_domain("www.social.network"));
@@ -177,12 +201,13 @@ mod tests {
 
     /// Build a schedule with non-empty time slots that never match the
     /// current time, so `is_active_now()` is deterministically false.
-    /// `start == end` makes `contains_time` return false on that day, and
+    /// A zero-length slot away from midnight never matches (midnight to
+    /// midnight is the schedule grid's full-day representation), and
     /// every weekday is covered so the result doesn't depend on when the
     /// test runs.
     fn never_active_schedule() -> crate::types::Schedule {
         use chrono::{NaiveTime, Weekday};
-        let zero = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+        let zero = NaiveTime::from_hms_opt(12, 0, 0).unwrap();
         let days = [
             Weekday::Mon,
             Weekday::Tue,

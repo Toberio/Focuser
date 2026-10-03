@@ -19,11 +19,11 @@ import type {
   Command,
   CommandResult,
   ExceptionType,
+  LockSetup,
   PomodoroConfig,
   PomodoroStatus,
   ProtectionInfo,
   TimeSlot,
-  TypingLockInfo,
   UsageStat,
   WebsiteMatchType,
   WebsiteRuleKind,
@@ -41,11 +41,11 @@ export type {
   Command,
   CommandResult,
   ExceptionType,
+  LockSetup,
   PomodoroConfig,
   PomodoroStatus,
   ProtectionInfo,
   TimeSlot,
-  TypingLockInfo,
   UsageStat,
   WebsiteMatchType,
   WebsiteRuleKind,
@@ -69,7 +69,8 @@ const run = (command: Command) => send<CommandResult>(command);
 export const queryKeys = {
   blockLists: ["block-lists"] as const,
   protection: ["protection"] as const,
-  typingLock: ["typing-lock"] as const,
+  scheduledProtection: ["scheduled-protection"] as const,
+  sharedAllowance: ["shared-allowance"] as const,
   allowances: ["allowances"] as const,
   pomodoro: ["pomodoro"] as const,
   stats: (from: string, to: string) => ["stats", from, to] as const,
@@ -88,6 +89,9 @@ function useBlockListMutation<TArgs>(build: (args: TArgs) => Command) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.blockLists });
       qc.invalidateQueries({ queryKey: queryKeys.protection });
+      qc.invalidateQueries({ queryKey: queryKeys.scheduledProtection });
+      qc.invalidateQueries({ queryKey: queryKeys.sharedAllowance });
+      qc.invalidateQueries({ queryKey: queryKeys.allowances });
     },
   });
 }
@@ -313,6 +317,41 @@ export function useProtectionStatus() {
   });
 }
 
+export function useScheduledProtectionStatus() {
+  return useQuery({
+    queryKey: queryKeys.scheduledProtection,
+    queryFn: async () =>
+      expect(await run({ cmd: "get_scheduled_protection_status" }), "scheduled_protection_status")
+        .data,
+  });
+}
+
+export function useSharedAllowanceStatus() {
+  return useQuery({
+    queryKey: queryKeys.sharedAllowance,
+    queryFn: async () =>
+      expect(await run({ cmd: "get_shared_allowance_status" }), "shared_allowance_status").data,
+  });
+}
+
+export const useConfigureSharedAllowance = () =>
+  useBlockListMutation<{ listId: string; minutes: number | null }>((a) => ({
+    cmd: "configure_shared_allowance",
+    args: { list_id: a.listId, minutes: a.minutes },
+  }));
+
+export const useRelockScheduledProtection = () =>
+  useBlockListMutation<string>((listId) => ({
+    cmd: "relock_scheduled_protection",
+    args: { list_id: listId },
+  }));
+
+export const useConfigureScheduledProtection = () =>
+  useBlockListMutation<{ listId: string; enabled: boolean; lock: LockSetup | null }>((a) => ({
+    cmd: "configure_scheduled_protection",
+    args: { list_id: a.listId, enabled: a.enabled, lock: a.lock },
+  }));
+
 export const useEnableProtection = () =>
   useBlockListMutation<{
     listId: string;
@@ -320,6 +359,8 @@ export const useEnableProtection = () =>
     preventUninstall: boolean;
     preventServiceStop: boolean;
     preventModification: boolean;
+    /** `null` means "wait it out" — nothing can end the window early. */
+    lock: LockSetup | null;
   }>((a) => ({
     cmd: "enable_protection",
     args: {
@@ -328,62 +369,25 @@ export const useEnableProtection = () =>
       prevent_uninstall: a.preventUninstall,
       prevent_service_stop: a.preventServiceStop,
       prevent_modification: a.preventModification,
+      lock: a.lock,
     },
   }));
 
-// ─── Typing lock ────────────────────────────────────────────────────
-
-function useTypingLockMutation<TArgs>(build: (args: TArgs) => Command) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (args: TArgs) => run(build(args)),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.blockLists });
-      qc.invalidateQueries({ queryKey: queryKeys.typingLock });
-    },
-  });
-}
-
-export function useTypingLockStatus() {
-  return useQuery({
-    queryKey: queryKeys.typingLock,
-    queryFn: async () =>
-      expect(await run({ cmd: "get_typing_lock_status" }), "typing_lock_status").data,
-  });
-}
-
-export const useEnableTypingLock = () =>
-  useTypingLockMutation<{ listId: string; phraseLength: number }>((a) => ({
-    cmd: "enable_typing_lock",
-    args: { list_id: a.listId, phrase_length: a.phraseLength },
-  }));
-
-/** Fetches a fresh phrase to type back. Each call discards the previous one. */
-export function useRequestUnlockPhrase() {
+/** Issue a fresh random-text challenge to display and retype. */
+export function useRequestUnlockChallenge() {
   return useMutation({
     mutationFn: async (listId: string) =>
-      expect(await run({ cmd: "request_unlock_phrase", args: { list_id: listId } }), "text").data,
+      expect(await run({ cmd: "request_unlock_challenge", args: { list_id: listId } }), "text")
+        .data,
   });
 }
 
-/** Resolves to whether the typed text matched — the list stays locked on `false`. */
-export function useAttemptUnlock() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (args: { listId: string; typed: string }) =>
-      expect(
-        await run({
-          cmd: "attempt_unlock",
-          args: { list_id: args.listId, typed: args.typed },
-        }),
-        "flag",
-      ).data,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: queryKeys.blockLists });
-      qc.invalidateQueries({ queryKey: queryKeys.typingLock });
-    },
-  });
-}
+/** Answer a protected list's lock; on success its protection window ends immediately. */
+export const useUnlockProtection = () =>
+  useBlockListMutation<{ listId: string; response: string }>(({ listId, response }) => ({
+    cmd: "unlock_protection",
+    args: { list_id: listId, response },
+  }));
 
 // ─── Settings ───────────────────────────────────────────────────────
 
@@ -401,59 +405,6 @@ export function useSetSetting() {
   return useMutation({
     mutationFn: (args: { key: string; value: string }) => run({ cmd: "set_setting", args }),
     onSuccess: (_data, { key }) => qc.invalidateQueries({ queryKey: queryKeys.setting(key) }),
-  });
-}
-
-// ─── Settings lock ──────────────────────────────────────────────────
-//
-// Same typing-lock mechanism as a block list's, but keyed by a settings-table
-// key instead of a list id. Lock *status* is not a separate command — the
-// lock itself lives at settings key `lock:<key>`, so `useSetting` already
-// answers "is this locked, and for how many characters" for free.
-
-export function useSettingLockStatus(key: string) {
-  const status = useSetting(`lock:${key}`);
-  const phraseLength = status.data ? Number(status.data) : null;
-  return {
-    locked: phraseLength !== null && Number.isFinite(phraseLength) && phraseLength > 0,
-    phraseLength,
-    isPending: status.isPending,
-  };
-}
-
-export function useEnableSettingLock() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (args: { key: string; phraseLength: number }) =>
-      run({
-        cmd: "enable_setting_lock",
-        args: { key: args.key, phrase_length: args.phraseLength },
-      }),
-    onSuccess: (_r, { key }) =>
-      qc.invalidateQueries({ queryKey: queryKeys.setting(`lock:${key}`) }),
-  });
-}
-
-export function useRequestSettingUnlockPhrase() {
-  return useMutation({
-    mutationFn: async (key: string) =>
-      expect(await run({ cmd: "request_setting_unlock_phrase", args: { key } }), "text").data,
-  });
-}
-
-export function useAttemptSettingUnlock() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (args: { key: string; typed: string }) =>
-      expect(
-        await run({
-          cmd: "attempt_setting_unlock",
-          args: { key: args.key, typed: args.typed },
-        }),
-        "flag",
-      ).data,
-    onSuccess: (_matched, { key }) =>
-      qc.invalidateQueries({ queryKey: queryKeys.setting(`lock:${key}`) }),
   });
 }
 

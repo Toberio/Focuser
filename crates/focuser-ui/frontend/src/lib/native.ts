@@ -26,6 +26,16 @@ export function saveConfiguration(json: string): Promise<string | null> {
   return invoke<string | null>("save_configuration", { json });
 }
 
+/** Pick an audio file for the phase chime. Returns its path, or null if cancelled. */
+export function pickSound(): Promise<string | null> {
+  return invoke<string | null>("pick_sound_file");
+}
+
+/** Play the phase chime once, as currently configured. */
+export function previewSound(): Promise<void> {
+  return invoke("preview_sound");
+}
+
 export function openInBrowser(browser: string, url: string): Promise<void> {
   return invoke("open_browser_url", { browser, url });
 }

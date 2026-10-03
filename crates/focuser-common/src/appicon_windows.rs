@@ -348,14 +348,14 @@ fn read_pixels(handle: HICON) -> Option<Icon> {
 
     // Swap BGRA to RGBA. GDI hands back little-endian 0xAARRGGBB, which is
     // B, G, R, A in memory order.
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
 
     // Icons predating 32-bit colour carry no alpha channel at all; their
     // transparency lives in a separate 1-bit mask. Left as-is they decode as a
     // fully transparent square and get trimmed away to nothing.
-    if rgba.chunks_exact(4).all(|px| px[3] == 0) {
+    if rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 0) {
         apply_mask(&mut rgba, mask.0, width, height)?;
     }
 
@@ -420,7 +420,12 @@ fn read_bgra(bitmap: HBITMAP, width: u32, height: u32) -> Option<Vec<u8>> {
 fn apply_mask(rgba: &mut [u8], mask: HBITMAP, width: u32, height: u32) -> Option<()> {
     let bits = read_bgra(mask, width, height)?;
 
-    for (px, m) in rgba.chunks_exact_mut(4).zip(bits.chunks_exact(4)) {
+    for (px, m) in rgba
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(bits.as_chunks::<4>().0)
+    {
         px[3] = if m[0] > 127 { 0 } else { 255 };
     }
     Some(())
@@ -613,6 +618,6 @@ mod tests {
         assert!(icon.width >= 16 && icon.height >= 16);
         assert_eq!(icon.rgba.len(), (icon.width * icon.height * 4) as usize);
         // A blank square would mean the alpha handling silently gave up.
-        assert!(icon.rgba.chunks_exact(4).any(|px| px[3] > 0));
+        assert!(icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
     }
 }

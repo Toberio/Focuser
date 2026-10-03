@@ -18,28 +18,60 @@
 /// assert_eq!(canonical_host("https://WWW.YouTube.com:443/feed"), "youtube.com");
 /// ```
 pub fn canonical_host(raw: &str) -> String {
-    let mut host = raw.trim().to_ascii_lowercase();
+    let lowered = raw.trim().to_ascii_lowercase();
 
-    if let Some(rest) = host.split_once("://") {
-        host = rest.1.to_string();
-    }
-    // Credentials, then path/query/fragment, then port.
-    if let Some((_, rest)) = host.split_once('@') {
-        host = rest.to_string();
-    }
-    host = host
+    // The path goes first: an `@` after the first slash is part of the page
+    // (youtube.com/@name), not credentials.
+    let authority = without_scheme(&lowered)
         .split(['/', '?', '#'])
         .next()
-        .unwrap_or_default()
-        .to_string();
-    if let Some((name, _port)) = host.rsplit_once(':')
-        && !name.is_empty()
-    {
-        host = name.to_string();
-    }
+        .unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.rsplit_once(':') {
+        Some((name, _port)) if !name.is_empty() => name,
+        _ => host,
+    };
 
     let host = host.trim_end_matches('.');
     host.strip_prefix("www.").unwrap_or(host).to_string()
+}
+
+/// Everything after a leading `scheme://`. Only at the very start: a `://`
+/// further along belongs to a query string.
+fn without_scheme(raw: &str) -> &str {
+    match raw.split_once("://") {
+        Some((scheme, rest))
+            if scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-') =>
+        {
+            rest
+        }
+        _ => raw,
+    }
+}
+
+/// Split a typed address into its host and the page under it, when it names a
+/// page at all: `youtube.com/@name` does, `youtube.com/` does not.
+///
+/// ```
+/// # use focuser_common::host::host_and_page;
+/// let page = host_and_page("https://www.reddit.com/r/programming/");
+/// assert_eq!(page, Some(("reddit.com".into(), "/r/programming".into())));
+/// ```
+pub fn host_and_page(raw: &str) -> Option<(String, String)> {
+    let rest = without_scheme(raw.trim());
+    let cut = rest.find(['/', '?', '#'])?;
+
+    let host = canonical_host(&rest[..cut]);
+    let page = rest[cut..].split('#').next().unwrap_or_default();
+    let page = page.trim_end_matches('/');
+    if host.is_empty() || page.is_empty() {
+        return None;
+    }
+    // `example.com?q=1` has no slash, but the browser will report `/?q=1`.
+    let slash = if page.starts_with('?') { "/" } else { "" };
+    Some((host, format!("{slash}{page}")))
 }
 
 /// Does `host` fall under `rule`?
@@ -126,6 +158,52 @@ mod tests {
             "https://user:pass@www.youtube.com/",
         ] {
             assert_eq!(canonical_host(raw), "youtube.com", "input was {raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_at_sign_or_a_second_scheme_in_the_path_is_not_the_host() {
+        // #21: `/@YouTube` was read as credentials and gave the host "youtube".
+        for raw in ["https://www.youtube.com/@YouTube", "youtube.com/@YouTube"] {
+            assert_eq!(canonical_host(raw), "youtube.com", "input was {raw:?}");
+        }
+        assert_eq!(
+            canonical_host("example.com/login?next=https://other.com"),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn a_page_is_a_host_with_something_after_it() {
+        for (raw, host, page) in [
+            (
+                "https://www.youtube.com/@YouTube",
+                "youtube.com",
+                "/@YouTube",
+            ),
+            ("reddit.com/r/programming/", "reddit.com", "/r/programming"),
+            (
+                "HTTPS://youtube.com/watch?v=abc#t=10",
+                "youtube.com",
+                "/watch?v=abc",
+            ),
+            ("example.com?q=1", "example.com", "/?q=1"),
+        ] {
+            let expected = Some((host.to_string(), page.to_string()));
+            assert_eq!(host_and_page(raw), expected, "input was {raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_bare_site_is_not_a_page() {
+        for raw in [
+            "youtube.com",
+            "https://www.youtube.com/",
+            "youtube.com/#top",
+            "  ",
+            "/just/a/path",
+        ] {
+            assert_eq!(host_and_page(raw), None, "input was {raw:?}");
         }
     }
 

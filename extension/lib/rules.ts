@@ -10,6 +10,7 @@
 
 /** The rule set exactly as the desktop app serves it. */
 export interface RuleSet {
+  scopes?: { rules: RuleSet; shared_permits: boolean | null; scheduled: boolean }[];
   blocked_domains: string[];
   blocked_keywords: string[];
   blocked_wildcards: string[];
@@ -17,12 +18,17 @@ export interface RuleSet {
   block_entire_internet: boolean;
   allowed_domains: string[];
   allowed_wildcards?: string[];
+  /** Pages allowed on a site that is otherwise blocked, as `host/path`. */
+  allowed_url_paths?: string[];
+  /** Sites an allowance is keeping open. Sent with `scopes`. */
+  allowance_domains?: string[];
   domain_categories?: Record<string, string>;
   version?: number;
 }
 
 /** Rules with the hot paths pre-canonicalised, built once per rules update. */
 export interface CompiledRules {
+  scopes?: { rules: CompiledRules; sharedPermits: boolean | null; scheduled: boolean }[];
   domains: Set<string>;
   keywords: string[];
   wildcards: string[];
@@ -30,7 +36,15 @@ export interface CompiledRules {
   blockEverything: boolean;
   allowed: Set<string>;
   allowedWildcards: string[];
+  allowedPages: AllowedPage[];
+  allowances: Set<string>;
   categories: Record<string, string>;
+}
+
+/** One allowed page: its canonical host and its lower-cased path. */
+export interface AllowedPage {
+  host: string;
+  page: string;
 }
 
 export const EMPTY_RULES: CompiledRules = {
@@ -41,6 +55,8 @@ export const EMPTY_RULES: CompiledRules = {
   blockEverything: false,
   allowed: new Set(),
   allowedWildcards: [],
+  allowedPages: [],
+  allowances: new Set(),
   categories: {},
 };
 
@@ -53,17 +69,15 @@ export const EMPTY_RULES: CompiledRules = {
  * assumption, and the two must agree or a rule silently misses.
  */
 export function canonicalHost(raw: string | null | undefined): string {
-  let host = String(raw ?? "")
+  const lowered = String(raw ?? "")
     .trim()
     .toLowerCase();
 
-  const scheme = host.indexOf("://");
-  if (scheme !== -1) host = host.slice(scheme + 3);
-
-  const at = host.indexOf("@");
-  if (at !== -1) host = host.slice(at + 1);
-
-  host = host.split(/[/?#]/)[0] ?? "";
+  // A scheme only counts at the very start, and the path goes before the
+  // credentials: an `@` after the first slash is part of the page
+  // (youtube.com/@name). The Rust side parses it the same way.
+  let host = lowered.replace(/^[a-z0-9+-]+:\/\//, "").split(/[/?#]/)[0] ?? "";
+  host = host.slice(host.lastIndexOf("@") + 1);
 
   const colon = host.lastIndexOf(":");
   if (colon > 0) host = host.slice(0, colon);
@@ -127,7 +141,9 @@ export function matchHostWildcard(pattern: string, hostname: string): boolean {
 
   // Both the host as given and its canonical form: a glob may be aiming at the
   // `www.` label that canonicalHost removes.
-  const raw = String(hostname ?? "").trim().toLowerCase();
+  const raw = String(hostname ?? "")
+    .trim()
+    .toLowerCase();
   const glob = pattern.trim().toLowerCase();
   if (matchWildcard(glob, raw) || matchWildcard(glob, canonical)) return true;
 
@@ -139,6 +155,11 @@ export function matchHostWildcard(pattern: string, hostname: string): boolean {
 export function compile(rules: RuleSet | null): CompiledRules {
   if (!rules) return EMPTY_RULES;
   return {
+    scopes: rules.scopes?.map((s) => ({
+      rules: compile(s.rules),
+      sharedPermits: s.shared_permits,
+      scheduled: s.scheduled,
+    })),
     domains: canonicalSet(rules.blocked_domains),
     keywords: (rules.blocked_keywords ?? []).map((k) => k.toLowerCase()),
     wildcards: rules.blocked_wildcards ?? [],
@@ -146,13 +167,45 @@ export function compile(rules: RuleSet | null): CompiledRules {
     blockEverything: rules.block_entire_internet ?? false,
     allowed: canonicalSet(rules.allowed_domains),
     allowedWildcards: rules.allowed_wildcards ?? [],
+    allowedPages: (rules.allowed_url_paths ?? []).flatMap(compilePage),
+    allowances: canonicalSet(rules.allowance_domains),
     categories: rules.domain_categories ?? {},
   };
 }
 
-export function isAllowed(rules: CompiledRules, hostname: string): boolean {
+/** `host/path` as the app sends it. An entry with no path is dropped. */
+function compilePage(entry: string): AllowedPage[] {
+  const slash = entry.indexOf("/");
+  const host = canonicalHost(entry);
+  if (slash === -1 || !host) return [];
+  return [{ host, page: entry.slice(slash).toLowerCase() }];
+}
+
+/**
+ * On the allowed page or under it. `/r/programming` covers
+ * `/r/programming/comments` but not `/r/programminghumor`, so the match has
+ * to end on a boundary.
+ */
+function onPage(allowed: AllowedPage, hostname: string, url: string): boolean {
+  const host = canonicalHost(hostname);
+  if (host !== allowed.host && !host.endsWith(`.${allowed.host}`)) return false;
+
+  let path: string;
+  try {
+    const parsed = new URL(url);
+    path = (parsed.pathname + parsed.search).toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!path.startsWith(allowed.page)) return false;
+  const next = path[allowed.page.length];
+  return next === undefined || "/?&".includes(next);
+}
+
+export function isAllowed(rules: CompiledRules, hostname: string, url = ""): boolean {
   if (setCovers(rules.allowed, hostname)) return true;
-  return rules.allowedWildcards.some((pattern) => matchHostWildcard(pattern, hostname));
+  if (rules.allowedWildcards.some((pattern) => matchHostWildcard(pattern, hostname))) return true;
+  return rules.allowedPages.some((page) => onPage(page, hostname, url));
 }
 
 /**
@@ -175,15 +228,27 @@ export type BlockMatch =
  * Exceptions win over every rule, including "block the entire internet" —
  * an allowance that cannot be honoured is not an allowance.
  */
-export function match(
-  rules: CompiledRules,
-  hostname: string,
-  url: string,
-): BlockMatch | null {
+export function match(rules: CompiledRules, hostname: string, url: string): BlockMatch | null {
   const host = canonicalHost(hostname);
   const lowerUrl = (url ?? "").toLowerCase();
 
-  if (isAllowed(rules, hostname)) return null;
+  // With scopes, each list brings its own exceptions. The flat ones are every
+  // list's mixed together, for an extension older than this one, so only the
+  // allowances are read from the top level here.
+  if (rules.scopes?.length) {
+    const applicable = rules.scopes
+      .map((s) => ({ ...s, hit: match(s.rules, hostname, url) }))
+      .filter((s) => s.hit);
+    const shared = applicable.some((s) => s.sharedPermits !== null);
+    for (const scope of applicable) {
+      if (scope.sharedPermits === true) continue;
+      if (!shared && !scope.scheduled && setCovers(rules.allowances, hostname)) continue;
+      return scope.hit;
+    }
+    return null;
+  }
+
+  if (isAllowed(rules, hostname, url)) return null;
   if (rules.blockEverything) return { reason: "everything", target: host };
   if (setCovers(rules.domains, host)) return { reason: "domain", target: host };
 
@@ -201,11 +266,7 @@ export function match(
   return null;
 }
 
-export function isBlocked(
-  rules: CompiledRules,
-  hostname: string,
-  url: string,
-): boolean {
+export function isBlocked(rules: CompiledRules, hostname: string, url: string): boolean {
   return match(rules, hostname, url) !== null;
 }
 
@@ -237,9 +298,6 @@ export function trackingKey(hit: BlockMatch): string {
 /** How many distinct things the current rules block, for the toolbar badge. */
 export function ruleCount(rules: CompiledRules): number {
   return (
-    rules.domains.size +
-    rules.keywords.length +
-    rules.urlPaths.length +
-    rules.wildcards.length
+    rules.domains.size + rules.keywords.length + rules.urlPaths.length + rules.wildcards.length
   );
 }

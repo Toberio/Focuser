@@ -18,6 +18,7 @@ pub struct BlockEngine {
 
 impl BlockEngine {
     pub fn new(db: Database) -> Result<Self> {
+        upgrade_exceptions(&db)?;
         let cached_lists = db.list_block_lists()?;
         info!(count = cached_lists.len(), "Block engine initialized");
         Ok(Self { db, cached_lists })
@@ -34,7 +35,9 @@ impl BlockEngine {
     /// Returns the name of the first matching block list, or None.
     pub fn check_domain(&self, domain: &str) -> Option<&str> {
         for list in &self.cached_lists {
-            if list.should_block_domain(domain) {
+            if list.should_block_domain(domain)
+                && !self.db.shared_permits_at(list, chrono::Local::now())
+            {
                 return Some(&list.name);
             }
         }
@@ -50,11 +53,43 @@ impl BlockEngine {
         window_title: Option<&str>,
     ) -> Option<&str> {
         for list in &self.cached_lists {
-            if list.should_block_app(process_name, exe_path, window_title) {
+            if list.should_block_app(process_name, exe_path, window_title)
+                && !(focuser_common::session::app_usage_measurable()
+                    && self.db.shared_permits_at(list, chrono::Local::now()))
+            {
                 return Some(&list.name);
             }
         }
         None
+    }
+
+    /// Whether a list with set hours is blocking this domain right now. Those
+    /// hours are a hard block, so an allowance does not reach through them (#17).
+    pub fn scheduled_block_on_domain(&self, domain: &str) -> bool {
+        self.cached_lists
+            .iter()
+            .any(|l| has_hours(l) && l.should_block_domain(domain))
+    }
+
+    /// The app half of [`Self::scheduled_block_on_domain`].
+    pub fn scheduled_block_on_app(&self, exe: &str) -> bool {
+        self.cached_lists
+            .iter()
+            .any(|l| has_hours(l) && l.should_block_app(exe, None, None))
+    }
+
+    pub fn shared_covers_app(&self, exe: &str) -> bool {
+        self.cached_lists.iter().any(|l| {
+            crate::shared_allowance::occurrence(l, chrono::Local::now()).is_some()
+                && crate::shared_allowance::covers(l, None, None, Some(exe))
+        })
+    }
+
+    pub fn shared_covers_domain(&self, domain: &str) -> bool {
+        self.cached_lists.iter().any(|l| {
+            crate::shared_allowance::occurrence(l, chrono::Local::now()).is_some()
+                && crate::shared_allowance::covers(l, Some(domain), None, None)
+        })
     }
 
     /// Collect all domains that need to be blocked (for hosts file generation).
@@ -143,10 +178,15 @@ impl BlockEngine {
                     continue;
                 }
                 match &exc.exception_type {
-                    ExceptionType::Domain(d) => {
-                        // Both forms, for the same reason as blocked domains —
-                        // an exception must release whichever one is listed.
-                        rules.allowed_domains.extend(hosts_entries(d));
+                    ExceptionType::Domain(d) | ExceptionType::UrlPath(d) => {
+                        match exc.exception_type.page() {
+                            Some((host, page)) => {
+                                rules.allowed_url_paths.push(format!("{host}{page}"));
+                            }
+                            // Both forms, for the same reason as blocked domains —
+                            // an exception must release whichever one is listed.
+                            None => rules.allowed_domains.extend(hosts_entries(d)),
+                        }
                     }
                     ExceptionType::Wildcard(pat) => {
                         rules.allowed_wildcards.push(pat.clone());
@@ -176,6 +216,63 @@ impl BlockEngine {
         rules.allowed_domains.dedup();
         rules.allowed_wildcards.sort();
         rules.allowed_wildcards.dedup();
+        rules.allowed_url_paths.sort();
+        rules.allowed_url_paths.dedup();
+
+        // Scopes are added only while a shared occurrence is running. The flat
+        // fields above stay as they always were, exceptions included, because an
+        // extension that predates scopes reads nothing else. It keeps blocking
+        // what a shared allowance would open, which is the safe side.
+        if self
+            .cached_lists
+            .iter()
+            .any(|l| crate::shared_allowance::occurrence(l, chrono::Local::now()).is_some())
+        {
+            for list in self
+                .cached_lists
+                .iter()
+                .filter(|l| l.is_effectively_active())
+            {
+                let mut scoped = ExtensionRuleSet::empty();
+                for r in list.websites.iter().filter(|r| r.enabled) {
+                    match &r.match_type {
+                        WebsiteMatchType::Domain(d) => scoped.blocked_domains.push(d.clone()),
+                        WebsiteMatchType::Keyword(k) => scoped.blocked_keywords.push(k.clone()),
+                        WebsiteMatchType::Wildcard(w) => scoped.blocked_wildcards.push(w.clone()),
+                        WebsiteMatchType::UrlPath(p) => scoped.blocked_url_paths.push(p.clone()),
+                        WebsiteMatchType::EntireInternet => scoped.block_entire_internet = true,
+                    }
+                }
+                for e in list.exceptions.iter().filter(|e| e.enabled) {
+                    match &e.exception_type {
+                        ExceptionType::Domain(d) | ExceptionType::UrlPath(d) => {
+                            match e.exception_type.page() {
+                                Some((host, page)) => {
+                                    scoped.allowed_url_paths.push(format!("{host}{page}"));
+                                }
+                                None => scoped.allowed_domains.push(d.clone()),
+                            }
+                        }
+                        ExceptionType::Wildcard(w) => scoped.allowed_wildcards.push(w.clone()),
+                        ExceptionType::LocalFiles => {}
+                    }
+                }
+                rules
+                    .scopes
+                    .push(focuser_common::extension::ExtensionListScope {
+                        rules: scoped,
+                        shared_permits: crate::shared_allowance::occurrence(
+                            list,
+                            chrono::Local::now(),
+                        )
+                        .map(|_| self.db.shared_permits_at(list, chrono::Local::now())),
+                        scheduled: has_hours(list),
+                    });
+            }
+            // Scoped matching keeps each list's exceptions to that list, so the
+            // allowances travel on their own instead of in the flat exceptions.
+            rules.allowance_domains = extra_allowed_domains.to_vec();
+        }
 
         // Stable content-based version hash. Only changes when rules actually
         // change — NOT on every call. This prevents the extension from treating
@@ -190,6 +287,11 @@ impl BlockEngine {
         rules.block_entire_internet.hash(&mut hasher);
         rules.allowed_domains.hash(&mut hasher);
         rules.allowed_wildcards.hash(&mut hasher);
+        rules.allowed_url_paths.hash(&mut hasher);
+        rules.allowance_domains.hash(&mut hasher);
+        serde_json::to_string(&rules.scopes)
+            .unwrap_or_default()
+            .hash(&mut hasher);
         rules.version = hasher.finish();
 
         rules
@@ -223,20 +325,13 @@ impl BlockEngine {
             .is_some_and(|l| l.is_modification_protected())
     }
 
-    pub fn is_block_list_locked(&self, id: EntityId) -> bool {
-        self.cached_lists
-            .iter()
-            .find(|l| l.id == id)
-            .is_some_and(|l| l.is_locked())
-    }
-
     pub fn active_protection_info(&self) -> Vec<ProtectionInfo> {
         self.cached_lists
             .iter()
-            .filter(|l| l.has_active_protection())
-            .map(|l| {
-                let p = l.protection.as_ref().unwrap();
-                ProtectionInfo {
+            .filter(|l| l.enabled)
+            .filter_map(|l| {
+                let p = l.effective_protection()?;
+                Some(ProtectionInfo {
                     block_list_id: l.id,
                     block_list_name: l.name.clone(),
                     prevent_uninstall: p.prevent_uninstall,
@@ -244,7 +339,7 @@ impl BlockEngine {
                     prevent_modification: p.prevent_modification,
                     remaining_seconds: p.remaining_seconds(),
                     expires_at: p.expires_at,
-                }
+                })
             })
             .collect()
     }
@@ -265,6 +360,35 @@ impl BlockEngine {
     pub fn block_lists(&self) -> &[BlockList] {
         &self.cached_lists
     }
+}
+
+/// Before 0.8.1 an exception typed with a path was stored as a domain and
+/// allowed the whole site (#21). Rewritten once, so the list shows what the
+/// exception allows now.
+fn upgrade_exceptions(db: &Database) -> Result<()> {
+    for mut list in db.list_block_lists()? {
+        let mut changed = false;
+        for exc in &mut list.exceptions {
+            if matches!(exc.exception_type, ExceptionType::Domain(_))
+                && exc.exception_type.page().is_some()
+                && let Some(page) = exc.exception_type.clone().normalized()
+            {
+                exc.exception_type = page;
+                changed = true;
+            }
+        }
+        if changed {
+            db.update_block_list(&list)?;
+        }
+    }
+    Ok(())
+}
+
+/// A list with no time slots is always on, not scheduled.
+fn has_hours(list: &BlockList) -> bool {
+    list.schedule
+        .as_ref()
+        .is_some_and(|s| !s.time_slots.is_empty())
 }
 
 #[cfg(test)]
@@ -419,6 +543,50 @@ mod tests {
                     .contains(&"www.youtube.com".to_string())
             );
         }
+    }
+
+    #[test]
+    fn a_page_exception_is_sent_as_a_page_not_as_its_domain() {
+        // #21: the path was dropped and the whole of youtube.com was allowed.
+        let mut engine = engine_blocking("youtube.com");
+        let mut list = engine.block_lists()[0].clone();
+        for typed in ["https://www.youtube.com/@YouTube", "docs.youtube.com"] {
+            list.exceptions
+                .push(focuser_common::types::ExceptionRule::domain(typed));
+        }
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+
+        let rules = engine.compile_extension_rules();
+        assert_eq!(rules.allowed_url_paths, ["youtube.com/@YouTube"]);
+        assert_eq!(
+            rules.allowed_domains,
+            ["docs.youtube.com", "www.docs.youtube.com"]
+        );
+        assert!(engine.check_domain("youtube.com").is_some());
+    }
+
+    #[test]
+    fn an_exception_saved_with_a_path_becomes_a_page_on_load() {
+        use focuser_common::types::ExceptionRule;
+
+        let db = Database::open_in_memory().unwrap();
+        let mut list = BlockList::new("From 0.8.0");
+        for typed in ["https://docs.google.com/document/u/0/", "example.com"] {
+            list.exceptions.push(ExceptionRule::domain(typed));
+        }
+        db.create_block_list(&list).unwrap();
+
+        let engine = BlockEngine::new(db).unwrap();
+        let stored = &engine.db().list_block_lists().unwrap()[0].exceptions;
+        assert!(matches!(
+            &stored[0].exception_type,
+            ExceptionType::UrlPath(page) if page == "docs.google.com/document/u/0"
+        ));
+        assert!(matches!(
+            &stored[1].exception_type,
+            ExceptionType::Domain(host) if host == "example.com"
+        ));
     }
 
     #[test]

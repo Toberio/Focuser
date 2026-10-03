@@ -49,6 +49,10 @@ use specta::Type;
 /// caches it and uses it for real-time URL matching without round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ExtensionRuleSet {
+    /// New clients evaluate each list independently. Legacy clients retain the
+    /// conservative flattened blocking rules and cannot spend shared budgets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<ExtensionListScope>,
     /// Version counter — extension discards stale updates.
     pub version: u64,
     /// Domains to block (exact match — also handled by hosts file as backup).
@@ -65,11 +69,20 @@ pub struct ExtensionRuleSet {
     pub allowed_domains: Vec<String>,
     /// Wildcard patterns for exceptions.
     pub allowed_wildcards: Vec<String>,
+    /// Pages allowed on a site that is otherwise blocked, as `host/path`.
+    #[serde(default)]
+    pub allowed_url_paths: Vec<String>,
+    /// Sites an allowance is keeping open, sent with `scopes`. They are in
+    /// `allowed_domains` too, but there they are mixed with every list's
+    /// exceptions, and scoped matching must tell the two apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowance_domains: Vec<String>,
 }
 
 impl ExtensionRuleSet {
     pub fn empty() -> Self {
         Self {
+            scopes: Vec::new(),
             version: 0,
             blocked_domains: Vec::new(),
             blocked_keywords: Vec::new(),
@@ -78,6 +91,8 @@ impl ExtensionRuleSet {
             block_entire_internet: false,
             allowed_domains: Vec::new(),
             allowed_wildcards: Vec::new(),
+            allowed_url_paths: Vec::new(),
+            allowance_domains: Vec::new(),
         }
     }
 
@@ -89,6 +104,14 @@ impl ExtensionRuleSet {
             || !self.blocked_url_paths.is_empty()
             || self.block_entire_internet
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ExtensionListScope {
+    pub rules: ExtensionRuleSet,
+    /// None: ordinary list; Some(true): budget left; Some(false): exhausted.
+    pub shared_permits: Option<bool>,
+    pub scheduled: bool,
 }
 
 // ─── Messages from Extension → Service ──────────────────────────────

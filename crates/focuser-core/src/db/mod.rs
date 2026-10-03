@@ -70,12 +70,37 @@ impl Database {
     }
 
     pub fn update_block_list(&self, list: &BlockList) -> Result<()> {
-        let conn = self
+        self.update_block_list_at(list, chrono::Local::now())
+    }
+
+    pub(crate) fn update_block_list_at<T: chrono::TimeZone>(
+        &self,
+        list: &BlockList,
+        now: chrono::DateTime<T>,
+    ) -> Result<()> {
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| FocuserError::Database(e.to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        let old_json: String = tx
+            .query_row(
+                "SELECT data FROM block_lists WHERE id = ?1",
+                [list.id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    FocuserError::BlockListNotFound(list.id.to_string())
+                }
+                _ => FocuserError::Database(e.to_string()),
+            })?;
+        let old: BlockList = serde_json::from_str(&old_json)?;
+        crate::shared_allowance::schedule_edited(&tx, &old, list, now)?;
         let json = serde_json::to_string(list)?;
-        let rows = conn
+        let rows = tx
             .execute(
                 "UPDATE block_lists SET name = ?1, data = ?2, enabled = ?3, updated_at = ?4
                  WHERE id = ?5",
@@ -91,6 +116,8 @@ impl Database {
         if rows == 0 {
             return Err(FocuserError::BlockListNotFound(list.id.to_string()));
         }
+        tx.commit()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -152,6 +179,54 @@ impl Database {
         Ok(lists)
     }
 
+    // ─── Unlock challenges ──────────────────────────────────
+
+    /// The outstanding random-text challenge for a block list, stored as
+    /// `fresh` if there is none yet. Asking twice returns the same text, so a
+    /// second request cannot swap it out from under the one on screen.
+    ///
+    /// A list can carry two locks, a manual one and a scheduled one, each with
+    /// its own length. A text left over from the other lock is replaced, so the
+    /// short one cannot stand in for the long one.
+    pub fn issue_unlock_challenge(&self, list_id: EntityId, fresh: &str) -> Result<String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        conn.query_row(
+            "INSERT INTO unlock_challenges (block_list_id, challenge) VALUES (?1, ?2)
+             ON CONFLICT(block_list_id) DO UPDATE SET challenge = CASE
+                 WHEN length(challenge) = length(excluded.challenge) THEN challenge
+                 ELSE excluded.challenge END
+             RETURNING challenge",
+            rusqlite::params![list_id.to_string(), fresh],
+            |row| row.get(0),
+        )
+        .map_err(|e| FocuserError::Database(e.to_string()))
+    }
+
+    /// Remove and return the outstanding challenge for a block list, if any.
+    ///
+    /// Single-use by construction: whether the caller's answer turns out
+    /// right or wrong, the challenge is gone afterwards, so a wrong attempt
+    /// cannot be retried against the same string and a right one cannot be
+    /// replayed.
+    pub fn take_unlock_challenge(&self, list_id: EntityId) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        match conn.query_row(
+            "DELETE FROM unlock_challenges WHERE block_list_id = ?1 RETURNING challenge",
+            rusqlite::params![list_id.to_string()],
+            |row| row.get(0),
+        ) {
+            Ok(challenge) => Ok(Some(challenge)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(FocuserError::Database(e.to_string())),
+        }
+    }
+
     // ─── Settings ───────────────────────────────────────────
 
     /// Get a setting value by key.
@@ -191,44 +266,6 @@ impl Database {
         Ok(self
             .get_setting(key)?
             .unwrap_or_else(|| default.to_string()))
-    }
-
-    /// Remove a setting entirely, rather than leaving an empty-string value —
-    /// callers that check `get_setting(key).is_some()` (e.g. "is this locked")
-    /// need absence to actually mean absence.
-    pub fn delete_setting(&self, key: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| FocuserError::Database(e.to_string()))?;
-        conn.execute(
-            "DELETE FROM settings WHERE key = ?1",
-            rusqlite::params![key],
-        )
-        .map_err(|e| FocuserError::Database(e.to_string()))?;
-        Ok(())
-    }
-
-    /// Whether any settings-table key starts with `prefix`.
-    ///
-    /// Used to ask "is anything locked" without a dedicated lock table —
-    /// wholesale operations like resetting or deleting all settings must
-    /// check this, or clearing the whole table would silently take the lock
-    /// with it.
-    pub fn any_setting_starts_with(&self, prefix: &str) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| FocuserError::Database(e.to_string()))?;
-        let pattern = format!("{}%", prefix.replace('%', "\\%").replace('_', "\\_"));
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM settings WHERE key LIKE ?1 ESCAPE '\\'",
-                rusqlite::params![pattern],
-                |row| row.get(0),
-            )
-            .map_err(|e| FocuserError::Database(e.to_string()))?;
-        Ok(count > 0)
     }
 
     // ─── Statistics ─────────────────────────────────────────
@@ -446,6 +483,9 @@ impl Database {
             "active_blocks",
             "block_lists",
             "settings",
+            "unlock_challenges",
+            "shared_allowance_usage",
+            "shared_allowance_occurrences",
         ] {
             let _ = conn.execute(&format!("DELETE FROM {table}"), []);
         }
@@ -475,6 +515,79 @@ impl Database {
 mod tests {
     use super::*;
     use focuser_common::types::BlockList;
+
+    #[test]
+    fn scheduled_protection_and_bypass_survive_reopening_database() {
+        use chrono::Datelike;
+        use focuser_common::types::{Schedule, ScheduledProtection, TimeSlot, new_id};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scheduled.db");
+        let mut list = BlockList::new("Scheduled");
+        list.schedule = Some(Schedule {
+            id: new_id(),
+            name: "Today".into(),
+            enabled: true,
+            time_slots: vec![TimeSlot::new(
+                chrono::Local::now().weekday(),
+                chrono::NaiveTime::MIN,
+                chrono::NaiveTime::MIN,
+            )],
+        });
+        list.scheduled_protection = Some(ScheduledProtection { lock: None });
+        {
+            let db = Database::open(&path).unwrap();
+            db.create_block_list(&list).unwrap();
+        }
+        {
+            let engine = crate::BlockEngine::new(Database::open(&path).unwrap()).unwrap();
+            assert!(engine.is_block_list_protected(list.id));
+            assert!(engine.has_service_protection());
+            assert_eq!(engine.active_protection_info().len(), 1);
+            list.schedule_unlocked_until = Some(list.effective_protection().unwrap().expires_at);
+            engine.db().update_block_list(&list).unwrap();
+        }
+        {
+            let engine = crate::BlockEngine::new(Database::open(&path).unwrap()).unwrap();
+            assert!(!engine.is_block_list_protected(list.id));
+            assert!(!engine.has_service_protection());
+            assert!(engine.active_protection_info().is_empty());
+        }
+    }
+
+    #[test]
+    fn existing_database_records_default_to_no_scheduled_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        let list = BlockList::new("Legacy");
+        {
+            let db = Database::open(&path).unwrap();
+            db.create_block_list(&list).unwrap();
+            let mut legacy = serde_json::to_value(&list).unwrap();
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("scheduled_protection");
+            legacy
+                .as_object_mut()
+                .unwrap()
+                .remove("schedule_unlocked_until");
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE block_lists SET data = ?1 WHERE id = ?2",
+                    rusqlite::params![legacy.to_string(), list.id.to_string()],
+                )
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let loaded = db.get_block_list(list.id).unwrap();
+        assert!(loaded.scheduled_protection.is_none());
+        assert!(loaded.schedule_unlocked_until.is_none());
+        assert!(!loaded.is_modification_protected());
+        db.update_block_list(&loaded).unwrap();
+        assert_eq!(db.get_block_list(list.id).unwrap().name, "Legacy");
+    }
 
     #[test]
     fn test_crud_block_list() {
@@ -521,5 +634,67 @@ mod tests {
 
         let total = db.get_total_blocked_today().unwrap();
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn unlock_challenge_is_single_use_and_per_list() {
+        let db = Database::open_in_memory().unwrap();
+        let a = focuser_common::types::new_id();
+        let b = focuser_common::types::new_id();
+
+        assert_eq!(db.take_unlock_challenge(a).unwrap(), None);
+
+        db.issue_unlock_challenge(a, "abc123").unwrap();
+        db.issue_unlock_challenge(b, "xyz789").unwrap();
+
+        // Taking it once returns the value...
+        assert_eq!(db.take_unlock_challenge(a).unwrap(), Some("abc123".into()));
+        // ...and a second take finds nothing, whether the first answer was
+        // right or wrong — this is what makes a challenge single-use.
+        assert_eq!(db.take_unlock_challenge(a).unwrap(), None);
+
+        // A separate list's challenge is unaffected.
+        assert_eq!(db.take_unlock_challenge(b).unwrap(), Some("xyz789".into()));
+    }
+
+    #[test]
+    fn asking_again_returns_the_challenge_already_out() {
+        // The screen asked twice (React runs effects twice in development)
+        // and showed the first answer while the second replaced it here.
+        let db = Database::open_in_memory().unwrap();
+        let id = focuser_common::types::new_id();
+
+        assert_eq!(db.issue_unlock_challenge(id, "first").unwrap(), "first");
+        assert_eq!(db.issue_unlock_challenge(id, "again").unwrap(), "first");
+        assert_eq!(db.take_unlock_challenge(id).unwrap(), Some("first".into()));
+
+        // Once answered, the next one is fresh.
+        assert_eq!(db.issue_unlock_challenge(id, "third").unwrap(), "third");
+
+        // Another length means the list's other lock is asking. The short text
+        // left over must not be the answer to the long one.
+        let longer = "a much longer text";
+        assert_eq!(db.issue_unlock_challenge(id, longer).unwrap(), longer);
+    }
+
+    #[test]
+    fn unlock_challenge_survives_a_fresh_connection_to_the_same_file() {
+        // `protect unlock` runs in its own process, so the challenge the app
+        // issued must live in the file, not in any in-process state.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focuser.db");
+        let id = focuser_common::types::new_id();
+
+        {
+            let db = Database::open(&path).unwrap();
+            db.issue_unlock_challenge(id, "persisted").unwrap();
+        }
+        {
+            let db = Database::open(&path).unwrap();
+            assert_eq!(
+                db.take_unlock_challenge(id).unwrap(),
+                Some("persisted".into())
+            );
+        }
     }
 }

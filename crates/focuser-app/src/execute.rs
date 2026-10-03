@@ -13,7 +13,7 @@ use focuser_core::{BlockEngine, pomodoro};
 
 use crate::command::{
     AllowanceNotificationDto, AllowanceUsageEntry, AppIcon, BlockingHealth, BrowserStatus, Command,
-    CommandResult, PomodoroEventDto, PomodoroHistoryEntry, ProtectionInfo, TypingLockInfo,
+    CommandResult, LockSetup, PomodoroEventDto, PomodoroHistoryEntry, ProtectionInfo,
 };
 use crate::context::{AppContext, PomodoroEvent};
 use crate::error::{CommandError, CommandOutcome};
@@ -47,6 +47,21 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         Command::UpdateBlockList { list } => {
             ensure_unprotected(&engine, list.id)?;
+
+            let mut list = *list;
+            // `protection` and `lock` can only be set by `EnableProtection`
+            // and cleared by `UnlockProtection` (or by expiry) — never by a
+            // wholesale replace. Without this, a caller could hand back the
+            // list it just fetched with `protection: null` and walk straight
+            // out of a commitment it made moments earlier.
+            let stored = engine.db().get_block_list(list.id)?;
+            list.protection = stored.protection;
+            list.lock = stored.lock;
+            list.scheduled_protection = stored.scheduled_protection;
+            list.schedule_unlocked_until = stored.schedule_unlocked_until;
+            list.shared_allowance = stored.shared_allowance;
+            list.reconcile_schedule_bypass();
+
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
             ctx.sync_hosts(&engine);
@@ -56,15 +71,22 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         Command::DeleteBlockList { id } => {
             ensure_unprotected(&engine, id)?;
             engine.db().delete_block_list(id)?;
+            // Best-effort: an orphaned challenge row (protection expired
+            // without ever being unlocked) would otherwise linger forever.
+            let _ = engine.db().take_unlock_challenge(id);
             engine.refresh()?;
             ctx.sync_hosts(&engine);
             Ok(CommandResult::Unit)
         }
 
         Command::ToggleBlockList { id, enabled } => {
-            // Protection guards *disabling* only — turning blocking back on is
-            // always allowed, since it cannot be used to escape a commitment.
-            if !enabled {
+            // Scheduled locks freeze both toggle directions. Preserve the
+            // existing manual-lock behavior that permits re-enabling.
+            if !enabled
+                || engine.block_lists().iter().any(|l| {
+                    l.id == id && l.scheduled_protection_at(chrono::Local::now()).is_some()
+                })
+            {
                 ensure_unprotected(&engine, id)?;
             }
 
@@ -184,9 +206,14 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         // ─── Exceptions ───────────────────────────────────────────
         Command::AddException { list_id, exception } => {
+            // An address with a path allows that page, anything else the
+            // site (#21). A blank value allows nothing, so it is refused.
+            let exception_type = exception.normalized().ok_or_else(|| {
+                CommandError::Validation("enter a domain or a page address".into())
+            })?;
             let created = ExceptionRule {
                 id: focuser_common::types::new_id(),
-                exception_type: exception,
+                exception_type,
                 enabled: true,
             };
             let out = created.clone();
@@ -225,6 +252,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                         enabled: true,
                     })
                 };
+                if list.scheduled_protection.is_some() || list.shared_allowance.is_some() {
+                    ensure_schedule_ends(list)?;
+                }
                 Ok(())
             })?;
             Ok(CommandResult::Unit)
@@ -282,6 +312,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             prevent_uninstall,
             prevent_service_stop,
             prevent_modification,
+            lock,
         } => {
             if duration_minutes == 0 {
                 return Err(CommandError::Validation(
@@ -289,8 +320,10 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 ));
             }
 
+            let lock = prepare_lock(lock)?;
+
             let mut list = engine.db().get_block_list(list_id)?;
-            if list.is_modification_protected() || list.is_locked() {
+            if list.is_modification_protected() {
                 // Re-arming would let a user extend or shorten a commitment they
                 // already made, which defeats the point of protection.
                 return Err(CommandError::Protected);
@@ -304,9 +337,14 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 started_at: now,
                 expires_at: now + chrono::Duration::minutes(i64::from(duration_minutes)),
             });
+            list.lock = lock;
             // Protecting a disabled list would protect nothing.
             list.enabled = true;
             list.updated_at = now;
+
+            // Any challenge left over from a previous window on this list is
+            // for a lock that no longer exists.
+            engine.db().take_unlock_challenge(list_id)?;
 
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
@@ -314,13 +352,79 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             Ok(CommandResult::Unit)
         }
 
+        Command::ConfigureScheduledProtection {
+            list_id,
+            enabled,
+            lock,
+        } => {
+            ensure_unprotected(&engine, list_id)?;
+            let lock = prepare_lock(lock)?;
+            let mut list = engine.db().get_block_list(list_id)?;
+            if enabled {
+                ensure_schedule_ends(&list)?;
+            }
+            list.scheduled_protection =
+                enabled.then_some(focuser_common::types::ScheduledProtection { lock });
+            list.updated_at = chrono::Utc::now();
+            engine.db().take_unlock_challenge(list_id)?;
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::ConfigureSharedAllowance { list_id, minutes } => {
+            ensure_unprotected(&engine, list_id)?;
+            let config =
+                minutes.map(|minutes| focuser_common::allowance::SharedAllowanceConfig { minutes });
+            if let Some(config) = &config {
+                config.validate().map_err(CommandError::Validation)?;
+            }
+            let mut list = engine.db().get_block_list(list_id)?;
+            if config.is_some() {
+                ensure_schedule_ends(&list)?;
+            }
+            list.shared_allowance = config;
+            list.updated_at = chrono::Utc::now();
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            Ok(CommandResult::Unit)
+        }
+        Command::GetSharedAllowanceStatus => {
+            let mut statuses = Vec::new();
+            for list in engine.block_lists() {
+                if let Some(status) = engine.db().shared_status_at(list, chrono::Local::now())? {
+                    statuses.push(status);
+                }
+            }
+            Ok(CommandResult::SharedAllowanceStatus(statuses))
+        }
+        Command::RelockScheduledProtection { list_id } => {
+            let mut list = engine.db().get_block_list(list_id)?;
+            list.schedule_unlocked_until = None;
+            list.updated_at = chrono::Utc::now();
+            engine.db().take_unlock_challenge(list_id)?;
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            Ok(CommandResult::Unit)
+        }
+        Command::GetScheduledProtectionStatus => Ok(CommandResult::ScheduledProtectionStatus(
+            engine
+                .block_lists()
+                .iter()
+                .map(|list| crate::command::ScheduledProtectionStatus {
+                    block_list_id: list.id,
+                    state: list.scheduled_lock_state(),
+                })
+                .collect(),
+        )),
+
         Command::GetProtectionStatus => {
             let infos = engine
                 .block_lists()
                 .iter()
                 .filter(|l| l.has_active_protection())
                 .filter_map(|l| {
-                    let p = l.protection.as_ref()?;
+                    let p = l.effective_protection()?;
                     Some(ProtectionInfo {
                         block_list_id: l.id,
                         block_list_name: l.name.clone(),
@@ -335,81 +439,76 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             Ok(CommandResult::ProtectionStatus(infos))
         }
 
-        // ─── Typing lock ────────────────────────────────────────────
-        Command::EnableTypingLock {
-            list_id,
-            phrase_length,
-        } => {
-            if !focuser_common::unlock_phrase::is_valid_length(phrase_length) {
-                return Err(CommandError::Validation(format!(
-                    "phrase length must be between {} and {} characters",
-                    focuser_common::unlock_phrase::MIN_PHRASE_LENGTH,
-                    focuser_common::unlock_phrase::MAX_PHRASE_LENGTH
-                )));
-            }
-
-            let mut list = engine.db().get_block_list(list_id)?;
-            if list.is_modification_protected() || list.is_locked() {
-                // Re-arming would let a user swap in a shorter phrase mid-commitment.
-                return Err(CommandError::Protected);
-            }
-
-            list.lock = Some(Lock::RandomText {
-                length: phrase_length,
-            });
-            // Locking a disabled list would lock nothing.
-            list.enabled = true;
-            list.updated_at = chrono::Utc::now();
-
-            engine.db().update_block_list(&list)?;
-            engine.refresh()?;
-            ctx.sync_hosts(&engine);
-            Ok(CommandResult::Unit)
-        }
-
-        Command::GetTypingLockStatus => {
-            let infos = engine
-                .block_lists()
-                .iter()
-                .filter_map(|l| match &l.lock {
-                    Some(Lock::RandomText { length }) => Some(TypingLockInfo {
-                        block_list_id: l.id,
-                        block_list_name: l.name.clone(),
-                        phrase_length: *length,
-                    }),
-                    _ => None,
-                })
-                .collect();
-            Ok(CommandResult::TypingLockStatus(infos))
-        }
-
-        Command::RequestUnlockPhrase { list_id } => {
+        Command::RequestUnlockChallenge { list_id } => {
+            // Goes straight to the database rather than through `mutate_list`:
+            // that helper's protection guard would refuse this exact call, since
+            // it only ever runs while the list *is* protected.
             let list = engine.db().get_block_list(list_id)?;
-            let Some(Lock::RandomText { length }) = list.lock else {
-                return Err(CommandError::Validation("list has no typing lock".into()));
+            if !list.has_active_protection() {
+                return Err(CommandError::Validation(
+                    "this block list has no active protection to unlock".into(),
+                ));
+            }
+            let fresh = match list.effective_lock() {
+                Some(Lock::RandomText { length }) => Lock::random_text_of_length(*length),
+                Some(Lock::Password { .. }) => {
+                    return Err(CommandError::Validation(
+                        "this list is locked with a password, not a typing challenge".into(),
+                    ));
+                }
+                None => return Err(CommandError::Protected),
             };
 
-            let phrase = focuser_common::unlock_phrase::generate(length);
-            ctx.set_unlock_phrase(list_id, phrase.clone());
-            Ok(CommandResult::Text(phrase))
+            let challenge = engine.db().issue_unlock_challenge(list_id, &fresh)?;
+            Ok(CommandResult::Text(challenge))
         }
 
-        Command::AttemptUnlock { list_id, typed } => {
+        Command::UnlockProtection { list_id, response } => {
             let mut list = engine.db().get_block_list(list_id)?;
-            if !list.is_locked() {
-                return Err(CommandError::Validation("list is not locked".into()));
+            if !list.has_active_protection() {
+                return Err(CommandError::Validation(
+                    "this block list has no active protection to unlock".into(),
+                ));
             }
 
-            if !ctx.take_and_check_unlock_phrase(list_id, &typed) {
-                return Ok(CommandResult::Flag(false));
+            // A password is checked exactly as typed, the way it was hashed.
+            let verified = match list.effective_lock() {
+                Some(lock @ Lock::Password { .. }) => lock.verify_password(&response),
+                Some(Lock::RandomText { length }) => {
+                    // Consumed unconditionally: right or wrong, this challenge
+                    // is spent, so a wrong guess cannot be retried against it
+                    // and a right one cannot be replayed. A text of another
+                    // length was issued for the list's other lock.
+                    engine
+                        .db()
+                        .take_unlock_challenge(list_id)?
+                        .is_some_and(|issued| {
+                            issued.len() == Lock::challenge_len(*length)
+                                && issued == response.trim()
+                        })
+                }
+                // No lock means no early unlock — the only way out is to wait.
+                None => return Err(CommandError::Protected),
+            };
+
+            if !verified {
+                return Err(CommandError::WrongUnlockResponse);
             }
 
-            list.lock = None;
+            // End the manual commitment, or bypass this scheduled occurrence.
+            // Neither action disables blocking. Independent overlapping manual
+            // and scheduled commitments must each be unlocked.
+            if list.protection.as_ref().is_some_and(|p| p.is_active()) {
+                list.protection = None;
+                list.lock = None;
+            } else if let Some(p) = list.scheduled_protection_at(chrono::Local::now()) {
+                list.schedule_unlocked_until = Some(p.expires_at);
+            }
             list.updated_at = chrono::Utc::now();
+
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
-            ctx.sync_hosts(&engine);
-            Ok(CommandResult::Flag(true))
+            Ok(CommandResult::Unit)
         }
 
         // ─── Settings ─────────────────────────────────────────────
@@ -427,72 +526,17 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                     "setting key must not be empty".into(),
                 ));
             }
-            if engine.db().get_setting(&setting_lock_key(&key))?.is_some() {
-                return Err(CommandError::Protected);
+            if loosens_enforcement(&engine, &key, &value)? {
+                ensure_nothing_protected(&engine)?;
             }
             engine.db().set_setting(&key, &value)?;
             Ok(CommandResult::Unit)
         }
 
         Command::ResetSettings => {
-            ensure_no_setting_locked(&engine)?;
+            ensure_nothing_protected(&engine)?;
             engine.db().clear_settings()?;
             Ok(CommandResult::Unit)
-        }
-
-        // ─── Settings lock ──────────────────────────────────────────
-        Command::EnableSettingLock { key, phrase_length } => {
-            if key.trim().is_empty() {
-                return Err(CommandError::Validation(
-                    "setting key must not be empty".into(),
-                ));
-            }
-            if !focuser_common::unlock_phrase::is_valid_length(phrase_length) {
-                return Err(CommandError::Validation(format!(
-                    "phrase length must be between {} and {} characters",
-                    focuser_common::unlock_phrase::MIN_PHRASE_LENGTH,
-                    focuser_common::unlock_phrase::MAX_PHRASE_LENGTH
-                )));
-            }
-
-            let lock_key = setting_lock_key(&key);
-            if engine.db().get_setting(&lock_key)?.is_some() {
-                // Re-arming would let a user swap in a shorter phrase mid-commitment.
-                return Err(CommandError::Protected);
-            }
-            engine
-                .db()
-                .set_setting(&lock_key, &phrase_length.to_string())?;
-            Ok(CommandResult::Unit)
-        }
-
-        Command::RequestSettingUnlockPhrase { key } => {
-            let lock_key = setting_lock_key(&key);
-            let Some(length) = engine
-                .db()
-                .get_setting(&lock_key)?
-                .and_then(|v| v.parse::<u32>().ok())
-            else {
-                return Err(CommandError::Validation("setting has no lock".into()));
-            };
-
-            let phrase = focuser_common::unlock_phrase::generate(length);
-            ctx.set_setting_unlock_phrase(key, phrase.clone());
-            Ok(CommandResult::Text(phrase))
-        }
-
-        Command::AttemptSettingUnlock { key, typed } => {
-            let lock_key = setting_lock_key(&key);
-            if engine.db().get_setting(&lock_key)?.is_none() {
-                return Err(CommandError::Validation("setting is not locked".into()));
-            }
-
-            if !ctx.take_and_check_setting_unlock_phrase(&key, &typed) {
-                return Ok(CommandResult::Flag(false));
-            }
-
-            engine.db().delete_setting(&lock_key)?;
-            Ok(CommandResult::Flag(true))
         }
 
         // ─── Enforcement ──────────────────────────────────────────
@@ -518,6 +562,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         }
 
         Command::RemoveBlocks => {
+            // "Unblock everything" is not on offer while a list is locked.
+            ensure_nothing_protected(&engine)?;
             // An empty domain set is how "unblock everything" is expressed —
             // the sync writes the list, so an empty list clears the section.
             ctx.sync_hosts_with(&[]);
@@ -541,6 +587,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 .validate()
                 .map_err(|e| CommandError::Validation(e.to_string()))?;
 
+            // No lock check: a session can only tighten a locked list. Its breaks
+            // and its end leave such a list on (#14).
             let session = pomodoro::start_session(&mut engine, block_list_id, config)?;
             // A work phase suspends allowances and can change what is blocked.
             ctx.sync_hosts(&engine);
@@ -595,7 +643,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         // ─── Allowances ───────────────────────────────────────────
         Command::AllowanceList => Ok(CommandResult::Allowances(
-            engine.db().list_allowance_statuses()?,
+            engine.db().allowance_statuses_with_shared()?,
         )),
 
         Command::AllowanceCreate {
@@ -603,6 +651,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             daily_limit_secs,
             strict_mode,
         } => {
+            // An allowance with time left exempts its target from every list,
+            // so adding, changing or resetting one could open a locked list.
+            ensure_nothing_protected(&engine)?;
             let allowance = Allowance::new(target, daily_limit_secs, strict_mode);
             allowance.validate().map_err(CommandError::Validation)?;
 
@@ -619,6 +670,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             strict_mode,
             enabled,
         } => {
+            ensure_nothing_protected(&engine)?;
             let mut allowance = engine
                 .db()
                 .get_allowance(id)?
@@ -635,12 +687,15 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         }
 
         Command::AllowanceDelete { id } => {
+            // Allowed under a lock: on a locked list this only takes an
+            // exemption away.
             engine.db().delete_allowance(id)?;
             ctx.allowance_tracker.rebuild_from_db(engine.db())?;
             Ok(CommandResult::Unit)
         }
 
         Command::AllowanceResetToday { id } => {
+            ensure_nothing_protected(&engine)?;
             engine.db().reset_allowance_usage_today(id)?;
             // Rebuild clears the exhausted flag, so the target unblocks at once.
             ctx.allowance_tracker.rebuild_from_db(engine.db())?;
@@ -699,6 +754,11 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
             ensure_nothing_protected(&engine)?;
 
+            for list in &document.block_lists {
+                if let Some(config) = &list.shared_allowance {
+                    config.validate().map_err(CommandError::Validation)?;
+                }
+            }
             for id in engine
                 .block_lists()
                 .iter()
@@ -706,9 +766,15 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 .collect::<Vec<_>>()
             {
                 engine.db().delete_block_list(id)?;
+                // Same reasoning as `DeleteBlockList`: an orphaned challenge
+                // row for a list that no longer exists would otherwise
+                // linger forever.
+                let _ = engine.db().take_unlock_challenge(id);
             }
             for list in &document.block_lists {
-                engine.db().create_block_list(list)?;
+                let mut list = list.clone();
+                list.schedule_unlocked_until = None;
+                engine.db().create_block_list(&list)?;
             }
 
             engine.refresh()?;
@@ -718,7 +784,6 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         Command::DeleteAllData => {
             ensure_nothing_protected(&engine)?;
-            ensure_no_setting_locked(&engine)?;
             engine.db().delete_all_data()?;
             engine.refresh()?;
             // Nothing is blocked any more, so clear the hosts file outright.
@@ -730,7 +795,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             // A domain with allowance time left is reachable even though it
             // appears in a block list, so check that before the rules.
             let exemptions = ctx.allowance_exempt_domains(&engine);
-            let allowed = focuser_common::host::any_host_matches(&exemptions, &domain);
+            let allowed = focuser_common::host::any_host_matches(&exemptions, &domain)
+                && !engine.scheduled_block_on_domain(&domain);
 
             Ok(CommandResult::Flag(
                 !allowed && engine.check_domain(&domain).is_some(),
@@ -797,35 +863,55 @@ struct ConfigDocument {
     block_lists: Vec<BlockList>,
 }
 
-/// Wholesale operations are refused while any list is locked — otherwise a
-/// commitment could be escaped by importing over it or wiping everything.
+/// A scheduled lock and a shared allowance both last for one scheduled block,
+/// so the list needs hours, and hours that stop. A list that is on all week,
+/// with no hours set or with every hour set, has no block to tie them to: the
+/// lock would never open and the allowance would never refill.
+fn ensure_schedule_ends(list: &BlockList) -> CommandOutcome<()> {
+    let on_all_week = list
+        .schedule
+        .as_ref()
+        .is_none_or(|s| s.time_slots.is_empty() || s.never_ends());
+    if on_all_week {
+        return Err(CommandError::Validation(
+            "this list is on all week, so a lock or a shared allowance that follows its \
+             hours would never end; set hours with a gap on the Schedule page first"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Wholesale operations cannot replace or disable a protected list.
 fn ensure_nothing_protected(engine: &BlockEngine) -> CommandOutcome<()> {
     for list in engine.block_lists() {
-        if engine.is_block_list_protected(list.id) || engine.is_block_list_locked(list.id) {
+        if engine.is_block_list_protected(list.id) {
             return Err(CommandError::Protected);
         }
     }
     Ok(())
 }
 
-/// The settings-table key that holds a settings lock on `key`, if any. Its
-/// value is the locked phrase length; absence means unlocked. Shares the
-/// settings table rather than a dedicated one — this is exactly the kind of
-/// small, string-keyed state that table already exists for, and a dedicated
-/// table would need its own migration for no real benefit.
-fn setting_lock_key(key: &str) -> String {
-    format!("lock:{key}")
-}
+/// How the blocking loop treats browsers that have no extension connected.
+pub const SETTING_CLOSE_BROWSERS: &str = "block_unsupported_browsers";
+pub const SETTING_GRACE_PERIOD: &str = "extension_grace_period";
+pub const DEFAULT_GRACE_PERIOD_SECS: u64 = 60;
 
-/// Refuse a wholesale settings wipe while any setting is locked — otherwise
-/// resetting or deleting everything would take the lock with it, same as
-/// `ensure_nothing_protected` does for block lists.
-fn ensure_no_setting_locked(engine: &BlockEngine) -> CommandOutcome<()> {
-    if engine.db().any_setting_starts_with("lock:")? {
-        Err(CommandError::Protected)
-    } else {
-        Ok(())
-    }
+/// Turning browser closing off, or giving browsers longer, is refused during a
+/// lock (#18). Tightening either one is always fine.
+fn loosens_enforcement(engine: &BlockEngine, key: &str, value: &str) -> CommandOutcome<bool> {
+    Ok(match key {
+        SETTING_CLOSE_BROWSERS => value != "true",
+        SETTING_GRACE_PERIOD => {
+            let current = engine
+                .db()
+                .get_setting(key)?
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_GRACE_PERIOD_SECS);
+            value.parse::<u64>().map_or(true, |next| next > current)
+        }
+        _ => false,
+    })
 }
 
 /// Statistics retention setting key and bounds.
@@ -845,6 +931,30 @@ fn validate_range(from: chrono::NaiveDate, to: chrono::NaiveDate) -> CommandOutc
     }
 }
 
+fn prepare_lock(lock: Option<LockSetup>) -> CommandOutcome<Option<Lock>> {
+    Ok(match lock {
+        None => None,
+        Some(LockSetup::Password { password }) => {
+            if password.trim().is_empty() {
+                return Err(CommandError::Validation(
+                    "password must not be empty".into(),
+                ));
+            }
+            Some(Lock::password(&password)?)
+        }
+        Some(LockSetup::RandomText { length }) => {
+            if !(Lock::MIN_RANDOM_TEXT_LEN..=Lock::MAX_RANDOM_TEXT_LEN).contains(&length) {
+                return Err(CommandError::Validation(format!(
+                    "random-text length must be between {} and {}",
+                    Lock::MIN_RANDOM_TEXT_LEN,
+                    Lock::MAX_RANDOM_TEXT_LEN
+                )));
+            }
+            Some(Lock::RandomText { length })
+        }
+    })
+}
+
 /// Load a list, check protection, apply `edit`, persist, refresh, re-sync hosts.
 ///
 /// Every rule command follows this shape; centralising it means the protection
@@ -859,6 +969,7 @@ fn mutate_list(
 
     let mut list = engine.db().get_block_list(list_id)?;
     edit(&mut list)?;
+    list.reconcile_schedule_bypass();
     list.updated_at = chrono::Utc::now();
 
     engine.db().update_block_list(&list)?;
@@ -883,6 +994,7 @@ fn mutate_list_for_addition(
 ) -> CommandOutcome<()> {
     let mut list = engine.db().get_block_list(list_id)?;
     edit(&mut list)?;
+    list.reconcile_schedule_bypass();
     list.updated_at = chrono::Utc::now();
 
     engine.db().update_block_list(&list)?;
@@ -923,7 +1035,7 @@ fn clear_across_lists(
     let mut cleared = 0u32;
 
     for mut list in engine.db().list_block_lists()? {
-        if list.is_modification_protected() || list.is_locked() {
+        if list.is_modification_protected() {
             continue;
         }
         let n = clear(&mut list);
@@ -974,15 +1086,14 @@ fn normalize(match_type: &mut WebsiteMatchType) {
     match_type.simplify();
 }
 
-/// Reject mutations to a block list whose protection window is still open,
-/// or that is held by a typing lock.
+/// Reject mutations to a block list whose protection window is still open.
 ///
 /// Centralised here on purpose. This check was previously duplicated inline in
 /// four `service.rs` arms plus a separate `check_protected` in `commands.rs`,
 /// and the CLI's `list disable` path skipped it entirely — so a protected list
 /// could be disabled from the command line.
 fn ensure_unprotected(engine: &BlockEngine, id: EntityId) -> CommandOutcome<()> {
-    if engine.is_block_list_protected(id) || engine.is_block_list_locked(id) {
+    if engine.is_block_list_protected(id) {
         Err(CommandError::Protected)
     } else {
         Ok(())
@@ -1394,6 +1505,36 @@ mod tests {
     }
 
     #[test]
+    fn an_exception_is_stored_as_a_site_or_as_a_page() {
+        let ctx = ctx();
+        let list = create(&ctx, "Sites");
+        let add = |typed: &str| {
+            let added = execute(
+                &ctx,
+                Command::AddException {
+                    list_id: list.id,
+                    exception: ExceptionType::Domain(typed.into()),
+                },
+            );
+            match added {
+                Ok(CommandResult::Exception(exc)) => Some(exc.exception_type),
+                _ => None,
+            }
+        };
+
+        // #21: a pasted address lost its path and allowed the whole site.
+        assert!(matches!(
+            add("https://www.youtube.com/@YouTube"),
+            Some(ExceptionType::UrlPath(page)) if page == "youtube.com/@YouTube"
+        ));
+        assert!(matches!(
+            add("https://WWW.Reddit.com/"),
+            Some(ExceptionType::Domain(host)) if host == "reddit.com"
+        ));
+        assert!(add("   ").is_none(), "nothing to allow");
+    }
+
+    #[test]
     fn clear_all_websites_counts_across_lists_and_leaves_apps_alone() {
         let ctx = ctx();
         for name in ["A", "B"] {
@@ -1549,110 +1690,15 @@ mod tests {
         );
     }
 
-    fn setting_lock_phrase(ctx: &AppContext, key: &str) -> String {
-        let CommandResult::Text(phrase) =
-            execute(ctx, Command::RequestSettingUnlockPhrase { key: key.into() }).unwrap()
-        else {
-            panic!("expected the generated phrase back");
-        };
-        phrase
-    }
-
-    #[test]
-    fn a_locked_setting_cannot_be_changed_until_typed_back() {
-        let ctx = ctx();
-        execute(
-            &ctx,
-            Command::SetSetting {
-                key: "autostart".into(),
-                value: "1".into(),
-            },
-        )
-        .unwrap();
-
-        execute(
-            &ctx,
-            Command::EnableSettingLock {
-                key: "autostart".into(),
-                phrase_length: 24,
-            },
-        )
-        .unwrap();
-
-        // Locked: cannot be changed at all, correct value or not.
-        assert_eq!(
-            execute(
-                &ctx,
-                Command::SetSetting {
-                    key: "autostart".into(),
-                    value: "0".into(),
-                },
-            )
-            .unwrap_err()
-            .code(),
-            "protected"
-        );
-
-        // Cannot be re-armed either, same as a block list's typing lock.
-        assert_eq!(
-            execute(
-                &ctx,
-                Command::EnableSettingLock {
-                    key: "autostart".into(),
-                    phrase_length: 24,
-                },
-            )
-            .unwrap_err()
-            .code(),
-            "protected"
-        );
-
-        let phrase = setting_lock_phrase(&ctx, "autostart");
-        let unlocked = execute(
-            &ctx,
-            Command::AttemptSettingUnlock {
-                key: "autostart".into(),
-                typed: phrase,
-            },
-        )
-        .unwrap();
-        assert!(matches!(unlocked, CommandResult::Flag(true)));
-
-        // Unlocked: the setting can be changed again.
-        execute(
-            &ctx,
-            Command::SetSetting {
-                key: "autostart".into(),
-                value: "0".into(),
-            },
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn resetting_or_deleting_everything_is_refused_while_a_setting_is_locked() {
-        let ctx = ctx();
-        execute(
-            &ctx,
-            Command::EnableSettingLock {
-                key: "autostart".into(),
-                phrase_length: 24,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            execute(&ctx, Command::ResetSettings).unwrap_err().code(),
-            "protected",
-            "reset must not be able to quietly drop the lock along with everything else"
-        );
-        assert_eq!(
-            execute(&ctx, Command::DeleteAllData).unwrap_err().code(),
-            "protected"
-        );
-    }
-
     fn protect(ctx: &AppContext, id: EntityId) -> CommandOutcome<CommandResult> {
+        protect_with_lock(ctx, id, None)
+    }
+
+    fn protect_with_lock(
+        ctx: &AppContext,
+        id: EntityId,
+        lock: Option<LockSetup>,
+    ) -> CommandOutcome<CommandResult> {
         execute(
             ctx,
             Command::EnableProtection {
@@ -1661,6 +1707,7 @@ mod tests {
                 prevent_uninstall: true,
                 prevent_service_stop: true,
                 prevent_modification: true,
+                lock,
             },
         )
     }
@@ -1753,85 +1800,52 @@ mod tests {
         assert!(infos[0].remaining_seconds > 0);
     }
 
-    fn typing_lock(
-        ctx: &AppContext,
-        id: EntityId,
-        phrase_length: u32,
-    ) -> CommandOutcome<CommandResult> {
+    fn scheduled_list(ctx: &AppContext, lock: Option<LockSetup>) -> BlockList {
+        use chrono::Datelike;
+        let mut list = create(ctx, "Scheduled");
+        list.schedule = Some(Schedule {
+            id: focuser_common::types::new_id(),
+            name: "Today".into(),
+            enabled: true,
+            time_slots: vec![TimeSlot::new(
+                chrono::Local::now().weekday(),
+                chrono::NaiveTime::MIN,
+                chrono::NaiveTime::MIN,
+            )],
+        });
         execute(
             ctx,
-            Command::EnableTypingLock {
-                list_id: id,
-                phrase_length,
+            Command::UpdateBlockList {
+                list: Box::new(list.clone()),
             },
         )
-    }
-
-    fn requested_phrase(ctx: &AppContext, id: EntityId) -> String {
-        let CommandResult::Text(phrase) =
-            execute(ctx, Command::RequestUnlockPhrase { list_id: id }).unwrap()
-        else {
-            panic!("expected the generated phrase back");
-        };
-        phrase
-    }
-
-    #[test]
-    fn typing_lock_blocks_disabling_and_removal_but_not_adding_or_enabling() {
-        let ctx = ctx();
-        let list = create(&ctx, "Committed");
-        typing_lock(&ctx, list.id, 32).unwrap();
-
-        let err = execute(
-            &ctx,
-            Command::ToggleBlockList {
-                id: list.id,
-                enabled: false,
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err.code(), "protected");
-
-        assert_eq!(
-            execute(&ctx, Command::DeleteBlockList { id: list.id })
-                .unwrap_err()
-                .code(),
-            "protected"
-        );
-
-        // Adding a new rule only makes blocking stricter, so it stays allowed
-        // even while the list is typing-locked.
-        let CommandResult::WebsiteRule(added) = execute(
-            &ctx,
-            Command::AddWebsiteRule {
-                list_id: list.id,
-                rule: WebsiteMatchType::Domain("x.com".into()),
-            },
-        )
-        .unwrap() else {
-            panic!("expected a website rule back");
-        };
-
-        // Removing one would loosen coverage, so that stays blocked.
-        assert_eq!(
-            execute(
-                &ctx,
-                Command::RemoveWebsiteRule {
-                    list_id: list.id,
-                    rule_id: added.id,
-                },
-            )
-            .unwrap_err()
-            .code(),
-            "protected"
-        );
-
-        // Re-enabling is harmless and must stay allowed.
+        .unwrap();
         execute(
-            &ctx,
-            Command::ToggleBlockList {
-                id: list.id,
+            ctx,
+            Command::ConfigureScheduledProtection {
+                list_id: list.id,
                 enabled: true,
+                lock,
+            },
+        )
+        .unwrap();
+        list
+    }
+
+    /// Hours on a day that is not today: enough for a lock or a shared allowance
+    /// to be set up, without the list being in its hours while the test runs.
+    fn hours_later_this_week(ctx: &AppContext, list_id: EntityId) {
+        use chrono::Datelike;
+        execute(
+            ctx,
+            Command::UpdateSchedule {
+                list_id,
+                slots: vec![TimeSlot::new(
+                    chrono::Local::now().weekday().succ().succ(),
+                    chrono::NaiveTime::MIN,
+                    chrono::NaiveTime::MIN,
+                )],
+                always_active: false,
             },
         )
         .unwrap();
@@ -1841,7 +1855,7 @@ mod tests {
     fn a_locked_list_accepts_new_app_rules_and_bulk_imports_but_refuses_removal() {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
-        typing_lock(&ctx, list.id, 32).unwrap();
+        protect(&ctx, list.id).unwrap();
 
         let CommandResult::AppRule(added) = execute(
             &ctx,
@@ -1888,7 +1902,7 @@ mod tests {
         // gated the same as removal.
         let ctx = ctx();
         let list = create(&ctx, "Committed");
-        typing_lock(&ctx, list.id, 32).unwrap();
+        protect(&ctx, list.id).unwrap();
 
         assert_eq!(
             execute(
@@ -1905,86 +1919,1232 @@ mod tests {
     }
 
     #[test]
-    fn typing_lock_cannot_be_re_armed_while_active() {
+    fn shared_allowance_configuration_is_guarded_but_consumption_never_unlocks() {
+        let ctx = ctx();
+        let list = scheduled_list(
+            &ctx,
+            Some(LockSetup::Password {
+                password: "secret".into(),
+            }),
+        );
+        for minutes in [Some(30), Some(15), None] {
+            assert!(
+                execute(
+                    &ctx,
+                    Command::ConfigureSharedAllowance {
+                        list_id: list.id,
+                        minutes
+                    }
+                )
+                .is_err()
+            );
+        }
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "secret".into(),
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::ConfigureSharedAllowance {
+                list_id: list.id,
+                minutes: Some(1),
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("youtube.com".into()),
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::RelockScheduledProtection { list_id: list.id },
+        )
+        .unwrap();
+        {
+            let engine = ctx.engine.lock().unwrap();
+            let tick = focuser_common::allowance::AllowanceTick {
+                hostname: Some("youtube.com".into()),
+                url: Some("https://youtube.com/".into()),
+                app_exe: None,
+                active: true,
+                shared_active: true,
+                shared_only: true,
+                source: "test".into(),
+                increment_secs: Some(20),
+            };
+            engine
+                .db()
+                .ingest_shared_at(&tick, chrono::Local::now())
+                .unwrap();
+            assert!(engine.is_block_list_protected(list.id));
+            assert!(
+                engine
+                    .db()
+                    .get_block_list(list.id)
+                    .unwrap()
+                    .schedule_unlocked_until
+                    .is_none()
+            );
+            assert_eq!(
+                engine
+                    .db()
+                    .shared_status_at(
+                        &engine.db().get_block_list(list.id).unwrap(),
+                        chrono::Local::now()
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .remaining_secs,
+                40
+            );
+        }
+        assert!(
+            execute(
+                &ctx,
+                Command::ConfigureSharedAllowance {
+                    list_id: list.id,
+                    minutes: None
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shared_allowance_import_discards_runtime_fields_and_editing_bypass() {
+        let ctx = ctx();
+        let list = scheduled_list(
+            &ctx,
+            Some(LockSetup::Password {
+                password: "secret".into(),
+            }),
+        );
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "secret".into(),
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::ConfigureSharedAllowance {
+                list_id: list.id,
+                minutes: Some(30),
+            },
+        )
+        .unwrap();
+        let CommandResult::Text(json) = execute(&ctx, Command::ExportConfiguration).unwrap() else {
+            panic!("export")
+        };
+        let mut doc: serde_json::Value = serde_json::from_str(&json).unwrap();
+        doc["block_lists"][0]["shared_allowance"]["used_secs"] = serde_json::json!(1800);
+        doc["block_lists"][0]["schedule_unlocked_until"] =
+            serde_json::json!("2099-01-01T00:00:00Z");
+        execute(
+            &ctx,
+            Command::ImportConfiguration {
+                json: doc.to_string(),
+            },
+        )
+        .unwrap();
+        let engine = ctx.engine.lock().unwrap();
+        let stored = engine.db().get_block_list(list.id).unwrap();
+        assert!(stored.schedule_unlocked_until.is_none());
+        assert!(stored.is_modification_protected());
+        assert_eq!(
+            engine
+                .db()
+                .shared_status_at(&stored, chrono::Local::now())
+                .unwrap()
+                .unwrap()
+                .remaining_secs,
+            1800
+        );
+    }
+
+    #[test]
+    fn shared_allowance_update_cannot_import_runtime_or_bypass_validation() {
+        let ctx = ctx();
+        let mut list = create(&ctx, "Shared");
+        assert!(
+            execute(
+                &ctx,
+                Command::ConfigureSharedAllowance {
+                    list_id: list.id,
+                    minutes: Some(0)
+                }
+            )
+            .is_err()
+        );
+        list.shared_allowance =
+            Some(focuser_common::allowance::SharedAllowanceConfig { minutes: 100 });
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(list.clone()),
+            },
+        )
+        .unwrap();
+        hours_later_this_week(&ctx, list.id);
+        assert!(
+            ctx.engine
+                .lock()
+                .unwrap()
+                .db()
+                .get_block_list(list.id)
+                .unwrap()
+                .shared_allowance
+                .is_none()
+        );
+        execute(
+            &ctx,
+            Command::ConfigureSharedAllowance {
+                list_id: list.id,
+                minutes: Some(30),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ctx.engine
+                .lock()
+                .unwrap()
+                .db()
+                .get_block_list(list.id)
+                .unwrap()
+                .shared_allowance
+                .unwrap()
+                .minutes,
+            30
+        );
+    }
+
+    #[test]
+    fn scheduled_unlock_allows_repeated_edits_and_toggle_and_restart() {
+        let ctx = ctx();
+        let list = scheduled_list(&ctx, Some(LockSetup::RandomText { length: 16 }));
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::ToggleBlockList {
+                    id: list.id,
+                    enabled: false
+                }
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+        let CommandResult::Text(challenge) =
+            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+        else {
+            panic!()
+        };
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: challenge,
+            },
+        )
+        .unwrap();
+        for enabled in [false, true, false, true] {
+            execute(
+                &ctx,
+                Command::ToggleBlockList {
+                    id: list.id,
+                    enabled,
+                },
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            let CommandResult::WebsiteRule(site) = execute(
+                &ctx,
+                Command::AddWebsiteRule {
+                    list_id: list.id,
+                    rule: WebsiteMatchType::Domain("example.com".into()),
+                },
+            )
+            .unwrap() else {
+                panic!("website rule expected")
+            };
+            execute(
+                &ctx,
+                Command::RemoveWebsiteRule {
+                    list_id: list.id,
+                    rule_id: site.id,
+                },
+            )
+            .unwrap();
+            let CommandResult::AppRule(app) = execute(
+                &ctx,
+                Command::AddAppRule {
+                    list_id: list.id,
+                    rule: AppMatchType::ExecutableName("example-app".into()),
+                },
+            )
+            .unwrap() else {
+                panic!("app rule expected")
+            };
+            execute(
+                &ctx,
+                Command::RemoveAppRule {
+                    list_id: list.id,
+                    rule_id: app.id,
+                },
+            )
+            .unwrap();
+            execute(
+                &ctx,
+                Command::UpdateSchedule {
+                    list_id: list.id,
+                    slots: list.schedule.as_ref().unwrap().time_slots.clone(),
+                    always_active: false,
+                },
+            )
+            .unwrap();
+        }
+        for name in ["First edit", "Second edit"] {
+            let mut updated = ctx
+                .engine
+                .lock()
+                .unwrap()
+                .db()
+                .get_block_list(list.id)
+                .unwrap();
+            updated.name = name.into();
+            // A caller cannot overwrite the trusted bypass, even by accident.
+            updated.schedule_unlocked_until = None;
+            execute(
+                &ctx,
+                Command::UpdateBlockList {
+                    list: Box::new(updated),
+                },
+            )
+            .unwrap();
+        }
+        let restored = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        assert!(!restored.is_modification_protected());
+        assert!(restored.schedule_unlocked_until.is_some());
+        let db = Database::open_in_memory().unwrap();
+        db.create_block_list(&restored).unwrap();
+        let restarted = AppContext::new_headless(BlockEngine::new(db).unwrap());
+        execute(
+            &restarted,
+            Command::ToggleBlockList {
+                id: list.id,
+                enabled: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn unprotected_schedules_remain_editable_and_disabled_lists_rearm() {
+        let ctx = ctx();
+        let list = scheduled_list(&ctx, None);
+        // Simulate an inactive period without waiting for the wall clock.
+        {
+            let mut engine = ctx.engine.lock().unwrap();
+            let mut stored = engine.db().get_block_list(list.id).unwrap();
+            stored.schedule.as_mut().unwrap().enabled = false;
+            engine.db().update_block_list(&stored).unwrap();
+            engine.refresh().unwrap();
+        }
+        execute(
+            &ctx,
+            Command::ConfigureScheduledProtection {
+                list_id: list.id,
+                enabled: false,
+                lock: None,
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::UpdateSchedule {
+                list_id: list.id,
+                slots: list.schedule.unwrap().time_slots,
+                always_active: false,
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("example.com".into()),
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::ToggleBlockList {
+                id: list.id,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        execute(
+            &ctx,
+            Command::ConfigureScheduledProtection {
+                list_id: list.id,
+                enabled: true,
+                lock: None,
+            },
+        )
+        .unwrap();
+        assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+        execute(
+            &ctx,
+            Command::ToggleBlockList {
+                id: list.id,
+                enabled: true,
+            },
+        )
+        .unwrap();
+        assert!(ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+    }
+
+    #[test]
+    fn scheduled_configuration_uses_existing_challenge_length_limits() {
+        let ctx = ctx();
+        let list = create(&ctx, "Limits");
+        hours_later_this_week(&ctx, list.id);
+        for length in [Lock::MIN_RANDOM_TEXT_LEN - 1, Lock::MAX_RANDOM_TEXT_LEN + 1] {
+            assert!(
+                execute(
+                    &ctx,
+                    Command::ConfigureScheduledProtection {
+                        list_id: list.id,
+                        enabled: true,
+                        lock: Some(LockSetup::RandomText { length }),
+                    }
+                )
+                .is_err()
+            );
+        }
+        for length in [Lock::MIN_RANDOM_TEXT_LEN, Lock::MAX_RANDOM_TEXT_LEN] {
+            execute(
+                &ctx,
+                Command::ConfigureScheduledProtection {
+                    list_id: list.id,
+                    enabled: true,
+                    lock: Some(LockSetup::RandomText { length }),
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn hours_with_no_gap_cannot_carry_a_lock_or_a_shared_allowance() {
+        use chrono::{Datelike, NaiveTime, Weekday::*};
+        let ctx = ctx();
+        let list = create(&ctx, "Always");
+        let hours = |days: &[chrono::Weekday]| Command::UpdateSchedule {
+            list_id: list.id,
+            slots: days
+                .iter()
+                .map(|day| TimeSlot::new(*day, NaiveTime::MIN, NaiveTime::MIN))
+                .collect(),
+            always_active: false,
+        };
+        let lock = || Command::ConfigureScheduledProtection {
+            list_id: list.id,
+            enabled: true,
+            lock: None,
+        };
+        let share = || Command::ConfigureSharedAllowance {
+            list_id: list.id,
+            minutes: Some(30),
+        };
+        let every_day = [Mon, Tue, Wed, Thu, Fri, Sat, Sun];
+        let refused = |cmd| assert_eq!(execute(&ctx, cmd).unwrap_err().code(), "validation");
+
+        // No hours set is "on all week" as much as every hour set is. With no
+        // way to unlock, a lock on either would refuse quitting, uninstalling
+        // and editing for good.
+        refused(lock());
+        refused(share());
+        execute(&ctx, hours(&every_day)).unwrap();
+        refused(lock());
+        refused(share());
+
+        // A day that is not today, so turning the lock on does not lock the test out.
+        let later = chrono::Local::now().weekday().succ().succ();
+        execute(&ctx, hours(&[later])).unwrap();
+        execute(&ctx, lock()).unwrap();
+        execute(&ctx, share()).unwrap();
+        // And a list that has them cannot be put back on all week.
+        refused(hours(&every_day));
+        refused(Command::UpdateSchedule {
+            list_id: list.id,
+            slots: vec![],
+            always_active: true,
+        });
+        assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+    }
+
+    #[test]
+    fn manual_and_scheduled_commitments_unlock_independently() {
+        let ctx = ctx();
+        let list = scheduled_list(
+            &ctx,
+            Some(LockSetup::Password {
+                password: "scheduled".into(),
+            }),
+        );
+        // A manual lock can predate the schedule becoming active.
+        {
+            let mut engine = ctx.engine.lock().unwrap();
+            let mut stored = engine.db().get_block_list(list.id).unwrap();
+            stored.protection = Some(Protection::for_duration(60));
+            stored.lock = Some(Lock::password("manual").unwrap());
+            engine.db().update_block_list(&stored).unwrap();
+            engine.refresh().unwrap();
+        }
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "manual".into(),
+            },
+        )
+        .unwrap();
+        assert!(ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "scheduled".into(),
+            },
+        )
+        .unwrap();
+        assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+    }
+
+    #[test]
+    fn a_challenge_issued_for_one_lock_does_not_open_the_other() {
+        let ctx = ctx();
+        let list = scheduled_list(&ctx, Some(LockSetup::RandomText { length: 64 }));
+        let challenge = || {
+            let CommandResult::Text(text) =
+                execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+            else {
+                panic!("challenge expected")
+            };
+            text
+        };
+        // A manual lock with a short text on top of the scheduled one. Its text
+        // is asked for and never typed, and then the manual lock runs out.
+        let leave_a_short_text_behind = || {
+            let manual = |expires_in| {
+                let mut engine = ctx.engine.lock().unwrap();
+                let mut stored = engine.db().get_block_list(list.id).unwrap();
+                let mut protection = Protection::for_duration(60);
+                protection.expires_at = chrono::Utc::now() + chrono::Duration::minutes(expires_in);
+                stored.protection = Some(protection);
+                stored.lock = Some(Lock::RandomText { length: 6 });
+                engine.db().update_block_list(&stored).unwrap();
+                engine.refresh().unwrap();
+            };
+            manual(60);
+            let short = challenge();
+            assert_eq!(short.len(), 6);
+            manual(-1);
+            short
+        };
+        let unlock = |response: String| {
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response,
+                },
+            )
+        };
+        let locked = || ctx.engine.lock().unwrap().is_block_list_protected(list.id);
+
+        // Typed straight in, as the CLI can: six characters instead of 64.
+        let short = leave_a_short_text_behind();
+        assert!(matches!(
+            unlock(short),
+            Err(CommandError::WrongUnlockResponse)
+        ));
+        assert!(locked());
+
+        // Asked for again, as the app does: the text is for the lock in force.
+        leave_a_short_text_behind();
+        let long = challenge();
+        assert_eq!(long.len(), 64);
+        assert_eq!(challenge(), long, "asking twice must not change the text");
+        unlock(long).unwrap();
+        assert!(!locked());
+    }
+
+    #[test]
+    fn scheduled_lock_rejects_every_loosening_mutation_and_relock_restores_guards() {
+        use focuser_common::types::ScheduledLockState;
+        let ctx = ctx();
+        let list = scheduled_list(
+            &ctx,
+            Some(LockSetup::Password {
+                password: "secret".into(),
+            }),
+        );
+        let site = WebsiteRule::domain("example.com");
+        let app = AppRule::executable("game");
+        let exception = ExceptionRule {
+            id: focuser_common::types::new_id(),
+            exception_type: ExceptionType::Domain("safe.example.com".into()),
+            enabled: true,
+        };
+        // Seed rules before exercising removal, so a not-found error cannot pass this test.
+        let mut stored = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        stored.websites.push(site.clone());
+        stored.applications.push(app.clone());
+        stored.exceptions.push(exception.clone());
+        {
+            let mut engine = ctx.engine.lock().unwrap();
+            engine.db().update_block_list(&stored).unwrap();
+            engine.refresh().unwrap();
+        }
+        let commands = || {
+            vec![
+            Command::RemoveWebsiteRule { list_id: list.id, rule_id: site.id },
+            Command::RemoveAppRule { list_id: list.id, rule_id: app.id },
+            Command::AddException { list_id: list.id, exception: ExceptionType::Domain("example.com".into()) },
+            Command::RemoveException { list_id: list.id, exception_id: exception.id },
+            Command::UpdateSchedule { list_id: list.id, slots: vec![], always_active: false },
+            Command::UpdateSchedule { list_id: list.id, slots: vec![], always_active: true },
+            Command::UpdateBlockList { list: Box::new(stored.clone()) },
+            Command::ToggleBlockList { id: list.id, enabled: false },
+            Command::ToggleBlockList { id: list.id, enabled: true },
+            Command::DeleteBlockList { id: list.id },
+            Command::ConfigureScheduledProtection { list_id: list.id, enabled: false, lock: None },
+            Command::ConfigureScheduledProtection { list_id: list.id, enabled: true, lock: Some(LockSetup::RandomText { length: 64 }) },
+            Command::ConfigureScheduledProtection { list_id: list.id, enabled: true, lock: Some(LockSetup::Password { password: "changed".into() }) },
+            Command::RemoveBlocks,
+            Command::AllowanceCreate { target: AllowanceMatch::Domain("example.com".into()), daily_limit_secs: 600, strict_mode: false },
+            Command::AllowanceUpdate { id: list.id, daily_limit_secs: 600, strict_mode: false, enabled: false },
+            Command::AllowanceResetToday { id: list.id },
+            Command::DeleteAllData, Command::ResetSettings,
+            Command::SetSetting { key: SETTING_CLOSE_BROWSERS.into(), value: "false".into() },
+            Command::ImportConfiguration { json: r#"{"version":1,"app":"Focuser","exported_at":"2026-07-27T00:00:00Z","block_lists":[]}"#.into() },
+        ]
+        };
+        for cmd in commands() {
+            assert_eq!(execute(&ctx, cmd).unwrap_err().code(), "protected");
+        }
+        execute(&ctx, Command::ClearAllWebsites).unwrap();
+        execute(&ctx, Command::ClearAllApps).unwrap();
+        assert_eq!(
+            ctx.engine
+                .lock()
+                .unwrap()
+                .db()
+                .get_block_list(list.id)
+                .unwrap()
+                .websites
+                .len(),
+            1
+        );
+        assert_eq!(
+            ctx.engine
+                .lock()
+                .unwrap()
+                .db()
+                .get_block_list(list.id)
+                .unwrap()
+                .applications
+                .len(),
+            1
+        );
+        let state = || {
+            ctx.engine
+                .lock()
+                .unwrap()
+                .db()
+                .get_block_list(list.id)
+                .unwrap()
+                .scheduled_lock_state()
+        };
+        assert_eq!(state(), ScheduledLockState::Locked);
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "secret".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(state(), ScheduledLockState::UnlockedForEditing);
+        for _ in 0..2 {
+            execute(
+                &ctx,
+                Command::AddWebsiteRule {
+                    list_id: list.id,
+                    rule: WebsiteMatchType::Domain("editing.com".into()),
+                },
+            )
+            .unwrap();
+            execute(
+                &ctx,
+                Command::AddAppRule {
+                    list_id: list.id,
+                    rule: AppMatchType::ExecutableName("editing".into()),
+                },
+            )
+            .unwrap();
+        }
+        let before = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        execute(
+            &ctx,
+            Command::RelockScheduledProtection { list_id: list.id },
+        )
+        .unwrap();
+        let after = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        assert!(after.schedule_unlocked_until.is_none());
+        assert_eq!(
+            serde_json::to_value(before.schedule).unwrap(),
+            serde_json::to_value(after.schedule).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(before.scheduled_protection).unwrap(),
+            serde_json::to_value(after.scheduled_protection).unwrap()
+        );
+        assert_eq!(state(), ScheduledLockState::Locked);
+        for cmd in commands() {
+            assert_eq!(execute(&ctx, cmd).unwrap_err().code(), "protected");
+        }
+        // Additions only tighten the list, so a scheduled lock lets them through.
+        for cmd in [
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("another.com".into()),
+            },
+            Command::BulkImportWebsites {
+                list_id: list.id,
+                values: vec!["other.com".into()],
+                kind: WebsiteRuleKind::Domain,
+            },
+            Command::AddAppRule {
+                list_id: list.id,
+                rule: AppMatchType::ExecutableName("other-game".into()),
+            },
+        ] {
+            execute(&ctx, cmd).unwrap();
+        }
+        assert_eq!(state(), ScheduledLockState::Locked);
+        execute(&ctx, Command::ListBlockLists).unwrap();
+        execute(&ctx, Command::GetScheduledProtectionStatus).unwrap();
+    }
+
+    #[test]
+    fn scheduled_password_and_none_reuse_unlock_guards() {
+        for lock in [
+            None,
+            Some(LockSetup::Password {
+                password: "secret".into(),
+            }),
+        ] {
+            let ctx = ctx();
+            let has_password = lock.is_some();
+            let list = scheduled_list(&ctx, lock);
+            assert!(
+                execute(
+                    &ctx,
+                    Command::UnlockProtection {
+                        list_id: list.id,
+                        response: "wrong".into()
+                    }
+                )
+                .is_err()
+            );
+            let result = execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: "secret".into(),
+                },
+            );
+            assert_eq!(result.is_ok(), has_password);
+        }
+    }
+
+    #[test]
+    fn editing_schedule_after_unlock_clears_bypass_when_inactive() {
+        let ctx = ctx();
+        let list = scheduled_list(
+            &ctx,
+            Some(LockSetup::Password {
+                password: "secret".into(),
+            }),
+        );
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "secret".into(),
+            },
+        )
+        .unwrap();
+        let mut updated = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        updated.schedule.as_mut().unwrap().name = "Still active".into();
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(updated),
+            },
+        )
+        .unwrap();
+        let mut updated = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        assert!(!updated.is_modification_protected());
+        updated.schedule.as_mut().unwrap().enabled = false;
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(updated),
+            },
+        )
+        .unwrap();
+        let mut updated = ctx
+            .engine
+            .lock()
+            .unwrap()
+            .db()
+            .get_block_list(list.id)
+            .unwrap();
+        assert!(updated.schedule_unlocked_until.is_none());
+        updated.schedule.as_mut().unwrap().enabled = true;
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(updated),
+            },
+        )
+        .unwrap();
+        assert!(ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+    }
+
+    // ─── Locks: password and random-text early unlock ──────────────
+
+    #[test]
+    fn a_wrong_password_leaves_protection_active() {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
-        typing_lock(&ctx, list.id, 32).unwrap();
+        protect_with_lock(
+            &ctx,
+            list.id,
+            Some(LockSetup::Password {
+                password: "correct-horse".into(),
+            }),
+        )
+        .unwrap();
 
+        let err = execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "wrong-guess".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "wrong_unlock_response");
+
+        // Still locked: disabling is still refused.
         assert_eq!(
-            typing_lock(&ctx, list.id, 32).unwrap_err().code(),
+            execute(
+                &ctx,
+                Command::ToggleBlockList {
+                    id: list.id,
+                    enabled: false,
+                },
+            )
+            .unwrap_err()
+            .code(),
             "protected"
         );
     }
 
     #[test]
-    fn typing_lock_rejects_out_of_range_phrase_lengths() {
+    fn the_right_password_ends_protection_and_then_disabling_works() {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
-
-        for bad in [0, 5, 5001, 50_000] {
-            assert_eq!(
-                typing_lock(&ctx, list.id, bad).unwrap_err().code(),
-                "validation",
-                "{bad} characters should be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn typing_lock_generates_a_phrase_of_the_configured_length() {
-        let ctx = ctx();
-        let list = create(&ctx, "Committed");
-        typing_lock(&ctx, list.id, 200).unwrap();
-
-        let phrase = requested_phrase(&ctx, list.id);
-        assert_eq!(phrase.chars().count(), 200);
-        assert!(phrase.chars().all(|c| c.is_ascii_alphanumeric()));
-    }
-
-    #[test]
-    fn typing_lock_unlocks_only_on_an_exact_match_of_the_latest_phrase() {
-        let ctx = ctx();
-        let list = create(&ctx, "Committed");
-        typing_lock(&ctx, list.id, 24).unwrap();
-
-        let _first_phrase = requested_phrase(&ctx, list.id);
-
-        // A wrong guess leaves it locked and consumes the phrase — the same
-        // guess must not work twice.
-        let wrong = execute(
+        protect_with_lock(
             &ctx,
-            Command::AttemptUnlock {
+            list.id,
+            Some(LockSetup::Password {
+                password: "correct-horse".into(),
+            }),
+        )
+        .unwrap();
+
+        execute(
+            &ctx,
+            Command::UnlockProtection {
                 list_id: list.id,
-                typed: "not the phrase".into(),
+                response: "correct-horse".into(),
             },
         )
         .unwrap();
-        assert!(matches!(wrong, CommandResult::Flag(false)));
 
-        let status = execute(&ctx, Command::GetTypingLockStatus).unwrap();
-        assert!(
-            matches!(status, CommandResult::TypingLockStatus(v) if v.len() == 1),
-            "list must still be locked after a wrong guess"
+        // Unlocking ends the commitment but does not itself turn the list
+        // off — that is a separate, explicit action.
+        assert!(lists(&ctx)[0].enabled, "unlock must not disable the list");
+
+        execute(
+            &ctx,
+            Command::ToggleBlockList {
+                id: list.id,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        assert!(!lists(&ctx)[0].enabled);
+    }
+
+    #[test]
+    fn a_password_is_checked_exactly_as_it_was_set() {
+        let ctx = ctx();
+        let unlock = |list_id, response: &str| {
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id,
+                    response: response.into(),
+                },
+            )
+        };
+        let list = create(&ctx, "Committed");
+        let password = Some(LockSetup::Password {
+            password: " secret ".into(),
+        });
+        protect_with_lock(&ctx, list.id, password).unwrap();
+
+        // Trimming on one side only made this lock impossible to open.
+        assert!(unlock(list.id, "secret").is_err());
+        unlock(list.id, " secret ").unwrap();
+
+        let blank = Some(LockSetup::Password {
+            password: "   ".into(),
+        });
+        assert!(protect_with_lock(&ctx, list.id, blank).is_err());
+    }
+
+    #[test]
+    fn a_consumed_random_text_challenge_cannot_be_replayed() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
+
+        let CommandResult::Text(challenge) =
+            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+        else {
+            panic!("expected a challenge string");
+        };
+        assert_eq!(challenge.chars().count(), 12);
+
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: challenge.clone(),
+            },
+        )
+        .unwrap();
+
+        // Re-protect with a fresh random-text lock and prove the *old*
+        // challenge no longer answers it.
+        protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
+        let err = execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: challenge,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "wrong_unlock_response");
+    }
+
+    #[test]
+    fn asking_for_the_challenge_twice_shows_the_one_that_unlocks() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
+        let ask = || execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id });
+
+        let (Ok(CommandResult::Text(first)), Ok(CommandResult::Text(second))) = (ask(), ask())
+        else {
+            panic!("expected two challenge strings");
+        };
+        assert_eq!(first, second);
+
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: first,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_wrong_random_text_answer_consumes_the_challenge_so_it_cannot_be_retried() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
+
+        let CommandResult::Text(challenge) =
+            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+        else {
+            panic!("expected a challenge string");
+        };
+
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: "totally-wrong".into(),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "wrong_unlock_response"
         );
 
-        // Requesting again gets a fresh phrase; typing that one back exactly
-        // unlocks it.
-        let second_phrase = requested_phrase(&ctx, list.id);
-        let right = execute(
+        // The right string, if retried against the same (now spent)
+        // challenge, must also fail — a wrong guess does not get an
+        // unlimited number of attempts against one string.
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: challenge,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "wrong_unlock_response"
+        );
+    }
+
+    #[test]
+    fn unlocking_with_no_lock_configured_is_refused_as_protected() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect(&ctx, list.id).unwrap(); // no lock — must simply wait it out
+
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: "anything".into(),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+    }
+
+    #[test]
+    fn requesting_a_challenge_on_a_password_lock_is_a_validation_error() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(
             &ctx,
-            Command::AttemptUnlock {
+            list.id,
+            Some(LockSetup::Password {
+                password: "x".into(),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id })
+                .unwrap_err()
+                .code(),
+            "validation"
+        );
+    }
+
+    #[test]
+    fn unlocking_an_unprotected_list_is_a_validation_error_not_wrong_response() {
+        let ctx = ctx();
+        let list = create(&ctx, "Open");
+
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: "anything".into(),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "validation"
+        );
+    }
+
+    #[test]
+    fn update_block_list_cannot_strip_protection_or_its_lock() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(
+            &ctx,
+            list.id,
+            Some(LockSetup::Password {
+                password: "correct-horse".into(),
+            }),
+        )
+        .unwrap();
+
+        // `prevent_modification` defaults to true in `protect_with_lock`, so
+        // this is already refused — but even if it were not, `protection`
+        // and `lock` must never travel through a wholesale update. Prove the
+        // stronger property directly against the stored data.
+        let mut tampered = lists(&ctx)[0].clone();
+        tampered.protection = None;
+        tampered.lock = None;
+
+        let err = execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(tampered),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "protected");
+
+        // Still protected and still locked with the same password.
+        assert!(lists(&ctx)[0].has_active_protection());
+        execute(
+            &ctx,
+            Command::UnlockProtection {
                 list_id: list.id,
-                typed: second_phrase,
+                response: "correct-horse".into(),
             },
         )
         .unwrap();
-        assert!(matches!(right, CommandResult::Flag(true)));
+    }
 
-        let status = execute(&ctx, Command::GetTypingLockStatus).unwrap();
-        assert!(matches!(status, CommandResult::TypingLockStatus(v) if v.is_empty()));
+    // `prevent_modification: false` means rule/name/schedule edits are
+    // allowed while protected — but `protection` and `lock` themselves are
+    // not "modification" in that sense; they are the commitment device, and
+    // only `EnableProtection`/`UnlockProtection` may touch them. Without the
+    // guard in `UpdateBlockList`, this exact call would silently erase an
+    // uninstall/service-stop commitment the user just made.
+    #[test]
+    fn update_block_list_preserves_protection_even_when_modification_is_allowed() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        execute(
+            &ctx,
+            Command::EnableProtection {
+                list_id: list.id,
+                duration_minutes: 60,
+                prevent_uninstall: true,
+                prevent_service_stop: true,
+                prevent_modification: false,
+                lock: Some(LockSetup::Password {
+                    password: "correct-horse".into(),
+                }),
+            },
+        )
+        .unwrap();
 
-        // And the list is editable again.
-        execute(&ctx, Command::DeleteBlockList { id: list.id }).unwrap();
+        let mut edited = lists(&ctx)[0].clone();
+        edited.name = "Renamed".into();
+        edited.protection = None;
+        edited.lock = None;
+
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(edited),
+            },
+        )
+        .unwrap();
+
+        let stored = lists(&ctx)[0].clone();
+        assert_eq!(stored.name, "Renamed", "the actual edit must go through");
+        assert!(
+            stored.has_active_protection(),
+            "protection must survive an update that only touched the name"
+        );
+        assert!(stored.lock.is_some(), "the lock must survive it too");
+    }
+
+    #[test]
+    fn a_password_lock_never_persists_the_plaintext() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(
+            &ctx,
+            list.id,
+            Some(LockSetup::Password {
+                password: "super-secret-phrase".into(),
+            }),
+        )
+        .unwrap();
+
+        let stored = lists(&ctx)[0].clone();
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(!json.contains("super-secret-phrase"));
     }
 
     #[test]
@@ -2083,6 +3243,134 @@ mod tests {
             execute(&ctx, Command::PomodoroStop).unwrap(),
             CommandResult::Flag(false)
         ));
+    }
+
+    #[test]
+    fn a_pomodoro_runs_on_a_locked_list_and_cannot_switch_it_off() {
+        for scheduled in [false, true] {
+            let ctx = ctx();
+            let list = if scheduled {
+                scheduled_list(&ctx, None)
+            } else {
+                let list = create(&ctx, "Deep Work");
+                protect(&ctx, list.id).unwrap();
+                list
+            };
+
+            execute(
+                &ctx,
+                Command::PomodoroStart {
+                    block_list_id: list.id,
+                    config: PomodoroConfig::CLASSIC,
+                },
+            )
+            .unwrap();
+            // Into the break, which switches an unlocked list off, and then out
+            // of the session, which puts a list back as it found it.
+            execute(&ctx, Command::PomodoroSkip).unwrap();
+            execute(&ctx, Command::PomodoroStop).unwrap();
+
+            let engine = ctx.engine.lock().unwrap();
+            assert!(engine.db().get_block_list(list.id).unwrap().enabled);
+            assert!(engine.is_block_list_protected(list.id));
+        }
+    }
+
+    fn set(ctx: &AppContext, key: &str, value: &str) -> CommandOutcome<CommandResult> {
+        execute(
+            ctx,
+            Command::SetSetting {
+                key: key.into(),
+                value: value.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_lock_refuses_settings_that_would_loosen_browser_closing() {
+        let ctx = ctx();
+        let list = create(&ctx, "Deep Work");
+        protect(&ctx, list.id).unwrap();
+
+        // #18: switching this off let the extension be removed mid-lock.
+        for (key, value) in [
+            (SETTING_CLOSE_BROWSERS, "false"),
+            (SETTING_GRACE_PERIOD, "3600"),
+        ] {
+            assert!(
+                matches!(set(&ctx, key, value), Err(CommandError::Protected)),
+                "{key}={value} got through a lock"
+            );
+        }
+        assert!(matches!(
+            execute(&ctx, Command::ResetSettings),
+            Err(CommandError::Protected)
+        ));
+
+        set(&ctx, SETTING_CLOSE_BROWSERS, "true").unwrap();
+        set(&ctx, SETTING_GRACE_PERIOD, "10").unwrap();
+        set(&ctx, "language", "de").unwrap();
+    }
+
+    #[test]
+    fn without_a_lock_browser_settings_change_freely() {
+        let ctx = ctx();
+        create(&ctx, "Deep Work");
+
+        set(&ctx, SETTING_CLOSE_BROWSERS, "false").unwrap();
+        set(&ctx, SETTING_GRACE_PERIOD, "3600").unwrap();
+        execute(&ctx, Command::ResetSettings).unwrap();
+    }
+
+    #[test]
+    fn a_lock_freezes_allowances_and_unblock_everything() {
+        // The same for a lock set by hand and for one that follows the schedule.
+        for scheduled in [false, true] {
+            let ctx = ctx();
+            let allow_youtube = || {
+                execute(
+                    &ctx,
+                    Command::AllowanceCreate {
+                        target: AllowanceMatch::Domain("youtube.com".into()),
+                        daily_limit_secs: 600,
+                        strict_mode: false,
+                    },
+                )
+            };
+            // Made before the lock, so there is one to change and reset.
+            let CommandResult::Allowance(existing) = allow_youtube().unwrap() else {
+                panic!("expected the created allowance back");
+            };
+            if scheduled {
+                scheduled_list(&ctx, None);
+            } else {
+                let list = create(&ctx, "Deep Work");
+                protect(&ctx, list.id).unwrap();
+            }
+
+            // An allowance with time left exempts its site from every list, so
+            // making one was a way straight through a lock.
+            let loosening = [
+                allow_youtube(),
+                execute(
+                    &ctx,
+                    Command::AllowanceUpdate {
+                        id: existing.id,
+                        daily_limit_secs: 86_400,
+                        strict_mode: false,
+                        enabled: true,
+                    },
+                ),
+                execute(&ctx, Command::AllowanceResetToday { id: existing.id }),
+                execute(&ctx, Command::RemoveBlocks),
+            ];
+            for attempt in loosening {
+                assert!(matches!(attempt, Err(CommandError::Protected)));
+            }
+
+            // Deleting one only takes an exemption away.
+            execute(&ctx, Command::AllowanceDelete { id: existing.id }).unwrap();
+        }
     }
 
     #[test]
@@ -2257,6 +3545,7 @@ mod tests {
                 prevent_uninstall: true,
                 prevent_service_stop: true,
                 prevent_modification: true,
+                lock: None,
             },
         )
         .unwrap();

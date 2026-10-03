@@ -13,6 +13,9 @@ export const SETTING_KEYS = {
   blockUnsupportedBrowsers: "block_unsupported_browsers",
   extensionGracePeriod: "extension_grace_period",
   language: "language",
+  phaseSound: "pomodoro_sound",
+  phaseSoundVolume: "pomodoro_sound_volume",
+  phaseSoundFile: "pomodoro_sound_file",
 } as const;
 
 export const MAX_RETENTION_DAYS = 36_500;

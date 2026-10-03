@@ -19,9 +19,6 @@ use crate::AppState;
 const HOSTS_BEGIN: &str = "# ──── BEGIN FOCUSER BLOCK ────";
 const HOSTS_END: &str = "# ──── END FOCUSER BLOCK ────";
 
-/// Default grace period before killing browsers without the extension.
-const DEFAULT_GRACE_PERIOD_SECS: u64 = 60;
-
 /// Runs the blocking loop in a background thread.
 /// Every 3 seconds: re-sync hosts file, check for blocked processes,
 /// and enforce browser extension installation.
@@ -31,6 +28,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
     // Browser enforcement state
     let mut grace_periods: HashMap<BrowserType, Instant> = HashMap::new();
     let mut was_using_hosts = true;
+    let mut cleared_processes = HashSet::new();
 
     // Cleanup old events on startup (keep 30 days)
     if let Ok(eng) = state.engine.lock() {
@@ -58,6 +56,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         if let Ok(mut eng) = state.engine.lock() {
             match focuser_core::pomodoro::tick(&mut eng, &mut pomodoro_runtime) {
                 Ok(focuser_core::pomodoro::TickOutcome::PhaseAdvanced { to, cycle, .. }) => {
+                    crate::sound::phase_changed(eng.db(), to);
                     state.push_pomodoro_event(crate::PomodoroEvent::PhaseAdvanced {
                         to: to.as_str().to_string(),
                         cycle,
@@ -75,6 +74,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         }
 
         // Refresh engine cache (every ~3s)
+        let mut watch_uninstalls = false;
         if let Ok(mut eng) = state.engine.lock() {
             let _ = eng.refresh();
 
@@ -120,14 +120,10 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
             // Kill blocked processes
             kill_blocked_processes(&eng, &state.allowance_tracker);
             // Also kill apps whose allowance is exhausted today.
-            kill_allowance_blocked_apps(&state.allowance_tracker);
+            kill_allowance_blocked_apps(&state.allowance_tracker, &eng);
 
-            // Uninstall protection. Only while a lock actually asks for it —
-            // scanning command lines is expensive and this is the one case
-            // that justifies it.
-            if eng.has_uninstall_protection() {
-                block_uninstall_attempts();
-            }
+            // Uninstall protection. Only while a lock actually asks for it.
+            watch_uninstalls = eng.has_uninstall_protection();
 
             // Browser extension enforcement. Settings are read on every heavy
             // tick so a change in the UI applies without restarting the app.
@@ -137,18 +133,31 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
                 enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
             }
         }
+
+        // After the engine lock is released, never inside it. Every command
+        // from the window and every request from the extension waits for that
+        // lock, and reading command lines is the one step here whose cost
+        // depends on what else the machine is running.
+        if watch_uninstalls {
+            block_uninstall_attempts(&mut cleared_processes);
+        }
     }
 }
 
 /// Grace period and whether unsupported browsers get closed at all.
 fn enforcement_settings(db: &focuser_core::db::Database) -> (Duration, bool) {
+    use focuser_app::execute::{
+        DEFAULT_GRACE_PERIOD_SECS, SETTING_CLOSE_BROWSERS, SETTING_GRACE_PERIOD,
+    };
+
     let grace = db
-        .get_setting_or_default("extension_grace_period", "60")
+        .get_setting(SETTING_GRACE_PERIOD)
         .ok()
+        .flatten()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_GRACE_PERIOD_SECS);
     let enabled = db
-        .get_setting_or_default("block_unsupported_browsers", "true")
+        .get_setting_or_default(SETTING_CLOSE_BROWSERS, "true")
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(true);
@@ -234,12 +243,34 @@ fn sync_hosts_file(domains: &[String]) {
 /// Only reached while a lock has `prevent_uninstall` set. The detection is
 /// deliberately narrow — see [`focuser_common::uninstall`] — because the
 /// alternative is killing an uninstaller the user aimed at other software.
-fn block_uninstall_attempts() {
-    for pid in uninstall::detect(&process::list(), process::cmdline) {
+fn block_uninstall_attempts(cleared: &mut HashSet<(u32, String)>) {
+    for pid in uninstall_attempts(&process::list(), cleared, process::cmdline) {
         if process::terminate(pid) {
             warn!(pid, "Closed an uninstall attempt — a lock is active");
         }
     }
+}
+
+/// `cleared` remembers processes already read and found harmless: a command
+/// line never changes, and on macOS each read starts `ps` (#12).
+fn uninstall_attempts(
+    procs: &[process::Process],
+    cleared: &mut HashSet<(u32, String)>,
+    mut read_cmdline: impl FnMut(u32) -> Option<String>,
+) -> Vec<u32> {
+    cleared.retain(|(pid, name)| procs.iter().any(|p| p.pid == *pid && p.name == *name));
+
+    uninstall::detect(procs, |pid| {
+        let key = (pid, procs.iter().find(|p| p.pid == pid)?.name.clone());
+        if cleared.contains(&key) {
+            return None;
+        }
+        let line = read_cmdline(pid);
+        if !line.as_deref().is_some_and(uninstall::targets_focuser) {
+            cleared.insert(key);
+        }
+        line
+    })
 }
 
 /// Kill processes matching an app rule on an active block list.
@@ -250,7 +281,7 @@ fn kill_blocked_processes(
     // An app still inside its daily quota is exempt. Blocking it here would
     // defeat the allowance, which exists precisely to permit some use.
     let exempt: HashSet<String> = tracker
-        .active_allowance_apps(eng.db())
+        .active_allowance_apps(eng)
         .into_iter()
         .map(|s| s.to_ascii_lowercase())
         .collect();
@@ -271,10 +302,14 @@ fn kill_blocked_processes(
 
 /// Kill processes whose executable name matches an allowance that is
 /// exhausted for today.
-fn kill_allowance_blocked_apps(tracker: &focuser_core::allowance::AllowanceTracker) {
+fn kill_allowance_blocked_apps(
+    tracker: &focuser_core::allowance::AllowanceTracker,
+    eng: &focuser_core::BlockEngine,
+) {
     let exhausted: HashSet<String> = tracker
         .blocked_apps()
         .into_iter()
+        .filter(|exe| !eng.shared_covers_app(exe))
         .map(|s| s.to_ascii_lowercase())
         .collect();
     if exhausted.is_empty() {
@@ -487,5 +522,35 @@ fn flush_dns() {
         let _ = std::process::Command::new("systemd-resolve")
             .args(["--flush-caches"])
             .output();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use focuser_common::process::Process;
+
+    #[test]
+    fn a_harmless_shell_is_read_once_and_an_uninstall_every_time() {
+        let shell = if cfg!(windows) { "cmd.exe" } else { "bash" };
+        let procs = [7, 9].map(|pid| Process {
+            pid,
+            name: shell.into(),
+        });
+        let mut cleared = HashSet::new();
+        let mut reads = Vec::new();
+        let mut read = |pid| {
+            reads.push(pid);
+            Some(if pid == 9 { "uninstall focuser" } else { "dir" }.to_string())
+        };
+
+        assert_eq!(uninstall_attempts(&procs, &mut cleared, &mut read), [9]);
+        assert_eq!(uninstall_attempts(&procs, &mut cleared, &mut read), [9]);
+
+        // Gone, so a new process reusing pid 7 gets read afresh.
+        uninstall_attempts(&procs[1..], &mut cleared, &mut read);
+        assert!(cleared.is_empty());
+
+        assert_eq!(reads, [7, 9, 9, 9], "the harmless shell was read again");
     }
 }

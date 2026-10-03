@@ -191,11 +191,37 @@ pub fn run_all(conn: &Connection) -> Result<()> {
             ),
         ),
         (
-            "v5: reclassify *word* wildcards stored before Keyword existed as such",
-            Step::Code(reclassify_mistyped_website_rules),
+            "v5: unlock_challenges for random-text locks",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS unlock_challenges (
+                block_list_id TEXT PRIMARY KEY,
+                challenge TEXT NOT NULL
+            );",
+            ),
         ),
         (
-            "v6: also reclassify Domain rules that were typed with a * in them",
+            "v6: shared scheduled allowance activity",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS shared_allowance_usage (
+                block_list_id TEXT NOT NULL,
+                occurrence_start INTEGER NOT NULL,
+                intervals TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (block_list_id, occurrence_start)
+            );",
+            ),
+        ),
+        (
+            "v7: stable shared allowance occurrence anchors",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS shared_allowance_occurrences (
+                block_list_id TEXT PRIMARY KEY,
+                usage_start INTEGER NOT NULL,
+                ends_at INTEGER NOT NULL
+            );",
+            ),
+        ),
+        (
+            "v8: reclassify mistyped website rules (*word* wildcards, Domain values with a *)",
             Step::Code(reclassify_mistyped_website_rules),
         ),
     ];
@@ -228,7 +254,7 @@ mod tests {
     use super::*;
     use focuser_common::types::{WebsiteMatchType, WebsiteRule};
 
-    /// Just the `block_lists` table, as it looked before migration v5 —
+    /// Just the `block_lists` table, as it looked before migration v8 —
     /// enough to exercise [`reclassify_mistyped_website_rules`] on its own,
     /// without going through `run_all` (which would apply it to an empty
     /// table and leave nothing to reclassify).

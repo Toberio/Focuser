@@ -49,8 +49,8 @@ pub fn terminate(pid: u32) -> bool {
 
 /// The full command line a process was started with, if it can be read.
 ///
-/// Costly on every platform — it shells out on Windows and macOS — so call it
-/// for specific suspects, never across a whole process list.
+/// Call it for specific suspects, never across a whole process list: macOS
+/// starts `ps` for every read. Windows and Linux ask the kernel.
 pub fn cmdline(pid: u32) -> Option<String> {
     imp::cmdline(pid)
 }
@@ -89,12 +89,17 @@ fn file_name(path: &str) -> String {
 #[cfg(windows)]
 mod imp {
     use super::Process;
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessCommandLineInformation,
+    };
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, UNICODE_STRING};
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+    };
 
     pub fn list() -> Vec<Process> {
         let mut found = Vec::new();
@@ -136,22 +141,74 @@ mod imp {
         found
     }
 
+    /// Asks the kernel directly. This used to start PowerShell and query WMI,
+    /// about a second per process. The uninstall watch reads every shell on
+    /// the machine, so on a desktop with thirty of them open the blocking loop
+    /// stood still for half a minute, and the app with it.
     pub fn cmdline(pid: u32) -> Option<String> {
-        // Win32 offers no supported way to read another process's command line
-        // short of walking its PEB, so this asks WMI. Deliberately not `wmic`:
-        // that tool is deprecated and already absent from recent Windows 11
-        // installs, whereas PowerShell's CIM cmdlets ship everywhere.
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!("(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"),
-            ])
-            .output()
-            .ok()?;
+        // SAFETY: the handle is only used when OpenProcess succeeded, and is
+        // closed before returning.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let line = command_line_of(handle);
+            let _ = CloseHandle(handle);
+            line
+        }
+    }
 
-        let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    /// `ProcessCommandLineInformation` (Windows 8.1 and later) fills the buffer
+    /// with a `UNICODE_STRING` whose text follows it in the same buffer.
+    ///
+    /// SAFETY: `handle` must be an open process handle with query access.
+    unsafe fn command_line_of(handle: HANDLE) -> Option<String> {
+        // Asked with no buffer, it fails and reports the size it needs.
+        let mut needed = 0u32;
+        let _ = unsafe {
+            NtQueryInformationProcess(
+                handle,
+                ProcessCommandLineInformation,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+            )
+        };
+        if (needed as usize) < size_of::<UNICODE_STRING>() {
+            return None;
+        }
+
+        // u64s, so the UNICODE_STRING at the front is aligned for its pointer.
+        let mut buffer = vec![0u64; (needed as usize).div_ceil(size_of::<u64>())];
+        let bytes = buffer.len() * size_of::<u64>();
+        let status = unsafe {
+            NtQueryInformationProcess(
+                handle,
+                ProcessCommandLineInformation,
+                buffer.as_mut_ptr().cast(),
+                bytes as u32,
+                &mut needed,
+            )
+        };
+        if status.is_err() {
+            return None;
+        }
+
+        // SAFETY: the call succeeded, so the buffer starts with the header it
+        // wrote, and the buffer is aligned and large enough for one.
+        let header = unsafe { &*buffer.as_ptr().cast::<UNICODE_STRING>() };
+        let text = header.Buffer.0 as usize;
+        let length = header.Length as usize;
+        let start = buffer.as_ptr() as usize;
+        // The text must lie inside the buffer we own. Anything else is not
+        // something to read from.
+        if text < start || text + length > start + bytes || !text.is_multiple_of(align_of::<u16>())
+        {
+            return None;
+        }
+        // SAFETY: checked just above to be inside `buffer`, which is alive and
+        // not written to while this slice exists. `Length` is in bytes.
+        let units = unsafe { std::slice::from_raw_parts(header.Buffer.0, length / 2) };
+
+        let line = String::from_utf16_lossy(units).trim().to_string();
         (!line.is_empty()).then_some(line)
     }
 
@@ -172,6 +229,48 @@ mod imp {
     /// resolve here.
     pub fn name_for_path(path: &str) -> String {
         super::file_name(path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::os::windows::process::CommandExt;
+        use std::time::{Duration, Instant};
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        #[test]
+        fn a_command_line_is_read_from_another_process() {
+            // What the uninstall watch does: a shell it did not start, by pid.
+            let mut shell = std::process::Command::new("cmd")
+                .args([
+                    "/c",
+                    "ping -n 6 127.0.0.1 >nul & rem focuser-cmdline-marker",
+                ])
+                .creation_flags(CREATE_NO_WINDOW.0)
+                .spawn()
+                .unwrap();
+            let line = cmdline(shell.id());
+            let _ = shell.kill();
+            let _ = shell.wait();
+
+            let line = line.expect("a running shell has a command line");
+            assert!(line.contains("focuser-cmdline-marker"), "{line}");
+        }
+
+        #[test]
+        fn reading_a_command_line_does_not_start_a_program() {
+            // At a second per read this would take over three minutes.
+            let started = Instant::now();
+            for _ in 0..200 {
+                assert!(cmdline(std::process::id()).is_some());
+            }
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+
+        #[test]
+        fn a_process_that_is_not_there_has_no_command_line() {
+            assert_eq!(cmdline(u32::MAX - 3), None);
+        }
     }
 }
 

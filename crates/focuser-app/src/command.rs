@@ -17,6 +17,22 @@ use focuser_common::types::{
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+/// How to lock a protection window, as supplied by a caller.
+///
+/// Distinct from [`focuser_common::types::Lock`]: that type stores what
+/// protection actually persists (a password *hash*, never the plaintext),
+/// while this is the one-shot wire input `EnableProtection` hashes on the
+/// way in.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LockSetup {
+    /// Require this password, typed back, to end the window early.
+    Password { password: String },
+    /// Require a freshly generated random string of this length, typed
+    /// back exactly, to end the window early.
+    RandomText { length: u32 },
+}
+
 /// A website rule kind *without* its value.
 ///
 /// Needed by bulk import, which supplies one kind and many values. Distinct from
@@ -157,34 +173,37 @@ pub enum Command {
         prevent_uninstall: bool,
         prevent_service_stop: bool,
         prevent_modification: bool,
+        /// How to end the window early. `None` means "wait it out" — the
+        /// pure-commitment mode where nothing can end it before it expires.
+        lock: Option<LockSetup>,
     },
+    ConfigureScheduledProtection {
+        list_id: EntityId,
+        enabled: bool,
+        lock: Option<LockSetup>,
+    },
+    RelockScheduledProtection {
+        list_id: EntityId,
+    },
+    GetScheduledProtectionStatus,
+    ConfigureSharedAllowance {
+        list_id: EntityId,
+        minutes: Option<u32>,
+    },
+    GetSharedAllowanceStatus,
     GetProtectionStatus,
-
-    // ─── Typing lock ──────────────────────────────────────────────
-    /// Lock a block list so it cannot be disabled, deleted, or edited until a
-    /// freshly generated random phrase of `phrase_length` characters is typed
-    /// back exactly. Unlike [`Command::EnableProtection`], there is no timer —
-    /// typing it correctly is the only way out.
-    EnableTypingLock {
-        list_id: EntityId,
-        phrase_length: u32,
-    },
-    /// Every list currently held by a typing lock.
-    GetTypingLockStatus,
-    /// Generate a fresh phrase the caller must type to unlock `list_id`.
-    ///
-    /// Returned once and held only in memory — requesting again discards the
-    /// previous phrase, so there is no way to "check the answer" after the
-    /// fact other than typing it back.
-    RequestUnlockPhrase {
+    /// Issue a fresh random-text challenge for a protected list. Only valid
+    /// on a list whose lock is [`focuser_common::types::Lock::RandomText`].
+    /// Returns the string to display and retype.
+    RequestUnlockChallenge {
         list_id: EntityId,
     },
-    /// Attempt to unlock a list by typing back the most recently requested
-    /// phrase. Returns whether it matched. A wrong guess still consumes the
-    /// phrase — call `RequestUnlockPhrase` again for another try.
-    AttemptUnlock {
+    /// Answer a protected list's lock and, if correct, end its protection
+    /// window immediately. `response` is the password, or the most recent
+    /// random-text challenge typed back.
+    UnlockProtection {
         list_id: EntityId,
-        typed: String,
+        response: String,
     },
 
     // ─── Settings ─────────────────────────────────────────────────
@@ -198,26 +217,6 @@ pub enum Command {
     },
     /// Reset settings to defaults. Block lists and statistics are preserved.
     ResetSettings,
-
-    // ─── Settings lock ──────────────────────────────────────────────
-    /// Same typing-lock mechanism as [`Command::EnableTypingLock`], but for a
-    /// settings-table key instead of a block list — e.g. `"autostart"` or
-    /// `"block_unsupported_browsers"`. While locked, [`Command::SetSetting`]
-    /// refuses to change that key.
-    EnableSettingLock {
-        key: String,
-        phrase_length: u32,
-    },
-    /// Generate a fresh phrase the caller must type to unlock `key`.
-    RequestSettingUnlockPhrase {
-        key: String,
-    },
-    /// Attempt to unlock `key` by typing back the most recently requested
-    /// phrase. Returns whether it matched.
-    AttemptSettingUnlock {
-        key: String,
-        typed: String,
-    },
 
     // ─── Enforcement ──────────────────────────────────────────────
     /// Whether blocking is actually in force right now, and why not if it isn't.
@@ -374,6 +373,12 @@ impl BlockingHealth {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ScheduledProtectionStatus {
+    pub block_list_id: EntityId,
+    pub state: focuser_common::types::ScheduledLockState,
+}
+
 /// An active protection window on a block list.
 ///
 /// Replaces the ad-hoc `serde_json::json!` object the old command built.
@@ -389,14 +394,6 @@ pub struct ProtectionInfo {
     #[specta(type = specta_typescript::Number)]
     pub remaining_seconds: u64,
     pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// A block list currently held by a typing lock.
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
-pub struct TypingLockInfo {
-    pub block_list_id: EntityId,
-    pub block_list_name: String,
-    pub phrase_length: u32,
 }
 
 /// The result of a successful [`Command`].
@@ -419,7 +416,8 @@ pub enum CommandResult {
     Stats(Vec<UsageStat>),
     BlockedEvents(Vec<BlockedEvent>),
     ProtectionStatus(Vec<ProtectionInfo>),
-    TypingLockStatus(Vec<TypingLockInfo>),
+    ScheduledProtectionStatus(Vec<ScheduledProtectionStatus>),
+    SharedAllowanceStatus(Vec<focuser_common::allowance::SharedAllowanceStatus>),
     BlockingHealth(BlockingHealth),
     /// A setting value; `None` when unset and no default was supplied.
     Setting(Option<String>),

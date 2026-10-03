@@ -55,6 +55,7 @@ export type AllowancePeriod = "PerHour" | "PerDay";
 
 /**  A snapshot of an allowance with today's usage, for the UI. */
 export type AllowanceStatus = {
+	paused_by_shared?: boolean,
 	allowance: Allowance,
 	used_today_secs: number,
 	/**  `remaining = max(daily_limit - used, 0)`. */
@@ -110,7 +111,13 @@ export type BlockList = {
 	lock: Lock | null,
 	protection: Protection | null,
 	schedule: Schedule | null,
+	/**  JSON defaults migrate existing lists to unprotected schedules. */
+	scheduled_protection?: ScheduledProtection | null,
+	/**  Trusted occurrence bypass; never accepted from wholesale list updates. */
+	schedule_unlocked_until?: string | null,
 	breaks: BreakConfig | null,
+	/**  Optional shared budget per merged weekly schedule occurrence. */
+	shared_allowance?: SharedAllowanceConfig | null,
 	created_at: string,
 	updated_at: string,
 };
@@ -293,37 +300,37 @@ export type Command =
 	prevent_uninstall: boolean,
 	prevent_service_stop: boolean,
 	prevent_modification: boolean,
-} } | { cmd: "get_protection_status" } | 
-/**
- *  Lock a block list so it cannot be disabled, deleted, or edited until a
- *  freshly generated random phrase of `phrase_length` characters is typed
- *  back exactly. Unlike [`Command::EnableProtection`], there is no timer —
- *  typing it correctly is the only way out.
- */
-{ cmd: "enable_typing_lock"; args: {
+	/**
+	 *  How to end the window early. `None` means "wait it out" — the
+	 *  pure-commitment mode where nothing can end it before it expires.
+	 */
+	lock: LockSetup | null,
+} } | { cmd: "configure_scheduled_protection"; args: {
 	list_id: string,
-	phrase_length: number,
+	enabled: boolean,
+	lock: LockSetup | null,
+} } | { cmd: "relock_scheduled_protection"; args: {
+	list_id: string,
+} } | { cmd: "get_scheduled_protection_status" } | { cmd: "configure_shared_allowance"; args: {
+	list_id: string,
+	minutes: number | null,
+} } | { cmd: "get_shared_allowance_status" } | { cmd: "get_protection_status" } | 
+/**
+ *  Issue a fresh random-text challenge for a protected list. Only valid
+ *  on a list whose lock is [`focuser_common::types::Lock::RandomText`].
+ *  Returns the string to display and retype.
+ */
+{ cmd: "request_unlock_challenge"; args: {
+	list_id: string,
 } } | 
-/**  Every list currently held by a typing lock. */
-{ cmd: "get_typing_lock_status" } | 
 /**
- *  Generate a fresh phrase the caller must type to unlock `list_id`.
- * 
- *  Returned once and held only in memory — requesting again discards the
- *  previous phrase, so there is no way to "check the answer" after the
- *  fact other than typing it back.
+ *  Answer a protected list's lock and, if correct, end its protection
+ *  window immediately. `response` is the password, or the most recent
+ *  random-text challenge typed back.
  */
-{ cmd: "request_unlock_phrase"; args: {
+{ cmd: "unlock_protection"; args: {
 	list_id: string,
-} } | 
-/**
- *  Attempt to unlock a list by typing back the most recently requested
- *  phrase. Returns whether it matched. A wrong guess still consumes the
- *  phrase — call `RequestUnlockPhrase` again for another try.
- */
-{ cmd: "attempt_unlock"; args: {
-	list_id: string,
-	typed: string,
+	response: string,
 } } | { cmd: "get_setting"; args: {
 	key: string,
 	default: string | null,
@@ -333,28 +340,6 @@ export type Command =
 } } | 
 /**  Reset settings to defaults. Block lists and statistics are preserved. */
 { cmd: "reset_settings" } | 
-/**
- *  Same typing-lock mechanism as [`Command::EnableTypingLock`], but for a
- *  settings-table key instead of a block list — e.g. `"autostart"` or
- *  `"block_unsupported_browsers"`. While locked, [`Command::SetSetting`]
- *  refuses to change that key.
- */
-{ cmd: "enable_setting_lock"; args: {
-	key: string,
-	phrase_length: number,
-} } | 
-/**  Generate a fresh phrase the caller must type to unlock `key`. */
-{ cmd: "request_setting_unlock_phrase"; args: {
-	key: string,
-} } | 
-/**
- *  Attempt to unlock `key` by typing back the most recently requested
- *  phrase. Returns whether it matched.
- */
-{ cmd: "attempt_setting_unlock"; args: {
-	key: string,
-	typed: string,
-} } | 
 /**  Whether blocking is actually in force right now, and why not if it isn't. */
 { cmd: "get_blocking_health" } | 
 /**  Push the current blocked-domain set to the hosts file now. */
@@ -456,7 +441,7 @@ export type CommandResult =
 /**  Succeeded, nothing to return. */
 { kind: "unit" } | { kind: "block_list"; data: BlockList } | { kind: "block_lists"; data: BlockList[] } | { kind: "website_rule"; data: WebsiteRule } | { kind: "app_rule"; data: AppRule } | { kind: "exception"; data: ExceptionRule } | 
 /**  A number of affected items — e.g. rules imported or cleared. */
-{ kind: "count"; data: number } | { kind: "stats"; data: UsageStat[] } | { kind: "blocked_events"; data: BlockedEvent[] } | { kind: "protection_status"; data: ProtectionInfo[] } | { kind: "typing_lock_status"; data: TypingLockInfo[] } | { kind: "blocking_health"; data: BlockingHealth } | 
+{ kind: "count"; data: number } | { kind: "stats"; data: UsageStat[] } | { kind: "blocked_events"; data: BlockedEvent[] } | { kind: "protection_status"; data: ProtectionInfo[] } | { kind: "scheduled_protection_status"; data: ScheduledProtectionStatus[] } | { kind: "shared_allowance_status"; data: SharedAllowanceStatus[] } | { kind: "blocking_health"; data: BlockingHealth } | 
 /**  A setting value; `None` when unset and no default was supplied. */
 { kind: "setting"; data: string | null } | 
 /**  A yes/no outcome — e.g. "was a session actually paused". */
@@ -474,35 +459,67 @@ export type ExceptionRule = {
 
 export type ExceptionType = 
 /**  Allow a specific domain even when other rules would block it */
-({ Domain: string }) & { Wildcard?: never } | 
+({ Domain: string }) & { UrlPath?: never; Wildcard?: never } | 
+/**
+ *  Allow one page, and what is under it, on a site that stays blocked:
+ *  `reddit.com/r/programming`. Only the extension can see a path.
+ */
+({ UrlPath: string }) & { Domain?: never; Wildcard?: never } | 
 /**  Allow a wildcard pattern */
-({ Wildcard: string }) & { Domain?: never } | 
+({ Wildcard: string }) & { Domain?: never; UrlPath?: never } | 
 /**  Allow local file:// URLs */
 "LocalFiles";
 
-/**  How a block is enforced — determines what it takes to disable it. */
+/**
+ *  How a protection window can be ended early — Cold Turkey calls this a
+ *  block's "lock". Meaningless on its own; it only matters while
+ *  manual or scheduled protection is active, and it can only be configured
+ *  through protection commands, never
+ *  through a wholesale [`BlockList`] update.
+ * 
+ *  With no lock, an active protection window simply cannot be ended early —
+ *  the only way out is to wait for `expires_at`. Adding a lock is a
+ *  deliberate trade: an escape hatch exists, but only through friction
+ *  (retyping a random string) or a secret (a password).
+ */
 export type Lock = 
-/**  Block runs for a fixed duration, cannot be cancelled. */
-({ Timer: {
-	duration_minutes: number,
-	started_at: string | null,
-} }) & { Password?: never; RandomText?: never; Until?: never } | 
-/**  Must type a long random string to unlock. */
-({ RandomText: {
-	length: number,
-} }) & { Password?: never; Timer?: never; Until?: never } | 
-/**  Locked until a specific time. */
-({ Until: {
-	unlock_at: string,
-} }) & { Password?: never; RandomText?: never; Timer?: never } | 
-/**  Requires system restart to disable (block re-enables on boot). */
-"Restart" | 
-/**  Password-protected (hashed). */
+/**
+ *  Must enter this password to unlock early. Stored as an Argon2 hash —
+ *  never the plaintext.
+ */
 ({ Password: {
 	hash: string,
-} }) & { RandomText?: never; Timer?: never; Until?: never } | 
-/**  Follows the attached schedule — active during scheduled times. */
-"Scheduled";
+} }) & { RandomText?: never } | 
+/**
+ *  Must retype a freshly generated random string to unlock early.
+ * 
+ *  The string currently on offer is *not* stored here — it lives in the
+ *  database's `unlock_challenges` table (see `focuser_core::Database`)
+ *  keyed by block list, separate from this JSON blob. That keeps it out
+ *  of `ListBlockLists`/`ExportConfiguration`, and a wrong answer simply
+ *  requires a fresh one rather than allowing retries against the same
+ *  string.
+ */
+({ RandomText: {
+	length: number,
+} }) & { Password?: never };
+
+/**
+ *  How to lock a protection window, as supplied by a caller.
+ * 
+ *  Distinct from [`focuser_common::types::Lock`]: that type stores what
+ *  protection actually persists (a password *hash*, never the plaintext),
+ *  while this is the one-shot wire input `EnableProtection` hashes on the
+ *  way in.
+ */
+export type LockSetup = 
+/**  Require this password, typed back, to end the window early. */
+{ kind: "password"; password: string } | 
+/**
+ *  Require a freshly generated random string of this length, typed
+ *  back exactly, to end the window early.
+ */
+{ kind: "random_text"; length: number };
 
 /**  User-editable configuration for a Pomodoro session. */
 export type PomodoroConfig = {
@@ -616,18 +633,34 @@ export type Schedule = {
 	enabled: boolean,
 };
 
+export type ScheduledLockState = "off" | "inactive" | "locked" | "unlocked_for_editing";
+
+/**  Opt-in recurring Focus Lock; reuses the existing early-unlock methods. */
+export type ScheduledProtection = {
+	lock: Lock | null,
+};
+
+export type ScheduledProtectionStatus = {
+	block_list_id: string,
+	state: ScheduledLockState,
+};
+
+export type SharedAllowanceConfig = {
+	minutes: number,
+};
+
+export type SharedAllowanceStatus = {
+	block_list_id: string,
+	limit_secs: number,
+	remaining_secs: number,
+	active: boolean,
+};
+
 /**  A time range on a specific day of the week. */
 export type TimeSlot = {
 	day: string,
 	start: string,
 	end: string,
-};
-
-/**  A block list currently held by a typing lock. */
-export type TypingLockInfo = {
-	block_list_id: string,
-	block_list_name: string,
-	phrase_length: number,
 };
 
 export type UsageStat = {

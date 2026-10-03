@@ -20,8 +20,6 @@ use crate::AppState;
 use focuser_common::host::{any_host_matches, canonical_host};
 use focuser_common::types::WebsiteMatchType;
 
-use crate::blocker;
-
 /// Flag to request the main window to show itself.
 pub static SHOW_WINDOW_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -445,7 +443,8 @@ fn api_check_domain(path: &str, state: &AppState) -> (&'static str, String) {
 
     let eng = state.engine.lock().unwrap();
     let exemptions = state.allowance_exempt_domains(&eng);
-    let blocked = if any_host_matches(&exemptions, domain) {
+    let blocked = if any_host_matches(&exemptions, domain) && !eng.scheduled_block_on_domain(domain)
+    {
         false
     } else {
         eng.check_domain(domain).is_some()
@@ -481,6 +480,12 @@ fn api_add_site(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
+    if list.is_modification_protected() {
+        return (
+            "403 Forbidden",
+            serde_json::json!({"error": "protected"}).to_string(),
+        );
+    }
 
     use focuser_common::types::WebsiteRule;
     let rule = match rule_type {
@@ -513,7 +518,7 @@ fn api_add_site(body: &str, state: &AppState) -> (&'static str, String) {
         );
     }
     let _ = eng.refresh();
-    let _ = blocker::apply_hosts_blocks(&eng.collect_blocked_domains());
+    state.sync_hosts(&eng);
 
     (
         "200 OK",
@@ -549,6 +554,12 @@ fn api_remove_site(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
+    if list.is_modification_protected() {
+        return (
+            "403 Forbidden",
+            serde_json::json!({"error": "protected"}).to_string(),
+        );
+    }
 
     let before = list.websites.len();
     let mut left_behind = 0usize;
@@ -584,7 +595,7 @@ fn api_remove_site(body: &str, state: &AppState) -> (&'static str, String) {
         );
     }
     let _ = eng.refresh();
-    let _ = blocker::apply_hosts_blocks(&eng.collect_blocked_domains());
+    state.sync_hosts(&eng);
 
     // `removed` matters: removing nothing used to answer "ok" exactly like a
     // real removal, so the popup reported success while the site stayed blocked.
@@ -749,6 +760,12 @@ fn api_toggle_list(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
+    if list.is_modification_protected() {
+        return (
+            "403 Forbidden",
+            serde_json::json!({"error": "protected"}).to_string(),
+        );
+    }
 
     list.enabled = enabled;
     list.updated_at = chrono::Utc::now();
@@ -760,7 +777,7 @@ fn api_toggle_list(body: &str, state: &AppState) -> (&'static str, String) {
         );
     }
     let _ = eng.refresh();
-    let _ = blocker::apply_hosts_blocks(&eng.collect_blocked_domains());
+    state.sync_hosts(&eng);
 
     ("200 OK", r#"{"ok":true}"#.into())
 }
@@ -792,8 +809,19 @@ fn api_allowance_tick(body: &str, state: &AppState) -> (&'static str, String) {
 }
 
 fn api_allowance_blocked(state: &AppState) -> (&'static str, String) {
-    let domains = state.allowance_tracker.blocked_domains();
-    let apps = state.allowance_tracker.blocked_apps();
+    let eng = state.engine.lock().unwrap();
+    let domains: Vec<_> = state
+        .allowance_tracker
+        .blocked_domains()
+        .into_iter()
+        .filter(|d| !eng.shared_covers_domain(d))
+        .collect();
+    let apps: Vec<_> = state
+        .allowance_tracker
+        .blocked_apps()
+        .into_iter()
+        .filter(|a| !eng.shared_covers_app(a))
+        .collect();
     let json = serde_json::json!({ "domains": domains, "apps": apps });
     ("200 OK", json.to_string())
 }
@@ -818,7 +846,7 @@ fn api_allowances_list(state: &AppState) -> (&'static str, String) {
         Ok(e) => e,
         Err(_) => return ("500 Internal Server Error", r#"{"error":"lock"}"#.into()),
     };
-    match eng.db().list_allowance_statuses() {
+    match eng.db().allowance_statuses_with_shared() {
         Ok(list) => (
             "200 OK",
             serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
@@ -900,6 +928,54 @@ mod tests {
         let eng = state.engine.lock().unwrap();
         let allowances = eng.db().list_allowances().unwrap();
         eng.db().get_allowance_used_today(allowances[0].id).unwrap()
+    }
+
+    #[test]
+    fn scheduled_lock_guards_extension_mutations_and_relock() {
+        use chrono::Datelike;
+        use focuser_common::types::{Lock, Schedule, ScheduledProtection, TimeSlot, new_id};
+        let mut list = BlockList::new("Scheduled");
+        list.websites.push(WebsiteRule::domain("example.com"));
+        list.schedule = Some(Schedule {
+            id: new_id(),
+            name: "Today".into(),
+            enabled: true,
+            time_slots: vec![TimeSlot::new(
+                chrono::Local::now().weekday(),
+                chrono::NaiveTime::MIN,
+                chrono::NaiveTime::MIN,
+            )],
+        });
+        list.scheduled_protection = Some(ScheduledProtection {
+            lock: Some(Lock::password("secret").unwrap()),
+        });
+        let state = ctx_with_extension(|db| {
+            db.create_block_list(&list).unwrap();
+        });
+        let body = serde_json::json!({"list_id": list.id, "domain":"example.com", "enabled":false})
+            .to_string();
+        let attempt = || {
+            assert_eq!(super::api_add_site(&body, &state).0, "403 Forbidden");
+            assert_eq!(super::api_remove_site(&body, &state).0, "403 Forbidden");
+            assert_eq!(super::api_toggle_list(&body, &state).0, "403 Forbidden");
+        };
+        attempt();
+        focuser_app::execute(
+            &state,
+            focuser_app::Command::UnlockProtection {
+                list_id: list.id,
+                response: "secret".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(super::api_remove_site(&body, &state).0, "200 OK");
+        assert_eq!(super::api_add_site(&body, &state).0, "200 OK");
+        focuser_app::execute(
+            &state,
+            focuser_app::Command::RelockScheduledProtection { list_id: list.id },
+        )
+        .unwrap();
+        attempt();
     }
 
     #[test]
@@ -1007,8 +1083,89 @@ mod tests {
         assert_eq!(used_secs(&state), 0, "strict mode only counts focused time");
     }
 
+    #[test]
+    fn a_locked_list_cannot_be_changed_through_the_extension_api() {
+        let mut list = BlockList::new("Deep Work");
+        list.websites.push(WebsiteRule::domain("youtube.com"));
+        let now = chrono::Utc::now();
+        list.protection = Some(focuser_common::types::Protection {
+            prevent_uninstall: false,
+            prevent_service_stop: false,
+            prevent_modification: true,
+            started_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+        });
+        let state = ctx_with_extension(|db| db.create_block_list(&list).unwrap());
+        let body =
+            serde_json::json!({"list_id": list.id, "domain": "youtube.com", "enabled": false})
+                .to_string();
+
+        // 0.8.0 answered 200 to all of these, so one request to this port
+        // switched a locked list off.
+        assert_eq!(super::api_toggle_list(&body, &state).0, "403 Forbidden");
+        assert_eq!(super::api_remove_site(&body, &state).0, "403 Forbidden");
+        assert_eq!(super::api_add_site(&body, &state).0, "403 Forbidden");
+
+        let engine = state.engine.lock().unwrap();
+        let stored = engine.db().get_block_list(list.id).unwrap();
+        assert!(stored.enabled, "the locked list was switched off");
+        assert_eq!(stored.websites.len(), 1);
+    }
+
     // A hosts file cannot express these, so this endpoint is the only way they
     // ever reach anything that enforces them.
+    #[test]
+    fn shared_allowance_api_preserves_scopes_pauses_individuals_and_exhausts() {
+        use chrono::Datelike;
+        use focuser_common::types::{Schedule, TimeSlot};
+        let state = ctx_with_extension(|db| {
+            let mut list = BlockList::new("Shared");
+            list.websites.push(WebsiteRule::domain("youtube.com"));
+            // Running now, and into tomorrow in case the test crosses midnight.
+            let today = chrono::Local::now().weekday();
+            list.schedule = Some(Schedule {
+                id: list.id,
+                name: "Today".into(),
+                enabled: true,
+                time_slots: [today, today.succ()]
+                    .into_iter()
+                    .map(|d| TimeSlot::new(d, chrono::NaiveTime::MIN, chrono::NaiveTime::MIN))
+                    .collect(),
+            });
+            list.shared_allowance =
+                Some(focuser_common::allowance::SharedAllowanceConfig { minutes: 1 });
+            db.create_block_list(&list).unwrap();
+            db.create_allowance(&focuser_common::allowance::Allowance::new(
+                AllowanceMatch::Domain("youtube.com".into()),
+                600,
+                true,
+            ))
+            .unwrap();
+        });
+        let rules: serde_json::Value = serde_json::from_str(&super::api_rules(&state).1).unwrap();
+        assert_eq!(rules["scopes"][0]["shared_permits"], true);
+        assert!(rules["allowed_domains"].as_array().unwrap().is_empty());
+        assert!(
+            rules["blocked_domains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d == "youtube.com"),
+            "old extension fallback stays blocked"
+        );
+        let result = super::api_allowance_tick(
+            r#"{"hostname":"youtube.com","url":"https://youtube.com/watch","active":true,"shared_active":true,"shared_only":true,"increment_secs":60,"source":"test"}"#,
+            &state,
+        );
+        assert_eq!(result.0, "200 OK");
+        assert_eq!(used_secs(&state), 0);
+        let rules: serde_json::Value = serde_json::from_str(&super::api_rules(&state).1).unwrap();
+        assert_eq!(rules["scopes"][0]["shared_permits"], false);
+        let eng = state.engine.lock().unwrap();
+        assert_eq!(eng.check_domain("youtube.com"), Some("Shared"));
+        assert!(eng.db().allowance_statuses_with_shared().unwrap()[0].paused_by_shared);
+    }
+
     #[test]
     fn compiled_rules_carry_the_extension_only_kinds() {
         let state = ctx_with_extension(|db| {

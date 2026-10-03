@@ -27,6 +27,15 @@ tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-single-instance = "2"
+# The phase-change chime and user-picked sounds. No recording, no dithering.
+rodio = { version = "0.22", default-features = false, features = [
+    "playback",
+    "tracing",
+    "wav",
+    "mp3",
+    "vorbis",
+    "flac",
+] }
 specta = { workspace = true }
 specta-typescript = { workspace = true }
 tauri-specta = { workspace = true }

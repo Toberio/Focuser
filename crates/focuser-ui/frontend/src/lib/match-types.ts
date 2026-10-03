@@ -30,6 +30,7 @@ const APP_LABELS: Record<string, () => string> = {
 
 const EXCEPTION_LABELS: Record<string, () => string> = {
   Domain: m.websites_kind_domain,
+  UrlPath: m.websites_kind_url_path,
   Wildcard: m.websites_kind_wildcard,
   LocalFiles: m.exceptions_kind_local_files,
 };

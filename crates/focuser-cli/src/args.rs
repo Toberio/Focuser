@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use chrono::NaiveDate;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use focuser_app::Command;
+use focuser_app::command::LockSetup;
 use focuser_common::allowance::AllowanceMatch;
 use focuser_common::pomodoro::PomodoroConfig;
 use focuser_common::types::{AppMatchType, EntityId, ExceptionType, TimeSlot, WebsiteMatchType};
@@ -273,6 +274,10 @@ pub enum ProtectCmd {
     /// All three protections are on by default — a protection window that
     /// protects nothing is never what "enable protection" means. Use the
     /// `--allow-*` flags to opt out of individual ones.
+    ///
+    /// With neither `--password` nor `--random-text-length`, the window
+    /// cannot be ended early at all — the only way out is to wait for it to
+    /// expire.
     Enable {
         id: EntityId,
         #[arg(long, default_value_t = 60)]
@@ -286,9 +291,20 @@ pub enum ProtectCmd {
         /// Permit editing this block list while protection is active.
         #[arg(long)]
         allow_modification: bool,
+        /// Require this password (via `protect unlock`) to end the window
+        /// early.
+        #[arg(long, conflicts_with = "random_text_length")]
+        password: Option<String>,
+        /// Require retyping a random string of this many characters to end
+        /// the window early. The string is only shown in the app.
+        #[arg(long, conflicts_with = "password")]
+        random_text_length: Option<u32>,
     },
     /// Show active protection windows.
     Status,
+    /// End a protection window early with its password. Random-text locks
+    /// are unlocked in the app, where the text is shown.
+    Unlock { id: EntityId, response: String },
 }
 
 // ─── Settings ───────────────────────────────────────────────────────
@@ -531,14 +547,25 @@ impl TopLevel {
                     allow_uninstall,
                     allow_service_stop,
                     allow_modification,
+                    password,
+                    random_text_length,
                 } => Command::EnableProtection {
                     list_id: id,
                     duration_minutes: minutes,
                     prevent_uninstall: !allow_uninstall,
                     prevent_service_stop: !allow_service_stop,
                     prevent_modification: !allow_modification,
+                    lock: match (password, random_text_length) {
+                        (Some(password), _) => Some(LockSetup::Password { password }),
+                        (None, Some(length)) => Some(LockSetup::RandomText { length }),
+                        (None, None) => None,
+                    },
                 },
                 ProtectCmd::Status => Command::GetProtectionStatus,
+                ProtectCmd::Unlock { id, response } => Command::UnlockProtection {
+                    list_id: id,
+                    response,
+                },
             },
 
             TopLevel::Setting(c) => match c {
