@@ -31,10 +31,7 @@ const FEEDBACK = (import.meta.env as Record<string, unknown>).WXT_IMAGE_FILTER_D
 const ATTR = "data-focuser-image";
 /** The scores behind a verdict, readable in DevTools, for tuning the thresholds. */
 const SCORE_ATTR = "data-focuser-score";
-// Debug builds only grey hidden images out, so a wrong verdict can be seen
-// and labelled.
-const HIDDEN = FEEDBACK ? "filter:grayscale(1)!important" : "filter:blur(28px) grayscale(1)!important;clip-path:inset(0)!important";
-const STYLE = `:is(img,video)[${ATTR}="hidden"]{${HIDDEN}}`;
+const STYLE = `:is(img,video)[${ATTR}="hidden"]{filter:blur(28px) grayscale(1)!important;clip-path:inset(0)!important}`;
 /** Start judging an image this far before it scrolls into view. */
 const LOOKAHEAD = "100% 0px";
 /** How often a playing, visible video has a frame checked. */
