@@ -429,14 +429,18 @@ fn api_image_verdict(bytes: &[u8], state: &AppState) -> (&'static str, String) {
         eng.compile_extension_rules().image_filter
     };
     let started = Instant::now();
-    let body = match crate::image_filter::classify(bytes) {
-        Ok(scores) => serde_json::json!({
+    let body = match crate::image_filter::judge(bytes) {
+        Ok(judged) => {
+            let mut scores = judged.scores;
+            scores.personal = crate::image_feedback::personal(&judged.embedding);
+            serde_json::json!({
             "verdict": match focuser_vision::is_hidden(&scores, level) {
                 Some(true) => "hidden",
                 _ => "clear",
             },
             "score": format!("{} · {} ms", scores.describe(), started.elapsed().as_millis()),
-        }),
+            })
+        }
         // Not ready, or the image would not decode: the extension shows it.
         Err(status) => serde_json::json!({ "verdict": "error", "status": status }),
     };

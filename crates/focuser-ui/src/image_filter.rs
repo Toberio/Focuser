@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use focuser_common::types::ImageFilter;
-use focuser_vision::{Classifier, Scores, models};
+use focuser_vision::{Classifier, models};
 use serde::Serialize;
 use tracing::{error, info};
 
@@ -102,7 +102,11 @@ fn start(svc: &'static Service) {
             }
             set(svc, State::Starting(Status::Loading));
             match Classifier::load(&svc.dir) {
-                Ok(classifier) => set(svc, State::Ready(classifier)),
+                Ok(classifier) => {
+                    set(svc, State::Ready(classifier));
+                    // The user's own filter, from labels saved last time.
+                    crate::image_feedback::retrain();
+                }
                 Err(e) => {
                     error!(error = %e, "image filter models failed to load");
                     set(svc, State::Failed(e.to_string()));
@@ -124,8 +128,9 @@ pub fn status() -> Status {
     status_of(&state)
 }
 
-/// Judge one image. `Err` carries the status when the models are not ready.
-pub fn classify(bytes: &[u8]) -> Result<Scores, Status> {
+/// Judge one image: scores and CLIP's embedding. `Err` carries the status
+/// when the models are not ready.
+pub fn judge(bytes: &[u8]) -> Result<focuser_vision::Judged, Status> {
     let classifier = {
         let svc = service().ok_or(Status::Off)?;
         let state = svc.state.lock().map_err(|_| Status::Off)?;
@@ -135,7 +140,7 @@ pub fn classify(bytes: &[u8]) -> Result<Scores, Status> {
             _ => return Err(status_of(&state)),
         }
     };
-    classifier.classify(bytes).map_err(|e| Status::Failed {
+    classifier.judge(bytes).map_err(|e| Status::Failed {
         error: e.to_string(),
     })
 }
