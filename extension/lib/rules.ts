@@ -23,6 +23,8 @@ export interface RuleSet {
   /** Sites an allowance is keeping open. Sent with `scopes`. */
   allowance_domains?: string[];
   domain_categories?: Record<string, string>;
+  /** Blur images until the classifier clears them. Absent means off. */
+  filter_explicit_images?: boolean;
   version?: number;
 }
 

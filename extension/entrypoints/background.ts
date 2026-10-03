@@ -28,6 +28,7 @@ import {
   type RuleSet,
   trackingKey,
 } from "@/lib/rules";
+import type { Verdict } from "@/lib/image-filter";
 import type { BlockContext, Message, MessageReply } from "@/lib/messages";
 import { SharedActivity } from "@/lib/shared-activity";
 
@@ -42,6 +43,9 @@ import { SharedActivity } from "@/lib/shared-activity";
 const ALLOWANCE_TICK_MS = 30_000;
 const INJECTION_DEDUP_MS = 1_500;
 const REPORT_DEDUP_MS = 5_000;
+const IMAGE_FILTER_ID = "focuser-image-filter";
+const IMAGE_FILTER_SCRIPT = "/content-scripts/image-filter.js";
+const CLASSIFIER_PAGE = "/classifier.html";
 
 export default defineBackground(() => {
   const browserName: BrowserName = detectBrowser();
@@ -126,6 +130,7 @@ export default defineBackground(() => {
       rawRules = next;
       rules = compile(next);
       await enforceOnOpenTabs();
+      await syncImageFilter(next.filter_explicit_images === true);
     }
     if (connected !== wasConnected) updateBadge();
     else if (connected) updateBadge();
@@ -240,6 +245,130 @@ export default defineBackground(() => {
     return true;
   }
 
+  // ─── Image filter ─────────────────────────────────────────────────
+
+  let imageFilterOn = false;
+  let imageFilterSync: Promise<void> = Promise.resolve();
+
+  /**
+   * Match the registered content script to what the app asks for.
+   *
+   * Checked against the browser rather than a flag of ours: a Chrome service
+   * worker restarts with its variables reset, but the registration survives.
+   */
+  function syncImageFilter(on: boolean): Promise<void> {
+    imageFilterOn = on;
+    imageFilterSync = imageFilterSync.then(async () => {
+      try {
+        const registered = await browser.scripting.getRegisteredContentScripts({
+          ids: [IMAGE_FILTER_ID],
+        });
+        // Load the model before the first page asks, not when it does.
+        if (on) void ensureClassifier().catch(() => undefined);
+        if (on === registered.length > 0) return;
+
+        const tabs = await browser.tabs.query({});
+        if (on) {
+          await browser.scripting.registerContentScripts([
+            {
+              id: IMAGE_FILTER_ID,
+              js: [IMAGE_FILTER_SCRIPT],
+              matches: ["<all_urls>"],
+              runAt: "document_start",
+              allFrames: true,
+              // Off until the app says otherwise after a restart, like every
+              // other rule: nothing is enforced on rules from a past session.
+              persistAcrossSessions: false,
+            },
+          ]);
+          // Pages already open get it too, or switching it on would do nothing
+          // until every tab was reloaded.
+          for (const tab of tabs) {
+            if (tab.id === undefined) continue;
+            browser.scripting
+              .executeScript({ target: { tabId: tab.id, allFrames: true }, files: [IMAGE_FILTER_SCRIPT] })
+              .catch(() => undefined);
+          }
+        } else {
+          await browser.scripting.unregisterContentScripts({ ids: [IMAGE_FILTER_ID] });
+          for (const tab of tabs) {
+            if (tab.id === undefined) continue;
+            browser.tabs.sendMessage(tab.id, { type: "image-filter-off" }).catch(() => undefined);
+          }
+          await closeClassifier();
+        }
+      } catch {
+        // Retried on the next rules change; the poll keeps coming.
+      }
+    });
+    return imageFilterSync;
+  }
+
+  let classifierFrame: HTMLIFrameElement | null = null;
+  let openingClassifier: Promise<void> | null = null;
+
+  /**
+   * Start the classifier page if it is not running.
+   *
+   * Chrome's service worker has no DOM, so the page is an offscreen document.
+   * Firefox has no offscreen API, but its background is a page and can hold
+   * the classifier in a frame.
+   */
+  function ensureClassifier(): Promise<void> {
+    openingClassifier ??= (async () => {
+      const url = browser.runtime.getURL(CLASSIFIER_PAGE as never);
+      if (browser.offscreen) {
+        const open = await browser.runtime.getContexts({
+          contextTypes: ["OFFSCREEN_DOCUMENT" as never],
+          documentUrls: [url],
+        });
+        if (open.length > 0) return;
+        await browser.offscreen.createDocument({
+          url,
+          reasons: ["BLOBS" as never],
+          justification:
+            "Decodes images and runs an on-device classifier to hide explicit images.",
+        });
+      } else if (!classifierFrame?.isConnected) {
+        const frame = document.createElement("iframe");
+        frame.src = url;
+        const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+        document.body.appendChild(frame);
+        classifierFrame = frame;
+        await loaded;
+      }
+    })().finally(() => {
+      openingClassifier = null;
+    });
+    return openingClassifier;
+  }
+
+  async function closeClassifier() {
+    classifierFrame?.remove();
+    classifierFrame = null;
+    if (browser.offscreen) await browser.offscreen.closeDocument().catch(() => undefined);
+  }
+
+  async function classifyImage(src: string): Promise<Verdict> {
+    // A tab that has not heard the filter went off yet: nothing to hide.
+    if (!imageFilterOn) return "clear";
+    // The page's listener may not be up the moment the page is, so a refused
+    // first message is retried rather than taken as an answer.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await ensureClassifier();
+        const reply = (await browser.runtime.sendMessage({ type: "classifier-run", src })) as
+          | Extract<MessageReply, { type: "classifier-run" }>
+          | undefined;
+        if (reply?.verdict) return reply.verdict;
+      } catch {
+        /* not listening yet */
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return "error";
+  }
+
   // ─── Allowances ───────────────────────────────────────────────────
 
   async function tickAllowance(source: string) {
@@ -345,6 +474,16 @@ export default defineBackground(() => {
           });
           return false;
         }
+        case "classify-image": {
+          void classifyImage(message.src).then((verdict) =>
+            sendResponse({ type: "classify-image", verdict }),
+          );
+          return true;
+        }
+        // Handled by the classifier page and the content scripts.
+        case "classifier-run":
+        case "image-filter-off":
+          return false;
         case "refresh": {
           void refreshRules().then(() => sendResponse({ type: "refresh", ok: true }));
           return true;
