@@ -274,8 +274,16 @@ export default defineContentScript({
           const payload = src && sourceKind(src) === "url" ? src : toDataUrl(el);
           if (!payload) return false;
           const reply = await send({ type: "image-feedback", src: payload, label });
-          // Do what the user asked straight away, logged or not.
-          el.setAttribute(ATTR, label === "show" ? "clear" : "hidden");
+          // Do what the user asked straight away, logged or not, to every
+          // copy of the image: a pin is often several stacked <img>s.
+          const verdict = label === "show" ? "clear" : "hidden";
+          el.setAttribute(ATTR, verdict);
+          if (src) {
+            for (const other of Array.from(document.querySelectorAll(`[${ATTR}]`))) {
+              const media = other as HTMLImageElement;
+              if ((media.currentSrc || media.src) === src) other.setAttribute(ATTR, verdict);
+            }
+          }
           return reply?.ok === true;
         })
       : () => {};

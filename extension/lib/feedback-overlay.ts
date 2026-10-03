@@ -115,7 +115,8 @@ export function startFeedbackOverlay(
     const el = target;
     void send(el, label).then((ok) => {
       button.className = ok ? "done" : "";
-      button.textContent = ok ? "Logged ✓" : "Failed";
+      // "v2" tells a stale build apart in a report.
+      button.textContent = ok ? "Logged ✓ v2" : "Not logged (v2)";
       setTimeout(() => {
         busy = false;
         hide();
