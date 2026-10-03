@@ -17,47 +17,56 @@ const scores = (s: Partial<Record<string, number>>): Prediction[] =>
 const LEVELS: FilterLevel[] = ["explicit", "balanced", "strict"];
 
 describe("isExplicit", () => {
-  const hiddenAt = (s: Partial<Record<string, number>>) =>
-    LEVELS.filter((level) => isExplicit(scoresOf(scores(s)), level));
+  const hiddenAt = (nsfw: number, s: Partial<Record<string, number>> = {}) =>
+    LEVELS.filter((level) => isExplicit({ nsfw, ...scoresOf(scores(s)) }, level));
 
-  it("hides porn and hentai at every level", () => {
-    expect(hiddenAt({ Porn: 0.9, Neutral: 0.1 })).toEqual(LEVELS);
-    expect(hiddenAt({ Hentai: 0.8, Drawing: 0.2 })).toEqual(LEVELS);
+  it("hides what the ViT is sure of at every level", () => {
+    expect(hiddenAt(0.9)).toEqual(LEVELS);
   });
 
-  it("adds porn and hentai, since the model splits between them", () => {
-    expect(hiddenAt({ Porn: 0.3, Hentai: 0.25, Neutral: 0.45 })).toEqual(LEVELS);
+  it("hides what the ViT is less sure of only at stricter levels", () => {
+    expect(hiddenAt(0.55)).toEqual(["balanced", "strict"]);
+    expect(hiddenAt(0.4)).toEqual(["strict"]);
   });
 
-  it("leaves suggestive pictures to the stricter levels", () => {
-    // A cleavage selfie on a feed.
-    expect(hiddenAt({ Sexy: 0.45, Neutral: 0.55 })).toEqual(["strict"]);
-    expect(hiddenAt({ Sexy: 0.7, Neutral: 0.3 })).toEqual(["balanced", "strict"]);
+  it("shows what both models call safe", () => {
+    expect(hiddenAt(0.06, { Neutral: 0.95 })).toEqual([]);
   });
 
-  it("shows neutral pictures and drawings at every level", () => {
-    expect(hiddenAt({ Neutral: 0.9, Sexy: 0.1 })).toEqual([]);
-    expect(hiddenAt({ Drawing: 0.85, Hentai: 0.1, Neutral: 0.05 })).toEqual([]);
-    expect(hiddenAt({})).toEqual([]);
+  it("lets the ViT overrule NSFWJS's false alarms", () => {
+    // Real scores: an abstract wallpaper NSFWJS called porn.
+    expect(hiddenAt(0.16, { Porn: 0.85, Hentai: 0.03, Sexy: 0.03 })).toEqual([]);
+    expect(hiddenAt(0.06, { Porn: 0.7, Hentai: 0.04, Sexy: 0.03 })).toEqual([]);
+  });
+
+  it("lets NSFWJS's suggestive grade count when the ViT has doubts", () => {
+    // A cleavage selfie: not nude, so the ViT is unsure rather than certain.
+    expect(hiddenAt(0.22, { Sexy: 0.45, Neutral: 0.55 })).toEqual(["strict"]);
+    expect(hiddenAt(0.3, { Sexy: 0.7, Neutral: 0.3 })).toEqual(["balanced", "strict"]);
   });
 
   it("hides at a level everything the level below it hides", () => {
-    for (let p = 0; p <= 1; p += 0.05) {
-      for (let s = 0; s <= 1 - p; s += 0.05) {
-        const hidden = hiddenAt({ Porn: p, Sexy: s });
-        // Once a level hides it, every stricter one does too.
-        const first = hidden[0] ? LEVELS.indexOf(hidden[0]) : LEVELS.length;
-        expect(hidden).toEqual(LEVELS.slice(first));
+    for (let nsfw = 0; nsfw <= 1; nsfw += 0.05) {
+      for (let p = 0; p <= 1; p += 0.1) {
+        for (let s = 0; s <= 1 - p; s += 0.1) {
+          const hidden = hiddenAt(nsfw, { Porn: p, Sexy: s });
+          const first = hidden[0] ? LEVELS.indexOf(hidden[0]) : LEVELS.length;
+          expect(hidden).toEqual(LEVELS.slice(first));
+        }
       }
     }
   });
 });
 
 describe("formatScores", () => {
-  it("is explicit/suggestive to two places", () => {
-    expect(formatScores(scoresOf(scores({ Porn: 0.1, Hentai: 0.05, Sexy: 0.333 })))).toBe(
-      "0.15/0.33",
-    );
+  it("shows every score and where it ran", () => {
+    expect(
+      formatScores({
+        nsfw: 0.123,
+        ...scoresOf(scores({ Porn: 0.1, Hentai: 0.05, Sexy: 0.333 })),
+        backend: "webgl",
+      }),
+    ).toBe("vit 0.12 · explicit 0.15 · suggestive 0.33 · webgl");
   });
 });
 
@@ -105,7 +114,7 @@ describe("sourceKind", () => {
 describe("ScoreCache", () => {
   it("drops the least recently used entry", () => {
     const cache = new ScoreCache(2);
-    const s = { explicit: 0, suggestive: 0 };
+    const s = { nsfw: 0, explicit: 0, suggestive: 0 };
     cache.set("a", s);
     cache.set("b", s);
     cache.get("a");
