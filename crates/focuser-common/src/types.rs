@@ -35,6 +35,11 @@ pub struct BlockList {
     /// Optional shared budget per merged weekly schedule occurrence.
     #[serde(default)]
     pub shared_allowance: Option<crate::allowance::SharedAllowanceConfig>,
+    /// Hide explicit images in the browser while this list is active. The
+    /// extension does the work: it blurs images until a local classifier has
+    /// cleared them. Lists saved before this existed load with it off.
+    #[serde(default)]
+    pub filter_explicit_images: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -56,6 +61,7 @@ impl BlockList {
             schedule_unlocked_until: None,
             breaks: None,
             shared_allowance: None,
+            filter_explicit_images: false,
             created_at: now,
             updated_at: now,
         }

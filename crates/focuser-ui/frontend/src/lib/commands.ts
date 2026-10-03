@@ -340,6 +340,12 @@ export const useConfigureSharedAllowance = () =>
     args: { list_id: a.listId, minutes: a.minutes },
   }));
 
+export const useSetImageFilter = () =>
+  useBlockListMutation<{ listId: string; enabled: boolean }>((a) => ({
+    cmd: "set_image_filter",
+    args: { list_id: a.listId, enabled: a.enabled },
+  }));
+
 export const useRelockScheduledProtection = () =>
   useBlockListMutation<string>((listId) => ({
     cmd: "relock_scheduled_protection",

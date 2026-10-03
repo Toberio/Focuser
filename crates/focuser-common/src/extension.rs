@@ -77,6 +77,11 @@ pub struct ExtensionRuleSet {
     /// exceptions, and scoped matching must tell the two apart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowance_domains: Vec<String>,
+    /// Blur images until the extension's classifier has cleared them. Set when
+    /// any active list asks for it. Left out when off, so an extension that
+    /// predates it sees exactly the payload it always did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub filter_explicit_images: bool,
 }
 
 impl ExtensionRuleSet {
@@ -93,6 +98,7 @@ impl ExtensionRuleSet {
             allowed_wildcards: Vec::new(),
             allowed_url_paths: Vec::new(),
             allowance_domains: Vec::new(),
+            filter_explicit_images: false,
         }
     }
 
@@ -103,6 +109,7 @@ impl ExtensionRuleSet {
             || !self.blocked_wildcards.is_empty()
             || !self.blocked_url_paths.is_empty()
             || self.block_entire_internet
+            || self.filter_explicit_images
     }
 }
 
@@ -231,5 +238,25 @@ impl BlockingCapabilities {
             );
         }
         missing
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_filter_is_only_sent_when_on() {
+        let mut rules = ExtensionRuleSet::empty();
+        let off = serde_json::to_value(&rules).unwrap();
+        assert!(off.get("filter_explicit_images").is_none());
+
+        rules.filter_explicit_images = true;
+        let on = serde_json::to_value(&rules).unwrap();
+        assert_eq!(on["filter_explicit_images"], true);
+
+        // And an app that sends nothing reads back as off.
+        let back: ExtensionRuleSet = serde_json::from_value(off).unwrap();
+        assert!(!back.filter_explicit_images);
     }
 }
