@@ -85,6 +85,10 @@ pub struct BlockList {
     /// classifier has cleared them. Lists saved before this existed load off.
     #[serde(default)]
     pub image_filter: ImageFilter,
+    /// Sites the image filter leaves alone, in canonical host form. Each
+    /// covers its subdomains, like every other domain rule.
+    #[serde(default)]
+    pub image_filter_exceptions: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -107,6 +111,7 @@ impl BlockList {
             breaks: None,
             shared_allowance: None,
             image_filter: ImageFilter::Off,
+            image_filter_exceptions: Vec::new(),
             created_at: now,
             updated_at: now,
         }

@@ -1,8 +1,20 @@
-import { Cpu, EyeOff, HardDriveDownload, Lock, ShieldCheck, TriangleAlert } from "lucide-react";
+import {
+  Cpu,
+  EyeOff,
+  HardDriveDownload,
+  Lock,
+  Plus,
+  ShieldCheck,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { type FormEvent, useState } from "react";
 import type { BlockList, ImageFilter, ImageFilterStatus } from "@/bindings";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, EmptyState, PageHeader } from "@/components/ui/card";
 import { InlineError, QueryState } from "@/components/ui/feedback";
+import { Input } from "@/components/ui/input";
 import { Page } from "@/components/ui/page";
 import { Progress } from "@/components/ui/progress";
 import { Select } from "@/components/ui/select";
@@ -11,6 +23,7 @@ import {
   useImageFilterStatus,
   useProtectionStatus,
   useSetImageFilter,
+  useSetImageFilterExceptions,
 } from "@/lib/commands";
 import { m } from "@/paraglide/messages.js";
 
@@ -164,30 +177,106 @@ function ListLevel({ list, locked }: { list: BlockList; locked: boolean }) {
   }));
 
   return (
-    <div className="flex items-center justify-between gap-6 px-5 py-4">
-      <div className="min-w-0">
-        <p className="flex items-center gap-2 font-medium text-foreground text-sm">
-          <span className="truncate">{list.name}</span>
-          {locked && (
-            <Badge tone="warning" icon={<Lock aria-hidden />} outlined>
-              {m.images_list_locked()}
-            </Badge>
-          )}
-          {!list.enabled && <Badge tone="neutral">{m.lists_badge_off()}</Badge>}
-        </p>
-        <p className="mt-1 text-muted-foreground text-xs">
-          {locked && level !== "off" ? m.images_list_locked_hint() : levelLabel(level).hint}
-        </p>
-        <InlineError error={set.error} />
+    <div className="px-5 py-4">
+      <div className="flex items-center justify-between gap-6">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 font-medium text-foreground text-sm">
+            <span className="truncate">{list.name}</span>
+            {locked && (
+              <Badge tone="warning" icon={<Lock aria-hidden />} outlined>
+                {m.images_list_locked()}
+              </Badge>
+            )}
+            {!list.enabled && <Badge tone="neutral">{m.lists_badge_off()}</Badge>}
+          </p>
+          <p className="mt-1 text-muted-foreground text-xs">
+            {locked && level !== "off" ? m.images_list_locked_hint() : levelLabel(level).hint}
+          </p>
+          <InlineError error={set.error} />
+        </div>
+        <Select
+          value={level}
+          onValueChange={(next) => set.mutate({ listId: list.id, level: next })}
+          options={options}
+          disabled={set.isPending}
+          aria-label={m.images_level_label({ name: list.name })}
+          className="w-44 shrink-0"
+        />
       </div>
-      <Select
-        value={level}
-        onValueChange={(next) => set.mutate({ listId: list.id, level: next })}
-        options={options}
-        disabled={set.isPending}
-        aria-label={m.images_level_label({ name: list.name })}
-        className="w-44 shrink-0"
-      />
+      {level !== "off" && <SkippedSites list={list} locked={locked} />}
+    </div>
+  );
+}
+
+/**
+ * The sites one list's filter leaves alone. A lock may only tighten, so a
+ * locked list can drop a site but not add one; the add form is left out
+ * rather than offered and refused.
+ */
+function SkippedSites({ list, locked }: { list: BlockList; locked: boolean }) {
+  const save = useSetImageFilterExceptions();
+  const [value, setValue] = useState("");
+  const sites = list.image_filter_exceptions ?? [];
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    const site = value.trim();
+    if (!site) return;
+    save.mutate({ listId: list.id, sites: [...sites, site] }, { onSuccess: () => setValue("") });
+  }
+
+  return (
+    <div className="mt-3 border-border border-t pt-3">
+      <p className="font-medium text-foreground text-xs">{m.images_skipped_title()}</p>
+      {sites.length === 0 ? (
+        <p className="mt-1 text-muted-foreground text-xs">{m.images_skipped_none()}</p>
+      ) : (
+        <ul className="mt-2 flex flex-wrap gap-2">
+          {sites.map((site) => (
+            <li
+              key={site}
+              className="flex items-center gap-1 rounded-md border border-border bg-surface py-0.5 pr-0.5 pl-2 text-foreground text-xs"
+            >
+              {site}
+              <button
+                type="button"
+                onClick={() =>
+                  save.mutate({ listId: list.id, sites: sites.filter((s) => s !== site) })
+                }
+                disabled={save.isPending}
+                aria-label={m.images_skipped_remove({ site })}
+                className="rounded p-0.5 text-muted-foreground hover:bg-hover hover:text-foreground disabled:opacity-50 [&_svg]:size-3.5"
+              >
+                <X aria-hidden />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {locked ? (
+        <p className="mt-2 text-muted-foreground text-xs">{m.images_skipped_locked_hint()}</p>
+      ) : (
+        <form onSubmit={submit} className="mt-2 flex gap-2">
+          <Input
+            size="sm"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="youtube.com"
+            aria-label={m.images_skipped_add_label({ name: list.name })}
+            className="max-w-xs"
+          />
+          <Button
+            type="submit"
+            size="sm"
+            variant="outline"
+            icon={<Plus />}
+            disabled={!value.trim() || save.isPending}
+          >
+            {m.images_skipped_add()}
+          </Button>
+        </form>
+      )}
+      <InlineError error={save.error} />
     </div>
   );
 }

@@ -200,6 +200,12 @@ pub enum Command {
         list_id: EntityId,
         level: focuser_common::types::ImageFilter,
     },
+    /// Replace the sites one list's image filter leaves alone. Dropping a
+    /// site is always allowed; adding one is refused while the list is locked.
+    SetImageFilterExceptions {
+        list_id: EntityId,
+        sites: Vec<String>,
+    },
     GetProtectionStatus,
     /// Issue a fresh random-text challenge for a protected list. Only valid
     /// on a list whose lock is [`focuser_common::types::Lock::RandomText`].

@@ -4,7 +4,7 @@
 //! variant without handling it here is a compile error.
 
 use focuser_common::allowance::Allowance;
-use focuser_common::host::canonical_host;
+use focuser_common::host::{any_host_matches, canonical_host};
 use focuser_common::types::{
     AppRule, BlockList, EntityId, ExceptionRule, Lock, Protection, Schedule, WebsiteMatchType,
     WebsiteRule,
@@ -62,6 +62,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             list.shared_allowance = stored.shared_allowance;
             // Owned by `SetImageFilter`, which knows a lock may only tighten.
             list.image_filter = stored.image_filter;
+            list.image_filter_exceptions = stored.image_filter_exceptions;
             list.reconcile_schedule_bypass();
 
             engine.db().update_block_list(&list)?;
@@ -405,6 +406,29 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 ensure_unprotected(&engine, list_id)?;
             }
             list.image_filter = level;
+            list.updated_at = chrono::Utc::now();
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            Ok(CommandResult::Unit)
+        }
+        Command::SetImageFilterExceptions { list_id, sites } => {
+            let mut list = engine.db().get_block_list(list_id)?;
+            let mut sites: Vec<String> = sites
+                .iter()
+                .map(|s| canonical_host(s))
+                .filter(|s| !s.is_empty())
+                .collect();
+            sites.sort();
+            sites.dedup();
+            // An exception shows images the filter would hide, so a new one
+            // loosens the list. Dropping one only tightens it.
+            if !sites
+                .iter()
+                .all(|s| any_host_matches(&list.image_filter_exceptions, s))
+            {
+                ensure_unprotected(&engine, list_id)?;
+            }
+            list.image_filter_exceptions = sites;
             list.updated_at = chrono::Utc::now();
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
@@ -3203,6 +3227,48 @@ mod tests {
     }
 
     #[test]
+    fn a_lock_lets_image_filter_exceptions_shrink_but_not_grow() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        let set = |sites: &[&str]| Command::SetImageFilterExceptions {
+            list_id: list.id,
+            sites: sites.iter().map(|s| s.to_string()).collect(),
+        };
+
+        execute(
+            &ctx,
+            set(&[
+                "https://www.YouTube.com/feed",
+                "netflix.com",
+                "",
+                "youtube.com",
+            ]),
+        )
+        .unwrap();
+        // Stored the way every domain rule is: canonical, sorted, once each.
+        assert_eq!(
+            lists(&ctx)[0].image_filter_exceptions,
+            vec!["netflix.com", "youtube.com"]
+        );
+
+        protect(&ctx, list.id).unwrap();
+        // Narrowing or dropping an exception filters more, not less.
+        execute(&ctx, set(&["m.youtube.com"])).unwrap();
+        assert_eq!(
+            lists(&ctx)[0].image_filter_exceptions,
+            vec!["m.youtube.com"]
+        );
+        // A new site, or a wider one, would show images the lock was hiding.
+        for looser in [&["m.youtube.com", "netflix.com"][..], &["youtube.com"][..]] {
+            assert_eq!(execute(&ctx, set(looser)).unwrap_err().code(), "protected");
+        }
+        assert_eq!(
+            lists(&ctx)[0].image_filter_exceptions,
+            vec!["m.youtube.com"]
+        );
+    }
+
+    #[test]
     fn update_block_list_leaves_the_image_filter_alone() {
         let ctx = ctx();
         let list = create(&ctx, "Images");
@@ -3218,6 +3284,7 @@ mod tests {
         // A stale copy from before the filter went on must not switch it off.
         let mut stale = lists(&ctx)[0].clone();
         stale.image_filter = focuser_common::types::ImageFilter::Off;
+        stale.image_filter_exceptions = vec!["example.com".into()];
         stale.name = "Renamed".into();
         execute(
             &ctx,
@@ -3233,6 +3300,7 @@ mod tests {
             stored.image_filter,
             focuser_common::types::ImageFilter::Strict
         );
+        assert!(stored.image_filter_exceptions.is_empty());
     }
 
     #[test]

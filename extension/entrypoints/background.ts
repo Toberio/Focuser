@@ -22,15 +22,23 @@ import {
 import {
   type BlockMatch,
   type CompiledRules,
+  canonicalSet,
   compile,
   EMPTY_RULES,
   isInternalUrl,
   match,
   ruleCount,
   type RuleSet,
+  setCovers,
   trackingKey,
 } from "@/lib/rules";
-import { type FilterLevel, type Judgement, MAX_CACHE_KEY, VerdictCache } from "@/lib/image-filter";
+import {
+  type FilterLevel,
+  type Judgement,
+  MAX_CACHE_KEY,
+  skipPatterns,
+  VerdictCache,
+} from "@/lib/image-filter";
 import type { BlockContext, Message, MessageReply } from "@/lib/messages";
 import { isTappable, MAX_IMAGE_BYTES, ResponseTap } from "@/lib/response-tap";
 import { SharedActivity } from "@/lib/shared-activity";
@@ -132,7 +140,7 @@ export default defineBackground(() => {
       rawRules = next;
       rules = compile(next);
       await enforceOnOpenTabs();
-      await syncImageFilter(next.image_filter ?? null);
+      await syncImageFilter(next.image_filter ?? null, next.image_filter_exceptions ?? []);
     }
     if (connected !== wasConnected) updateBadge();
     else if (connected) updateBadge();
@@ -250,7 +258,19 @@ export default defineBackground(() => {
   // ─── Image filter ─────────────────────────────────────────────────
 
   let imageFilter: FilterLevel | null = null;
+  /** Sites the filter leaves alone, canonical. */
+  let imageFilterSkip = new Set<string>();
   let imageFilterSync: Promise<void> = Promise.resolve();
+
+  /** Whether a page or frame at this URL is one the filter leaves alone. */
+  function skipsImages(url: string | undefined): boolean {
+    if (!url) return false;
+    try {
+      return setCovers(imageFilterSkip, new URL(url).hostname);
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Match the registered content script to what the app asks for.
@@ -258,9 +278,12 @@ export default defineBackground(() => {
    * Checked against the browser rather than a flag of ours: a Chrome service
    * worker restarts with its variables reset, but the registration survives.
    */
-  function syncImageFilter(level: FilterLevel | null): Promise<void> {
+  function syncImageFilter(level: FilterLevel | null, skip: string[]): Promise<void> {
     const previous = imageFilter;
+    const previousSkip = imageFilterSkip;
     imageFilter = level;
+    imageFilterSkip = canonicalSet(skip);
+    const skipChanged = [...imageFilterSkip].sort().join() !== [...previousSkip].sort().join();
     const on = level !== null;
     setTapping(on);
     imageFilterSync = imageFilterSync.then(async () => {
@@ -270,12 +293,13 @@ export default defineBackground(() => {
         });
         // Load the model before the first page asks, not when it does.
         const tabs = await browser.tabs.query({});
-        if (on === registered.length > 0) {
+        const wasOn = registered.length > 0;
+        if (on && wasOn && !skipChanged) {
           // Still on, at another level: what was cleared may not be now.
-          if (on && previous !== null && previous !== level) {
+          if (previous !== null && previous !== level) {
             verdicts.clear();
             for (const tab of tabs) {
-              if (tab.id === undefined) continue;
+              if (tab.id === undefined || skipsImages(tab.url)) continue;
               browser.tabs
                 .sendMessage(tab.id, { type: "image-filter-rejudge" })
                 .catch(() => undefined);
@@ -283,13 +307,19 @@ export default defineBackground(() => {
           }
           return;
         }
+        if (!on && !wasOn) return;
 
         if (on) {
+          // A changed skip list means a new registration: re-registering is
+          // the one way to set `excludeMatches` that every browser supports.
+          if (wasOn) await browser.scripting.unregisterContentScripts({ ids: [IMAGE_FILTER_ID] });
+          const excludeMatches = skipPatterns([...imageFilterSkip]);
           await browser.scripting.registerContentScripts([
             {
               id: IMAGE_FILTER_ID,
               js: [IMAGE_FILTER_SCRIPT],
               matches: ["<all_urls>"],
+              ...(excludeMatches.length > 0 ? { excludeMatches } : {}),
               runAt: "document_start",
               allFrames: true,
               // Off until the app says otherwise after a restart, like every
@@ -298,12 +328,17 @@ export default defineBackground(() => {
             },
           ]);
           // Pages already open get it too, or switching it on would do nothing
-          // until every tab was reloaded.
+          // until every tab was reloaded. A page on a newly skipped site is
+          // told to stop instead. The script ignores a second injection.
           for (const tab of tabs) {
             if (tab.id === undefined) continue;
-            browser.scripting
-              .executeScript({ target: { tabId: tab.id, allFrames: true }, files: [IMAGE_FILTER_SCRIPT] })
-              .catch(() => undefined);
+            if (skipsImages(tab.url)) {
+              browser.tabs.sendMessage(tab.id, { type: "image-filter-off" }).catch(() => undefined);
+            } else {
+              browser.scripting
+                .executeScript({ target: { tabId: tab.id, allFrames: true }, files: [IMAGE_FILTER_SCRIPT] })
+                .catch(() => undefined);
+            }
           }
         } else {
           await browser.scripting.unregisterContentScripts({ ids: [IMAGE_FILTER_ID] });
@@ -412,10 +447,11 @@ export default defineBackground(() => {
     }
   }
 
-  async function classifyImage(src: string): Promise<Judgement> {
-    // A tab that has not heard the filter went off yet: nothing to hide.
+  async function classifyImage(src: string, frameUrl?: string): Promise<Judgement> {
+    // A tab that has not heard the filter went off yet, or a frame on a
+    // skipped site that an open-tab injection reached: nothing to hide.
     const level = imageFilter;
-    if (level === null) return { verdict: "clear" };
+    if (level === null || skipsImages(frameUrl)) return { verdict: "clear" };
     const key = `${level}|${src}`;
     const cacheable = src.length <= MAX_CACHE_KEY;
     const known = cacheable ? verdicts.get(key) : undefined;
@@ -539,7 +575,7 @@ export default defineBackground(() => {
           return false;
         }
         case "classify-image": {
-          void classifyImage(message.src).then((judgement) =>
+          void classifyImage(message.src, sender.url).then((judgement) =>
             sendResponse({ type: "classify-image", ...judgement }),
           );
           return true;

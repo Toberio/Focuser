@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MIN_SIDE, sourceKind, VerdictCache, worthChecking } from "./image-filter";
+import { MIN_SIDE, skipPatterns, sourceKind, VerdictCache, worthChecking } from "./image-filter";
 
 describe("worthChecking", () => {
   const big = { width: 800, height: 600 };
@@ -58,5 +58,21 @@ describe("VerdictCache", () => {
     const cache = new VerdictCache();
     cache.set("a", { verdict: "error" });
     expect(cache.get("a")).toBeUndefined();
+  });
+});
+
+describe("skipPatterns", () => {
+  it("covers each site and its subdomains, however it was typed", () => {
+    expect(skipPatterns(["https://www.YouTube.com/feed", "netflix.com", "youtube.com"])).toEqual([
+      "*://netflix.com/*",
+      "*://*.netflix.com/*",
+      "*://youtube.com/*",
+      "*://*.youtube.com/*",
+    ]);
+  });
+
+  it("is empty when nothing is skipped", () => {
+    expect(skipPatterns(undefined)).toEqual([]);
+    expect(skipPatterns(["", "  "])).toEqual([]);
   });
 });

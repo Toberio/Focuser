@@ -43,6 +43,7 @@ const ALLOWED = new Set([
   // would invite a rule that matches nothing.
   "reddit.com",
   "docs.example.com",
+  "youtube.com",
   "casino",
   "*.reddit.com",
   "/r/gaming",

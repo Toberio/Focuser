@@ -24,6 +24,8 @@
  */
 export type Verdict = "clear" | "hidden" | "error";
 
+import { canonicalHost } from "./rules";
+
 /** How strict the filter is, as the desktop app sends it. Off is never sent. */
 export type FilterLevel = "explicit" | "balanced" | "strict";
 
@@ -124,3 +126,13 @@ export class VerdictCache {
 
 /** Data URLs can be megabytes. Past this a key costs more than a re-check. */
 export const MAX_CACHE_KEY = 2_048;
+
+/**
+ * The `excludeMatches` that keep the content script off the sites the filter
+ * skips. A match pattern's `*.` does not cover the bare domain, so each site
+ * needs both forms.
+ */
+export function skipPatterns(sites: string[] | undefined): string[] {
+  const hosts = new Set((sites ?? []).map(canonicalHost).filter((h) => h && !h.includes("*")));
+  return [...hosts].sort().flatMap((h) => [`*://${h}/*`, `*://*.${h}/*`]);
+}

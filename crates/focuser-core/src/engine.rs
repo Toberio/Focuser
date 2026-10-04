@@ -1,6 +1,6 @@
 use focuser_common::error::Result;
 use focuser_common::extension::ExtensionRuleSet;
-use focuser_common::host::hosts_entries;
+use focuser_common::host::{any_host_matches, hosts_entries};
 use focuser_common::ipc::ProtectionInfo;
 use focuser_common::types::{BlockList, EntityId, ExceptionType, WebsiteMatchType};
 use tracing::{debug, info, warn};
@@ -142,6 +142,7 @@ impl BlockEngine {
         extra_allowed_domains: &[String],
     ) -> ExtensionRuleSet {
         let mut rules = ExtensionRuleSet::empty();
+        let mut filtering: Vec<&BlockList> = Vec::new();
 
         for list in &self.cached_lists {
             if !list.is_effectively_active() {
@@ -149,6 +150,9 @@ impl BlockEngine {
             }
 
             rules.image_filter = rules.image_filter.max(list.image_filter);
+            if !list.image_filter.is_off() {
+                filtering.push(list);
+            }
 
             // Compile website rules by type
             for rule in &list.websites {
@@ -220,6 +224,7 @@ impl BlockEngine {
         rules.allowed_wildcards.dedup();
         rules.allowed_url_paths.sort();
         rules.allowed_url_paths.dedup();
+        rules.image_filter_exceptions = image_filter_exceptions(&filtering);
 
         // Scopes are added only while a shared occurrence is running. The flat
         // fields above stay as they always were, exceptions included, because an
@@ -292,6 +297,7 @@ impl BlockEngine {
         rules.allowed_url_paths.hash(&mut hasher);
         rules.allowance_domains.hash(&mut hasher);
         rules.image_filter.hash(&mut hasher);
+        rules.image_filter_exceptions.hash(&mut hasher);
         serde_json::to_string(&rules.scopes)
             .unwrap_or_default()
             .hash(&mut hasher);
@@ -385,6 +391,26 @@ fn upgrade_exceptions(db: &Database) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The sites the image filter skips: those every list that has it on exempts.
+///
+/// One list exempting a site cannot open it up while another, perhaps locked,
+/// still filters it. Coverage counts, not spelling: `m.youtube.com` stays
+/// exempt when one list names it and another names `youtube.com`.
+fn image_filter_exceptions(filtering: &[&BlockList]) -> Vec<String> {
+    let mut exempt: Vec<String> = filtering
+        .iter()
+        .flat_map(|list| list.image_filter_exceptions.iter().cloned())
+        .filter(|site| {
+            filtering
+                .iter()
+                .all(|list| any_host_matches(&list.image_filter_exceptions, site))
+        })
+        .collect();
+    exempt.sort();
+    exempt.dedup();
+    exempt
 }
 
 /// A list with no time slots is always on, not scheduled.
@@ -538,6 +564,34 @@ mod tests {
             engine.compile_extension_rules().image_filter,
             ImageFilter::Explicit
         );
+    }
+
+    #[test]
+    fn image_filter_skips_only_what_every_filtering_list_exempts() {
+        use focuser_common::types::ImageFilter;
+
+        let db = Database::open_in_memory().unwrap();
+        let mut relaxed = BlockList::new("Relaxed");
+        relaxed.image_filter = ImageFilter::Explicit;
+        relaxed.image_filter_exceptions = vec!["youtube.com".into(), "netflix.com".into()];
+        db.create_block_list(&relaxed).unwrap();
+        let mut strict = BlockList::new("Strict");
+        strict.image_filter = ImageFilter::Strict;
+        strict.image_filter_exceptions = vec!["m.youtube.com".into()];
+        db.create_block_list(&strict).unwrap();
+        // Has the filter off, so it has no say in what is exempt.
+        db.create_block_list(&BlockList::new("No filter")).unwrap();
+        let mut engine = BlockEngine::new(db).unwrap();
+
+        let rules = engine.compile_extension_rules();
+        assert_eq!(rules.image_filter_exceptions, vec!["m.youtube.com"]);
+
+        strict.image_filter_exceptions = vec!["youtube.com".into()];
+        engine.db().update_block_list(&strict).unwrap();
+        engine.refresh().unwrap();
+        let widened = engine.compile_extension_rules();
+        assert_eq!(widened.image_filter_exceptions, vec!["youtube.com"]);
+        assert_ne!(rules.version, widened.version);
     }
 
     #[test]

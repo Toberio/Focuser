@@ -27,6 +27,8 @@ export interface RuleSet {
   domain_categories?: Record<string, string>;
   /** Blur images until the classifier clears them, this strictly. Absent means off. */
   image_filter?: FilterLevel;
+  /** Sites the image filter leaves alone. Each covers its subdomains. */
+  image_filter_exceptions?: string[];
   version?: number;
 }
 

@@ -124,6 +124,11 @@ export type BlockList = {
 	 *  classifier has cleared them. Lists saved before this existed load off.
 	 */
 	image_filter?: ImageFilter,
+	/**
+	 *  Sites the image filter leaves alone, in canonical host form. Each
+	 *  covers its subdomains, like every other domain rule.
+	 */
+	image_filter_exceptions?: string[],
 	created_at: string,
 	updated_at: string,
 };
@@ -333,6 +338,14 @@ export type Command =
 { cmd: "set_image_filter"; args: {
 	list_id: string,
 	level: ImageFilter,
+} } | 
+/**
+ *  Replace the sites one list's image filter leaves alone. Dropping a
+ *  site is always allowed; adding one is refused while the list is locked.
+ */
+{ cmd: "set_image_filter_exceptions"; args: {
+	list_id: string,
+	sites: string[],
 } } | { cmd: "get_protection_status" } | 
 /**
  *  Issue a fresh random-text challenge for a protected list. Only valid

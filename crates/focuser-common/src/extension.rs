@@ -84,6 +84,10 @@ pub struct ExtensionRuleSet {
     /// extension that predates it sees exactly the payload it always did.
     #[serde(default, skip_serializing_if = "ImageFilter::is_off")]
     pub image_filter: ImageFilter,
+    /// Sites the image filter leaves alone: those every active list with the
+    /// filter on exempts. Left out when empty, like `image_filter`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_filter_exceptions: Vec<String>,
 }
 
 impl ExtensionRuleSet {
@@ -101,6 +105,7 @@ impl ExtensionRuleSet {
             allowed_url_paths: Vec::new(),
             allowance_domains: Vec::new(),
             image_filter: ImageFilter::Off,
+            image_filter_exceptions: Vec::new(),
         }
     }
 

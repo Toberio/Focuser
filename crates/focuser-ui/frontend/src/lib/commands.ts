@@ -357,6 +357,12 @@ export const useSetImageFilter = () =>
     args: { list_id: a.listId, level: a.level },
   }));
 
+export const useSetImageFilterExceptions = () =>
+  useBlockListMutation<{ listId: string; sites: string[] }>((a) => ({
+    cmd: "set_image_filter_exceptions",
+    args: { list_id: a.listId, sites: a.sites },
+  }));
+
 export const useRelockScheduledProtection = () =>
   useBlockListMutation<string>((listId) => ({
     cmd: "relock_scheduled_protection",
