@@ -20,13 +20,29 @@ pub struct Database {
 /// `image_filter`. Read as off, it would silently switch the filter off on a
 /// locked list, so it is read as the strictest level instead. Local to this
 /// fork: upstream never had the old field.
+///
+/// A list that was filtering images before sites could be skipped starts out
+/// skipping YouTube and Netflix, whose thumbnails it was blurring for no
+/// reason. Once the list is saved again the field is stored and this no
+/// longer applies. Also local.
 fn parse_block_list(json: &str) -> Result<BlockList> {
     let mut value: serde_json::Value = serde_json::from_str(json)?;
-    if let Some(object) = value.as_object_mut()
-        && object.remove("filter_explicit_images") == Some(serde_json::Value::Bool(true))
-        && !object.contains_key("image_filter")
-    {
-        object.insert("image_filter".into(), "strict".into());
+    if let Some(object) = value.as_object_mut() {
+        if object.remove("filter_explicit_images") == Some(serde_json::Value::Bool(true))
+            && !object.contains_key("image_filter")
+        {
+            object.insert("image_filter".into(), "strict".into());
+        }
+        let filtering = object
+            .get("image_filter")
+            .and_then(|v| v.as_str())
+            .is_some_and(|level| level != "off");
+        if filtering && !object.contains_key("image_filter_exceptions") {
+            object.insert(
+                "image_filter_exceptions".into(),
+                serde_json::json!(["netflix.com", "youtube.com"]),
+            );
+        }
     }
     Ok(serde_json::from_value(value)?)
 }
@@ -595,6 +611,54 @@ mod tests {
             db.list_block_lists().unwrap()[0].image_filter,
             focuser_common::types::ImageFilter::Strict
         );
+    }
+
+    #[test]
+    fn a_list_filtering_before_skips_existed_skips_youtube_and_netflix() {
+        let db = Database::open_in_memory().unwrap();
+        let mut filtering = BlockList::new("Filtering");
+        filtering.image_filter = focuser_common::types::ImageFilter::Strict;
+        db.create_block_list(&filtering).unwrap();
+        db.create_block_list(&BlockList::new("Not filtering"))
+            .unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let rows: Vec<(String, String)> = conn
+                .prepare("SELECT id, data FROM block_lists")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            for (id, json) in rows {
+                let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("image_filter_exceptions");
+                conn.execute(
+                    "UPDATE block_lists SET data = ?1 WHERE id = ?2",
+                    [value.to_string(), id],
+                )
+                .unwrap();
+            }
+        }
+        let read = |name: &str| {
+            db.list_block_lists()
+                .unwrap()
+                .into_iter()
+                .find(|l| l.name == name)
+                .unwrap()
+                .image_filter_exceptions
+        };
+        assert_eq!(read("Filtering"), vec!["netflix.com", "youtube.com"]);
+        assert!(read("Not filtering").is_empty());
+
+        // Once stored, an emptied list stays empty.
+        let mut emptied = db.get_block_list(filtering.id).unwrap();
+        emptied.image_filter_exceptions.clear();
+        db.update_block_list(&emptied).unwrap();
+        assert!(read("Filtering").is_empty());
     }
 
     #[test]
