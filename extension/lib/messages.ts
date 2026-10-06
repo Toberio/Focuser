@@ -29,7 +29,10 @@ export type Message =
   | { type: "open-app" }
   // From the image filter to the background. `src` is a URL the classifier
   // can fetch, or a data URL the content script copied out of the page.
-  | { type: "classify-image"; src: string }
+  // `urgent`: the image is on screen now, not just near it, so its download
+  // goes ahead of those merely looked ahead to. `prefix`: judge only this
+  // many bytes from the start of the file (a GIF's first frames).
+  | { type: "classify-image"; src: string; urgent?: boolean; prefix?: number }
   // Debug builds: the user says this image was judged wrongly.
   | { type: "image-feedback"; src: string; label: "show" | "hide" }
   // From the background to open tabs, when the last list using it goes off.

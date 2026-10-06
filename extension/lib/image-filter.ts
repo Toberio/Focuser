@@ -33,6 +33,10 @@ export type FilterLevel = "explicit" | "balanced" | "strict";
 export interface Judgement {
   verdict: Verdict;
   score?: string;
+  /** Frames the app judged, each a look; absent from an older app, so one. */
+  frames?: number;
+  /** The whole file was judged, not just the start of it. */
+  complete?: boolean;
 }
 
 /**
@@ -89,6 +93,48 @@ export function sourceKind(src: string): "url" | "pixels" | "skip" {
 export const COPY_SIZE = 384;
 
 /**
+ * The images in a computed `background-image`: every `url(...)` layer that
+ * can be fetched. Gradients and other generated layers are left out.
+ */
+export function backgroundUrls(css: string): string[] {
+  if (!css.includes("url(")) return [];
+  return [...css.matchAll(/url\(\s*(["']?)(.*?)\1\s*\)/g)]
+    .map((m) => (m[2] ?? "").replace(/\\(.)/g, "$1"))
+    .filter((u) => sourceKind(u) === "url");
+}
+
+/**
+ * Whether a source is a GIF, by its URL. GIFs are treated like videos: an
+ * animation may turn explicit after its first frame, and Reddit galleries
+ * are full of multi-megabyte ones that took seconds to judge while they
+ * played unblurred. So they stay blurred until two frames pass, and are
+ * judged from the start of the file, not all of it.
+ */
+export function isGif(src: string): boolean {
+  if (!/^https?:/i.test(src)) return false;
+  try {
+    return new URL(src).pathname.toLowerCase().endsWith(".gif");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A GIF's first look: this much of its start, enough for a few frames. The
+ * app judges the first frame and the last it could decode, two looks, so a
+ * clean GIF is shown after one small download. A whole GIF could be twenty
+ * megabytes, fetched again alongside the page's own download.
+ */
+export const GIF_FIRST_BYTES = 512 * 1024;
+
+/**
+ * A GIF's second look, taken after it is shown and at low priority: a frame
+ * a second through its first seconds. An explicit one hides it again, as a
+ * later frame does a video.
+ */
+export const GIF_LATER_BYTES = 6 * 1024 * 1024;
+
+/**
  * Whether the app can decode these bytes itself: JPEG, PNG, GIF, WebP or BMP,
  * by their first bytes. Anything else (AVIF above all, which some image hosts
  * serve to every browser that accepts it) the browser decodes and sends on as
@@ -132,6 +178,20 @@ export const VIDEO_FAILED_LOOKS = 2;
 
 export function newVideoWatch(): VideoWatch {
   return { state: "pending", clearLooks: 0, failedLooks: 0 };
+}
+
+/**
+ * What one answer from the app adds: a look for each frame it judged. A
+ * file judged whole has had every look it will get, so it counts as enough.
+ */
+export function afterLooks(watch: VideoWatch, judgement: Judgement): VideoWatch {
+  if (judgement.verdict !== "clear") return afterVideoLook(watch, judgement.verdict);
+  const looks = judgement.complete
+    ? Math.max(VIDEO_CLEAR_LOOKS, judgement.frames ?? 1)
+    : Math.max(1, judgement.frames ?? 1);
+  let next = watch;
+  for (let i = 0; i < looks; i++) next = afterVideoLook(next, "clear");
+  return next;
 }
 
 /** One more look at a video. Any explicit frame hides it for good. */

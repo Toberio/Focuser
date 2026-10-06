@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  afterLooks,
+  backgroundUrls,
   afterVideoLook,
   appDecodes,
+  isGif,
   MIN_SIDE,
   newVideoWatch,
   skipPatterns,
@@ -132,5 +135,69 @@ describe("appDecodes", () => {
     expect(appDecodes(bytes(0, 0, 0, 0x1c, "ftypavif", 0, 0, 0, 0))).toBe(false);
     expect(appDecodes(bytes("RIFF", 0, 0, 0, 0, "WAVE"))).toBe(false);
     expect(appDecodes(new Uint8Array())).toBe(false);
+  });
+});
+
+describe("isGif", () => {
+  it("knows a GIF by its path, whatever the query says", () => {
+    expect(isGif("https://images.example.test/a1b2c3.gif")).toBe(true);
+    expect(isGif("https://preview.example.test/cat-video-v0-a1b2c3.GIF?width=640&s=abc")).toBe(true);
+  });
+
+  it("leaves other images, and sources it cannot fetch, alone", () => {
+    expect(isGif("https://images.example.test/d4e5f6.png")).toBe(false);
+    expect(isGif("https://example.com/gif-of-the-day.jpg")).toBe(false);
+    expect(isGif("data:image/gif;base64,R0lGOD")).toBe(false);
+    expect(isGif("blob:https://www.reddit.com/1234")).toBe(false);
+  });
+});
+
+describe("afterLooks", () => {
+  const after = (...answers: Parameters<typeof afterLooks>[1][]) =>
+    answers.reduce(afterLooks, newVideoWatch()).state;
+
+  it("shows a GIF whose first and last frames of its start both pass", () => {
+    expect(after({ verdict: "clear", frames: 2 })).toBe("clear");
+  });
+
+  it("waits for a second look when only one frame was judged", () => {
+    expect(after({ verdict: "clear", frames: 1 })).toBe("pending");
+    expect(after({ verdict: "clear" })).toBe("pending");
+    expect(after({ verdict: "clear", frames: 1 }, { verdict: "clear", frames: 3 })).toBe("clear");
+  });
+
+  it("shows a GIF judged whole, however few frames it has", () => {
+    expect(after({ verdict: "clear", frames: 1, complete: true })).toBe("clear");
+  });
+
+  it("hides it on any explicit answer, before or after it was shown", () => {
+    expect(after({ verdict: "hidden", frames: 2 })).toBe("hidden");
+    expect(after({ verdict: "clear", frames: 2 }, { verdict: "hidden", frames: 4 })).toBe("hidden");
+  });
+
+  it("fails open on two answers that could not be had", () => {
+    expect(after({ verdict: "error" }, { verdict: "error" })).toBe("clear");
+  });
+});
+
+describe("backgroundUrls", () => {
+  it("finds the image in a computed background, quoted or not", () => {
+    expect(backgroundUrls('url("https://images.example.test/card.gif")')).toEqual([
+      "https://images.example.test/card.gif",
+    ]);
+    expect(backgroundUrls("url(https://example.com/a.jpg)")).toEqual(["https://example.com/a.jpg"]);
+  });
+
+  it("takes every image layer and skips the generated ones", () => {
+    expect(
+      backgroundUrls('linear-gradient(red, blue), url("https://a.test/1.png"), url("https://a.test/2.jpg")'),
+    ).toEqual(["https://a.test/1.png", "https://a.test/2.jpg"]);
+    expect(backgroundUrls("none")).toEqual([]);
+    expect(backgroundUrls("linear-gradient(red, blue)")).toEqual([]);
+  });
+
+  it("leaves out drawings and what cannot be fetched", () => {
+    expect(backgroundUrls('url("https://a.test/icon.svg")')).toEqual([]);
+    expect(backgroundUrls('url("data:image/png;base64,AAAA")')).toEqual([]);
   });
 });

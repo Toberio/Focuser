@@ -63,9 +63,9 @@ export async function imageVerdict(bytes: ArrayBuffer): Promise<Judgement> {
       body: bytes,
     });
     if (!response.ok) return { verdict: "error" };
-    const reply = (await response.json()) as { verdict?: string; score?: string };
+    const reply = (await response.json()) as { verdict?: string; score?: string; frames?: number };
     const verdict = reply.verdict === "hidden" || reply.verdict === "clear" ? reply.verdict : "error";
-    return { verdict, score: reply.score };
+    return { verdict, score: reply.score, frames: reply.frames };
   } catch {
     return { verdict: "error" };
   }

@@ -1,7 +1,13 @@
 import {
   afterVideoLook,
   COPY_SIZE,
+  afterLooks,
+  backgroundUrls,
+  GIF_FIRST_BYTES,
+  GIF_LATER_BYTES,
+  isGif,
   type Judgement,
+  MIN_SIDE,
   newVideoWatch,
   sourceKind,
   type VideoWatch,
@@ -34,7 +40,8 @@ const FEEDBACK = (import.meta.env as Record<string, unknown>).WXT_IMAGE_FILTER_D
  * hidden and are shown only after two clear looks (see `VideoWatch`): sites
  * swap a video's source or element as it starts playing, and showing it until
  * judged let it play unfiltered each time. A video found explicit stays
- * hidden until its source changes.
+ * hidden until its source changes. GIFs, judged as files, are treated like
+ * videos in one way: they too stay blurred until their verdict is in.
  *
  * A blurred image or video cannot be right-clicked or dragged, so it cannot
  * be saved, copied or opened in a tab to see it unblurred.
@@ -45,17 +52,30 @@ const FEEDBACK = (import.meta.env as Record<string, unknown>).WXT_IMAGE_FILTER_D
  */
 
 const ATTR = "data-focuser-image";
+/**
+ * The same verdicts for an element's CSS background image. Kept apart from
+ * `ATTR`: a background is hidden by blacking out the image alone, so text
+ * laid over it stays readable, not by blurring the whole element.
+ */
+const BG_ATTR = "data-focuser-bg";
 /** The scores behind a verdict, readable in DevTools, for tuning the thresholds. */
 const SCORE_ATTR = "data-focuser-score";
 const BLUR = "filter:blur(28px) grayscale(1)!important;clip-path:inset(0)!important";
-/** Hidden images, and videos still waiting for their second clear look. */
-const STYLE = `:is(img,video)[${ATTR}="hidden"],video[${ATTR}="pending"]{${BLUR}}`;
+/** Hidden media, and media still waiting for a verdict that must come first: videos and GIFs. */
+const STYLE =
+  `:is(img,video):is([${ATTR}="hidden"],[${ATTR}="pending"]){${BLUR}}` +
+  `:is([${BG_ATTR}="hidden"],[${BG_ATTR}="pending"]){background-image:none!important;background-color:#000!important}`;
 /** Start judging an image this far before it scrolls into view. */
 const LOOKAHEAD = "100% 0px";
 /** How often a playing, visible video has a frame checked. */
 const FRAME_INTERVAL_MS = 2_500;
-/** A playing video one clear look short of shown is looked at again this soon. */
+/**
+ * How soon a playing video is looked at again while its first frames are
+ * being checked: one clear look short of shown, or shown on its poster's
+ * word for its first `EARLY_FRAME_LOOKS` frames.
+ */
 const SECOND_LOOK_MS = 700;
+const EARLY_FRAME_LOOKS = 3;
 /** How often the page is swept for shadow roots attached after their host was added. */
 const SHADOW_SWEEP_MS = 2_500;
 /** How long a twin video may take to load or seek before the look counts as failed. */
@@ -97,6 +117,15 @@ export default defineContentScript({
     /** The frame last judged, by time: events and the sampler can ask about the same one. */
     const lastFrame = new WeakMap<HTMLVideoElement, number>();
     const posterLooked = new WeakSet<HTMLVideoElement>();
+    /** Frames of each video judged so far, for its quick early looks. */
+    const frameLooks = new WeakMap<HTMLVideoElement, number>();
+    /**
+     * Videos that have played through and started over. A GIF-as-video
+     * loops every few seconds; once a whole pass was clear, every frame
+     * after it is one already judged, and copying them (a canvas read-back
+     * on the page's own thread) buys nothing.
+     */
+    const looped = new WeakSet<HTMLVideoElement>();
     /**
      * Hidden copies of videos whose frames the page cannot read. A video from
      * another origin, played without a `crossorigin` attribute, taints any
@@ -198,17 +227,26 @@ export default defineContentScript({
       twin.load();
     }
 
-    function classify(payload: string | null): Promise<Judgement> {
+    /** Whether any of an element is in the viewport now, not just near it. */
+    function onScreen(el: Element): boolean {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+    }
+
+    function classify(payload: string | null, urgent = true, prefix?: number): Promise<Judgement> {
       if (!payload) return Promise.resolve({ verdict: "error" });
-      return send({ type: "classify-image", src: payload }).then(
-        (r): Judgement => (r ? { verdict: r.verdict, score: r.score } : { verdict: "error" }),
+      return send({ type: "classify-image", src: payload, urgent, prefix }).then(
+        (r): Judgement =>
+          r
+            ? { verdict: r.verdict, score: r.score, frames: r.frames, complete: r.complete }
+            : { verdict: "error" },
       );
     }
 
     function verdictFor(src: string, img: HTMLImageElement): Promise<Judgement> {
       const known = verdicts.get(src);
       if (known) return known;
-      const job = classify(sourceKind(src) === "pixels" ? toDataUrl(img) : src);
+      const job = classify(sourceKind(src) === "pixels" ? toDataUrl(img) : src, onScreen(img));
       verdicts.set(src, job);
       return job;
     }
@@ -222,50 +260,223 @@ export default defineContentScript({
     async function judgeImage(img: HTMLImageElement) {
       const src = sourceOf(img);
       if (judged.get(img) !== src) return;
+      if (isGif(src)) {
+        return judgeGif(
+          img,
+          src,
+          () => judged.get(img) === src,
+          (j) => mark(img, j),
+        );
+      }
       const judgement = await verdictFor(src, img);
       // The page may have swapped the source while we waited.
       if (judged.get(img) === src) mark(img, judgement);
+    }
+
+    /** One look at the start of a GIF, shared by every copy of it on the page. */
+    function gifLook(src: string, prefix: number, urgent: boolean): Promise<Judgement> {
+      const key = `${prefix}|${src}`;
+      const known = verdicts.get(key);
+      if (known) return known;
+      const job = classify(src, urgent, prefix);
+      verdicts.set(key, job);
+      return job;
+    }
+
+    /**
+     * A GIF is judged like a video: blurred until two frames pass, hidden by
+     * any that does not. The first look is a small download of its start,
+     * whose first and last frames are two looks, so a clean GIF shows after
+     * one round trip. The second, once it shows and at low priority, judges
+     * a frame a second through its first seconds and can hide it again.
+     */
+    async function judgeGif(
+      el: HTMLElement,
+      src: string,
+      current: () => boolean,
+      apply: (judgement: Judgement) => void,
+    ) {
+      let watch = newVideoWatch();
+      for (const prefix of [GIF_FIRST_BYTES, GIF_LATER_BYTES]) {
+        // Urgent while the user is looking at a blur; not once it shows.
+        const urgent = watch.state === "pending" && onScreen(el);
+        const look = await gifLook(src, prefix, urgent);
+        // The page may have swapped the source while we waited.
+        if (!current()) return;
+        watch = afterLooks(watch, look);
+        if (look.score) el.setAttribute(SCORE_ATTR, look.score);
+        if (watch.state !== "pending") {
+          apply({ verdict: watch.state === "hidden" ? "hidden" : "clear", score: look.score });
+        }
+        if (watch.state === "hidden" || look.complete) return;
+      }
+      // One clear look and one that failed: fail open, as everywhere.
+      if (watch.state === "pending") apply({ verdict: "error" });
+    }
+
+    /** The background images each element was last judged on, space-separated. */
+    const backgrounds = new WeakMap<HTMLElement, string>();
+
+    /**
+     * Take in an element's CSS background image, if it has one: judged like
+     * an image (a GIF blacked out until two frames pass), and hidden by
+     * blacking out the image alone. Read from the computed style, so it
+     * finds backgrounds set by class, by a custom property, or inline.
+     */
+    /**
+     * Elements whose background is yet to be read. Reading a computed style
+     * straight after the page changed something makes the browser restyle
+     * the whole page early, and again for its next change: on a 30,000-node
+     * page that was 26 ms per batch of posts added. Read at an idle moment,
+     * once the page has settled, it costs next to nothing.
+     */
+    const backgroundQueue = new Set<HTMLElement>();
+    let backgroundFlush = 0;
+    /** Elements read per idle callback when the deadline has already passed. */
+    const BACKGROUND_CHUNK = 500;
+
+    function considerBackground(el: Element) {
+      if (!(el instanceof HTMLElement) || el instanceof HTMLImageElement || el instanceof HTMLVideoElement) return;
+      backgroundQueue.add(el);
+      if (!backgroundFlush) backgroundFlush = requestIdleCallback(flushBackgrounds, { timeout: 500 });
+    }
+
+    function flushBackgrounds(deadline: IdleDeadline) {
+      backgroundFlush = 0;
+      let done = 0;
+      for (const el of backgroundQueue) {
+        backgroundQueue.delete(el);
+        if (el.isConnected) checkBackground(el);
+        done++;
+        const out = deadline.didTimeout ? done >= BACKGROUND_CHUNK : deadline.timeRemaining() < 1;
+        if (out) break;
+      }
+      if (backgroundQueue.size > 0) backgroundFlush = requestIdleCallback(flushBackgrounds, { timeout: 500 });
+    }
+
+    function checkBackground(el: HTMLElement) {
+      // A background this filter blacked out reads as none; look past the
+      // rule to what the page set. Restored before the next paint.
+      const state = el.getAttribute(BG_ATTR);
+      if (state) el.removeAttribute(BG_ATTR);
+      const urls = backgroundUrls(getComputedStyle(el).backgroundImage);
+      const key = urls.join(" ");
+      if (urls.length > 0 && backgrounds.get(el) === key) {
+        if (state) el.setAttribute(BG_ATTR, state);
+        return;
+      }
+      el.removeAttribute(SCORE_ATTR);
+      if (urls.length === 0) {
+        if (backgrounds.delete(el)) nearView.unobserve(el);
+        return;
+      }
+      backgrounds.set(el, key);
+      if (urls.some(isGif)) {
+        el.setAttribute(BG_ATTR, "pending");
+        restyle(el);
+      }
+      nearView.observe(el);
+    }
+
+    function markBackground(el: HTMLElement, judgement: Judgement) {
+      el.setAttribute(BG_ATTR, judgement.verdict === "hidden" ? "hidden" : "clear");
+      if (judgement.score) el.setAttribute(SCORE_ATTR, judgement.score);
+      restyle(el);
+    }
+
+    async function judgeBackground(el: HTMLElement) {
+      const key = backgrounds.get(el);
+      if (!key) return;
+      const current = () => backgrounds.get(el) === key;
+      // An icon or a texture, as small images are skipped.
+      const box = el.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0 && Math.min(box.width, box.height) < MIN_SIDE / 2) {
+        markBackground(el, { verdict: "clear" });
+        return;
+      }
+      const urls = key.split(" ");
+      const gif = urls.find(isGif);
+      if (gif) return judgeGif(el, gif, current, (j) => markBackground(el, j));
+      const looks = await Promise.all(
+        urls.map((url) => {
+          const known = verdicts.get(url);
+          if (known) return known;
+          const job = classify(url, onScreen(el));
+          verdicts.set(url, job);
+          return job;
+        }),
+      );
+      if (!current()) return;
+      markBackground(
+        el,
+        looks.find((l) => l.verdict === "hidden") ?? looks.find((l) => l.score) ?? { verdict: "error" },
+      );
     }
 
     /** One look at a video: its current frame if not judged yet, and its poster once. */
     async function judgeVideo(video: HTMLVideoElement) {
       const src = sourceOf(video);
       if (judged.get(video) !== src || watches.get(video)?.state === "hidden") return;
+      const previous = lastFrame.get(video);
+      if (
+        previous !== undefined &&
+        video.currentTime < previous &&
+        (video.loop || previous >= video.duration - FRAME_INTERVAL_MS / 1000)
+      ) {
+        looped.add(video);
+      }
+      if (looped.has(video) && watches.get(video)?.state === "clear") return;
 
-      const looks: Promise<Judgement>[] = [];
+      let frameLook: Promise<Judgement> | null = null;
       if (
         video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
         video.videoWidth > 0 &&
         lastFrame.get(video) !== video.currentTime
       ) {
         lastFrame.set(video, video.currentTime);
-        looks.push(frameOf(video).then(classify));
+        frameLook = frameOf(video).then(classify);
       }
+      let posterLook: Promise<Judgement> | null = null;
       if (video.poster && !posterLooked.has(video)) {
         posterLooked.add(video);
         const poster = video.poster;
-        looks.push(
+        posterLook =
           verdicts.get(poster) ??
-            (() => {
-              const job = classify(sourceKind(poster) === "url" ? poster : null);
-              verdicts.set(poster, job);
-              return job;
-            })(),
-        );
+          (() => {
+            const job = classify(sourceKind(poster) === "url" ? poster : null);
+            verdicts.set(poster, job);
+            return job;
+          })();
       }
-      if (looks.length === 0) return;
+      if (!frameLook && !posterLook) return;
 
-      const results = await Promise.all(looks);
+      const [frame, poster] = await Promise.all([frameLook, posterLook]);
       if (judged.get(video) !== src) return;
       let watch = watches.get(video) ?? newVideoWatch();
-      for (const r of results) watch = afterVideoLook(watch, r.verdict);
+      // A clear poster vouches for the video: it is shown, as the thumbnail
+      // the page shows first, while its frames are checked. Any explicit
+      // frame still hides it.
+      if (poster) {
+        watch =
+          poster.verdict === "clear"
+            ? afterLooks(watch, { verdict: "clear", complete: true })
+            : afterVideoLook(watch, poster.verdict);
+      }
+      if (frame) {
+        watch = afterVideoLook(watch, frame.verdict);
+        frameLooks.set(video, (frameLooks.get(video) ?? 0) + 1);
+      }
       watches.set(video, watch);
-      const latest = results.find((r) => r.verdict === "hidden") ?? results.find((r) => r.score);
+      const latest = [frame, poster].find((r) => r?.verdict === "hidden") ?? [frame, poster].find((r) => r?.score);
       if (latest?.score) video.setAttribute(SCORE_ATTR, latest.score);
       if (watch.state !== "pending") {
         mark(video, { verdict: watch.state === "hidden" ? "hidden" : "clear", score: latest?.score });
-      } else if (watch.clearLooks > 0 && !video.paused) {
-        // One clear look in: take the second soon, not at the next sample.
+      }
+      // The first frames come quickly, not at the next sample: one clear
+      // look short of shown, or shown on its poster's word.
+      const early =
+        watch.state === "pending" ? watch.clearLooks > 0 : (frameLooks.get(video) ?? 0) < EARLY_FRAME_LOOKS;
+      if (watch.state !== "hidden" && early && !video.paused && onScreen(video)) {
         setTimeout(() => void judgeVideo(video), SECOND_LOOK_MS);
       }
     }
@@ -273,7 +484,7 @@ export default defineContentScript({
     const nearView = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
-          const el = entry.target as Media;
+          const el = entry.target;
           if (el instanceof HTMLVideoElement) {
             if (entry.isIntersecting) {
               visibleVideos.add(el);
@@ -283,7 +494,8 @@ export default defineContentScript({
           }
           if (!entry.isIntersecting) continue;
           nearView.unobserve(el);
-          void judgeImage(el as HTMLImageElement);
+          if (el instanceof HTMLImageElement) void judgeImage(el);
+          else if (el instanceof HTMLElement) void judgeBackground(el);
         }
       },
       { rootMargin: LOOKAHEAD },
@@ -295,14 +507,23 @@ export default defineContentScript({
 
       if (el instanceof HTMLVideoElement) {
         judged.set(el, src);
-        // Hidden until shown to be clear. A verdict already in place (a
-        // re-judge at a new level) stays until its replacement arrives.
+        // Hidden until shown to be clear, unless it has a poster: that is
+        // judged like any image, shown until then, and vouches for the
+        // video if it passes. A verdict already in place (a re-judge at a
+        // new level) stays until its replacement arrives.
         if (!watches.has(el)) watches.set(el, newVideoWatch());
-        if (!el.hasAttribute(ATTR)) el.setAttribute(ATTR, "pending");
+        if (!el.hasAttribute(ATTR) && sourceKind(el.poster) !== "url") el.setAttribute(ATTR, "pending");
         restyle(el);
         // Videos stay observed: they are re-checked as they play.
         nearView.observe(el);
         return;
+      }
+
+      // A GIF stays blurred until judged, from before it has loaded: a GIF
+      // shows its first frames while it is still downloading.
+      if (isGif(src) && !el.hasAttribute(ATTR)) {
+        el.setAttribute(ATTR, "pending");
+        restyle(el);
       }
 
       // Not decoded yet; its `load` event brings it back here.
@@ -333,6 +554,8 @@ export default defineContentScript({
       else {
         watches.delete(el);
         lastFrame.delete(el);
+        frameLooks.delete(el);
+        looped.delete(el);
         posterLooked.delete(el);
         dropTwin(el);
       }
@@ -344,7 +567,8 @@ export default defineContentScript({
       subtree: true,
       childList: true,
       attributes: true,
-      attributeFilter: ["src", "srcset", "poster"],
+      // `style` for backgrounds set inline, as lazy-loaders and cards do.
+      attributeFilter: ["src", "srcset", "poster", "style"],
     };
     /** Open shadow roots found so far, each watched like the document. */
     const roots = new Set<ShadowRoot>();
@@ -357,7 +581,7 @@ export default defineContentScript({
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(STYLE);
     /** Elements styled inline because their root would not adopt the sheet. */
-    const inlined = new Set<Media>();
+    const inlined = new Set<HTMLElement>();
 
     /**
      * Make sure an element's shadow root, if it is in one, has the style.
@@ -366,7 +590,7 @@ export default defineContentScript({
      * keeps a content script's sheets apart from the page's), the element's
      * own inline style stands in.
      */
-    function restyle(el: Media) {
+    function restyle(el: HTMLElement) {
       const root = el.getRootNode();
       if (!(root instanceof ShadowRoot)) return;
       try {
@@ -375,8 +599,14 @@ export default defineContentScript({
         }
         return;
       } catch {
-        const hide = ["hidden", "pending"].includes(el.getAttribute(ATTR) ?? "");
-        if (hide) {
+        const hiding = (attr: string) => ["hidden", "pending"].includes(el.getAttribute(attr) ?? "");
+        if (hiding(BG_ATTR)) {
+          if (el.style.getPropertyValue("background-image") !== "none") {
+            el.style.setProperty("background-image", "none", "important");
+            el.style.setProperty("background-color", "#000", "important");
+          }
+          inlined.add(el);
+        } else if (hiding(ATTR)) {
           el.style.setProperty("filter", "blur(28px) grayscale(1)", "important");
           el.style.setProperty("clip-path", "inset(0)", "important");
           inlined.add(el);
@@ -384,18 +614,19 @@ export default defineContentScript({
       }
     }
 
-    function unstyle(el: Media) {
+    function unstyle(el: HTMLElement) {
       if (inlined.delete(el)) {
-        el.style.removeProperty("filter");
-        el.style.removeProperty("clip-path");
+        for (const property of ["filter", "clip-path", "background-image", "background-color"]) {
+          el.style.removeProperty(property);
+        }
       }
     }
     const MEDIA_EVENTS = ["load", "loadeddata", "playing", "emptied"] as const;
 
     /** Every element the filter has tagged, in the page and its shadow roots. */
-    function tagged(): Element[] {
-      const all = Array.from(document.querySelectorAll(`[${ATTR}]`));
-      for (const root of roots) all.push(...Array.from(root.querySelectorAll(`[${ATTR}]`)));
+    function tagged(attr = ATTR): Element[] {
+      const all = Array.from(document.querySelectorAll(`[${attr}]`));
+      for (const root of roots) all.push(...Array.from(root.querySelectorAll(`[${attr}]`)));
       return all;
     }
 
@@ -404,6 +635,7 @@ export default defineContentScript({
       const inside = Array.from(node.querySelectorAll("*"));
       for (const el of node instanceof Element ? [node, ...inside] : inside) {
         if (el instanceof HTMLImageElement || el instanceof HTMLVideoElement) consider(el);
+        else considerBackground(el);
         if (el.shadowRoot) adopt(el.shadowRoot);
       }
     }
@@ -452,7 +684,7 @@ export default defineContentScript({
     // and dragging it out saves it too. Sites often lay a transparent link or
     // overlay over their images, so look at everything under the pointer,
     // not just the event's target.
-    const blurred = `:is(img,video)[${ATTR}="hidden"],video[${ATTR}="pending"]`;
+    const blurred = `:is(img,video):is([${ATTR}="hidden"],[${ATTR}="pending"])`;
     const onSaveAttempt = (event: MouseEvent) => {
       const target = event.target;
       const hit =
@@ -472,8 +704,10 @@ export default defineContentScript({
             if (node instanceof HTMLVideoElement) consider(node);
             else if (node instanceof Element) {
               for (const video of Array.from(node.querySelectorAll("video"))) consider(video);
-              // A component added with its shadow root already attached.
+              // A component added with its shadow root already attached, and
+              // any background images in what was added.
               for (const el of [node, ...Array.from(node.querySelectorAll("*"))]) {
+                considerBackground(el);
                 if (el.shadowRoot) adopt(el.shadowRoot);
               }
             }
@@ -481,6 +715,11 @@ export default defineContentScript({
           continue;
         }
         const target = record.target;
+        if (record.attributeName === "style") {
+          // Only a background can change here; an image's own source cannot.
+          if (target instanceof Element) considerBackground(target);
+          continue;
+        }
         if (target instanceof HTMLImageElement || target instanceof HTMLVideoElement) {
           forget(target);
           consider(target);
@@ -499,6 +738,7 @@ export default defineContentScript({
     // hydrates the one it came with, later, and no mutation says so. Sweep
     // for those, and put back any style a component's own rendering dropped.
     const shadowSweep = setInterval(() => {
+      if (document.hidden) return;
       for (const root of [document, ...roots]) {
         for (const el of Array.from(root.querySelectorAll("*"))) {
           if (el.shadowRoot) adopt(el.shadowRoot);
@@ -513,10 +753,14 @@ export default defineContentScript({
     }, SHADOW_SWEEP_MS);
 
     // A clip that opens on a harmless frame need not stay harmless.
+    // Not in a tab nobody can see, and only for videos actually on screen.
     const sampler = setInterval(() => {
+      if (document.hidden) return;
       for (const video of visibleVideos) {
         if (!video.isConnected) visibleVideos.delete(video);
-        else if (!video.paused && video.getAttribute(ATTR) !== "hidden") void judgeVideo(video);
+        else if (!video.paused && video.getAttribute(ATTR) !== "hidden" && onScreen(video)) {
+          void judgeVideo(video);
+        }
       }
     }, FRAME_INTERVAL_MS);
 
@@ -561,12 +805,23 @@ export default defineContentScript({
             consider(el);
           }
         }
+        for (const el of tagged(BG_ATTR)) {
+          if (el instanceof HTMLElement) {
+            // Judged again from scratch; the old verdict holds meanwhile.
+            backgrounds.delete(el);
+            const state = el.getAttribute(BG_ATTR);
+            checkBackground(el);
+            if (state && !el.hasAttribute(BG_ATTR)) el.setAttribute(BG_ATTR, state);
+          }
+        }
         sendResponse({ type: "image-filter-rejudge", ok: true });
         return false;
       }
       if (type !== "image-filter-off") return false;
       clearInterval(sampler);
       clearInterval(shadowSweep);
+      if (backgroundFlush) cancelIdleCallback(backgroundFlush);
+      backgroundQueue.clear();
       for (const video of [...twins.keys()]) dropTwin(video);
       stopFeedback();
       nearView.disconnect();
@@ -579,8 +834,9 @@ export default defineContentScript({
       document.removeEventListener("dragstart", onSaveAttempt, true);
       browser.runtime.onMessage.removeListener(onMessage);
       style.remove();
-      for (const el of tagged()) {
+      for (const el of [...tagged(), ...tagged(BG_ATTR)]) {
         el.removeAttribute(ATTR);
+        el.removeAttribute(BG_ATTR);
         el.removeAttribute(SCORE_ATTR);
       }
       for (const root of roots) {

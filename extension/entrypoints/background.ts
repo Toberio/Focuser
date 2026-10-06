@@ -36,6 +36,8 @@ import {
   appDecodes,
   COPY_SIZE,
   type FilterLevel,
+  GIF_LATER_BYTES,
+  isGif,
   type Judgement,
   MAX_CACHE_KEY,
   skipPatterns,
@@ -427,6 +429,8 @@ export default defineBackground(() => {
       );
   }
 
+  type ImageBytes = { bytes: ArrayBuffer; via: string; complete: boolean };
+
   /** Verdicts by level and URL, so a picture seen in many tabs is judged once. */
   const verdicts = new VerdictCache();
 
@@ -435,28 +439,45 @@ export default defineBackground(() => {
    * where Firefox shared it, else fetched; converted by the browser first if
    * the app could not decode it.
    */
-  async function imageBytes(src: string): Promise<{ bytes: ArrayBuffer; via: string } | null> {
-    const image = await rawImageBytes(src);
+  async function imageBytes(src: string, urgent = true, prefix?: number): Promise<ImageBytes | null> {
+    const image = await rawImageBytes(src, urgent, prefix);
     if (!image || appDecodes(new Uint8Array(image.bytes, 0, Math.min(16, image.bytes.byteLength)))) {
       return image;
     }
     const converted = await toJpeg(image.bytes);
-    return converted ? { bytes: converted, via: `${image.via}, converted` } : null;
+    return converted ? { ...image, bytes: converted, via: `${image.via}, converted` } : null;
   }
 
-  async function rawImageBytes(src: string): Promise<{ bytes: ArrayBuffer; via: string } | null> {
+  /**
+   * The bytes as they came. With `prefix`, only that much of the file's
+   * start is asked for; `complete` says whether that was all of it anyway.
+   */
+  async function rawImageBytes(
+    src: string,
+    urgent: boolean,
+    prefix?: number,
+  ): Promise<ImageBytes | null> {
     if (tap && src.startsWith("http")) {
       // The page asks once the image has loaded, so it has nearly always
       // finished streaming.
       const tapped = await tap.take(src, 1_500);
-      if (tapped) return { bytes: tapped, via: "tap" };
+      if (tapped) return { bytes: tapped, via: "tap", complete: true };
     }
     try {
       // `force-cache` reuses this profile's copy where there is one. A
-      // service worker may fetch any origin it has host permission for.
-      const response = await fetch(src, { cache: "force-cache", credentials: "include" });
+      // service worker may fetch any origin it has host permission for. A
+      // server that ignores the range sends it all, which is only slower.
+      const response = await fetch(src, {
+        cache: "force-cache",
+        credentials: "include",
+        priority: urgent ? "high" : "low",
+        headers: prefix ? { Range: `bytes=0-${prefix - 1}` } : undefined,
+      } as RequestInit);
       if (!response.ok) return null;
-      return { bytes: await response.arrayBuffer(), via: src.startsWith("data:") ? "copy" : "fetch" };
+      const bytes = await response.arrayBuffer();
+      const partial = response.status === 206 && prefix !== undefined && bytes.byteLength >= prefix;
+      const via = src.startsWith("data:") ? "copy" : partial ? `fetch, first ${Math.round(bytes.byteLength / 1024)} KB` : "fetch";
+      return { bytes, via, complete: !partial };
     } catch {
       return null;
     }
@@ -480,20 +501,25 @@ export default defineBackground(() => {
     }
   }
 
-  async function classifyImage(src: string, frameUrl?: string): Promise<Judgement> {
+  async function classifyImage(
+    src: string,
+    frameUrl?: string,
+    urgent = true,
+    prefix?: number,
+  ): Promise<Judgement> {
     // A tab that has not heard the filter went off yet, or a frame on a
     // skipped site that an open-tab injection reached: nothing to hide.
     const level = imageFilter;
-    if (level === null || skipsImages(frameUrl)) return { verdict: "clear" };
-    const key = `${level}|${src}`;
+    if (level === null || skipsImages(frameUrl)) return { verdict: "clear", complete: true };
+    const key = `${level}|${prefix ?? "all"}|${src}`;
     const cacheable = src.length <= MAX_CACHE_KEY;
     const known = cacheable ? verdicts.get(key) : undefined;
     if (known) return known;
 
     const started = performance.now();
-    const image = await imageBytes(src);
+    const image = await imageBytes(src, urgent, prefix);
     if (!image) return { verdict: "error" };
-    const judgement = await imageVerdict(image.bytes);
+    const judgement: Judgement = { ...(await imageVerdict(image.bytes)), complete: image.complete };
     if (judgement.score) {
       const ms = Math.round(performance.now() - started);
       judgement.score = `${judgement.score} · ${ms} ms total · ${image.via}`;
@@ -608,13 +634,14 @@ export default defineBackground(() => {
           return false;
         }
         case "classify-image": {
-          void classifyImage(message.src, sender.url).then((judgement) =>
+          void classifyImage(message.src, sender.url, message.urgent ?? true, message.prefix).then((judgement) =>
             sendResponse({ type: "classify-image", ...judgement }),
           );
           return true;
         }
         case "image-feedback": {
-          void imageBytes(message.src)
+          // As much of a GIF as its later look judges, not all of it.
+          void imageBytes(message.src, true, isGif(message.src) ? GIF_LATER_BYTES : undefined)
             .then((image) =>
               image ? sendImageFeedback(image.bytes, message.label, message.src) : false,
             )
