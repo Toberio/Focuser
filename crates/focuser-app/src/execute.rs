@@ -314,9 +314,14 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             prevent_modification,
             lock,
         } => {
-            if duration_minutes == 0 {
+            if duration_minutes == Some(0) {
                 return Err(CommandError::Validation(
                     "protection duration must be at least 1 minute".into(),
+                ));
+            }
+            if duration_minutes.is_none() && lock.is_none() {
+                return Err(CommandError::Validation(
+                    "a lock with no end needs an unlock method".into(),
                 ));
             }
 
@@ -335,7 +340,8 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 prevent_service_stop,
                 prevent_modification,
                 started_at: now,
-                expires_at: now + chrono::Duration::minutes(i64::from(duration_minutes)),
+                expires_at: duration_minutes
+                    .map(|minutes| now + chrono::Duration::minutes(i64::from(minutes))),
             });
             list.lock = lock;
             // Protecting a disabled list would protect nothing.
@@ -498,11 +504,11 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             // End the manual commitment, or bypass this scheduled occurrence.
             // Neither action disables blocking. Independent overlapping manual
             // and scheduled commitments must each be unlocked.
-            if list.protection.as_ref().is_some_and(|p| p.is_active()) {
+            if list.manual_protection().is_some() {
                 list.protection = None;
                 list.lock = None;
             } else if let Some(p) = list.scheduled_protection_at(chrono::Local::now()) {
-                list.schedule_unlocked_until = Some(p.expires_at);
+                list.schedule_unlocked_until = p.expires_at;
             }
             list.updated_at = chrono::Utc::now();
 
@@ -1058,6 +1064,7 @@ fn normalize(match_type: &mut WebsiteMatchType) {
     if let WebsiteMatchType::Domain(d) = match_type {
         *d = canonical_host(d);
     }
+    match_type.simplify();
 }
 
 /// Reject mutations to a block list whose protection window is still open.
@@ -1323,6 +1330,50 @@ mod tests {
         assert!(matches!(
             &websites[0].match_type,
             WebsiteMatchType::Domain(d) if d == "pornhub.com"
+        ));
+    }
+
+    #[test]
+    fn a_star_word_star_wildcard_is_added_as_a_keyword() {
+        let ctx = ctx();
+        let list = create(&ctx, "Sites");
+
+        execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Wildcard("*casino*".into()),
+            },
+        )
+        .unwrap();
+
+        let stored = &lists(&ctx)[0].websites;
+        assert_eq!(stored.len(), 1);
+        assert!(matches!(
+            &stored[0].match_type,
+            WebsiteMatchType::Keyword(k) if k == "casino"
+        ));
+    }
+
+    #[test]
+    fn a_domain_typed_with_star_word_star_is_added_as_a_keyword() {
+        let ctx = ctx();
+        let list = create(&ctx, "Sites");
+
+        execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("*casino*".into()),
+            },
+        )
+        .unwrap();
+
+        let stored = &lists(&ctx)[0].websites;
+        assert_eq!(stored.len(), 1);
+        assert!(matches!(
+            &stored[0].match_type,
+            WebsiteMatchType::Keyword(k) if k == "casino"
         ));
     }
 
@@ -1633,7 +1684,7 @@ mod tests {
             ctx,
             Command::EnableProtection {
                 list_id: id,
-                duration_minutes: 60,
+                duration_minutes: Some(60),
                 prevent_uninstall: true,
                 prevent_service_stop: true,
                 prevent_modification: true,
@@ -1713,7 +1764,7 @@ mod tests {
 
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].block_list_id, list.id);
-        assert!(infos[0].remaining_seconds > 0);
+        assert!(infos[0].remaining_seconds.is_some_and(|s| s > 0));
     }
 
     fn scheduled_list(ctx: &AppContext, lock: Option<LockSetup>) -> BlockList {
@@ -2308,7 +2359,8 @@ mod tests {
                 let mut engine = ctx.engine.lock().unwrap();
                 let mut stored = engine.db().get_block_list(list.id).unwrap();
                 let mut protection = Protection::for_duration(60);
-                protection.expires_at = chrono::Utc::now() + chrono::Duration::minutes(expires_in);
+                protection.expires_at =
+                    Some(chrono::Utc::now() + chrono::Duration::minutes(expires_in));
                 stored.protection = Some(protection);
                 stored.lock = Some(Lock::RandomText { length: 6 });
                 engine.db().update_block_list(&stored).unwrap();
@@ -2684,6 +2736,108 @@ mod tests {
         assert!(!lists(&ctx)[0].enabled);
     }
 
+    fn protect_until_unlocked(
+        ctx: &AppContext,
+        id: EntityId,
+        lock: Option<LockSetup>,
+    ) -> CommandOutcome<CommandResult> {
+        execute(
+            ctx,
+            Command::EnableProtection {
+                list_id: id,
+                duration_minutes: None,
+                prevent_uninstall: true,
+                prevent_service_stop: true,
+                prevent_modification: true,
+                lock,
+            },
+        )
+    }
+
+    #[test]
+    fn a_lock_with_no_end_needs_an_unlock_method() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+
+        let err = protect_until_unlocked(&ctx, list.id, None).unwrap_err();
+        assert_eq!(err.code(), "validation");
+        assert!(lists(&ctx)[0].protection.is_none());
+    }
+
+    #[test]
+    fn a_lock_with_no_end_holds_until_the_password_is_given() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_until_unlocked(
+            &ctx,
+            list.id,
+            Some(LockSetup::Password {
+                password: "correct-horse".into(),
+            }),
+        )
+        .unwrap();
+
+        let CommandResult::ProtectionStatus(infos) =
+            execute(&ctx, Command::GetProtectionStatus).unwrap()
+        else {
+            panic!("expected protection status");
+        };
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].remaining_seconds, None);
+        assert_eq!(infos[0].expires_at, None);
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::ToggleBlockList {
+                    id: list.id,
+                    enabled: false,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected"
+        );
+        {
+            let engine = ctx.engine.lock().unwrap();
+            assert!(engine.has_service_protection());
+            assert!(engine.has_uninstall_protection());
+        }
+
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "correct-horse".into(),
+            },
+        )
+        .unwrap();
+        assert!(lists(&ctx)[0].protection.is_none());
+    }
+
+    #[test]
+    fn random_text_can_be_up_to_5000_characters() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_until_unlocked(&ctx, list.id, Some(LockSetup::RandomText { length: 5000 }))
+            .unwrap();
+
+        let CommandResult::Text(challenge) =
+            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+        else {
+            panic!("expected a challenge");
+        };
+        assert_eq!(challenge.chars().count(), 5000);
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: challenge,
+            },
+        )
+        .unwrap();
+        assert!(lists(&ctx)[0].protection.is_none());
+    }
+
     #[test]
     fn a_password_is_checked_exactly_as_it_was_set() {
         let ctx = ctx();
@@ -2929,7 +3083,7 @@ mod tests {
             &ctx,
             Command::EnableProtection {
                 list_id: list.id,
-                duration_minutes: 60,
+                duration_minutes: Some(60),
                 prevent_uninstall: true,
                 prevent_service_stop: true,
                 prevent_modification: false,
@@ -3329,6 +3483,47 @@ mod tests {
         assert_eq!(lists[0].websites.len(), 1);
     }
 
+    /// A lock with no end has to come with a way to unlock it. Making one
+    /// checks that; a file does not go through that check.
+    #[test]
+    fn an_imported_lock_with_no_end_and_no_way_out_locks_nothing() {
+        let source = ctx();
+        create(&source, "Stuck");
+        let mut doc: serde_json::Value = serde_json::from_str(&text(
+            execute(&source, Command::ExportConfiguration).unwrap(),
+        ))
+        .unwrap();
+        doc["block_lists"][0]["protection"] = serde_json::json!({
+            "prevent_uninstall": true,
+            "prevent_service_stop": true,
+            "prevent_modification": true,
+            "started_at": "2026-10-01T08:00:00Z",
+            "expires_at": "9999-12-31T23:59:59Z",
+        });
+        doc["block_lists"][0]["lock"] = serde_json::Value::Null;
+
+        let target = ctx();
+        execute(
+            &target,
+            Command::ImportConfiguration {
+                json: doc.to_string(),
+            },
+        )
+        .unwrap();
+
+        let id = lists(&target)[0].id;
+        execute(&target, Command::ToggleBlockList { id, enabled: false })
+            .expect("nothing holds this list");
+        assert!(
+            target
+                .engine
+                .lock()
+                .unwrap()
+                .active_protection_info()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn import_rejects_a_document_from_a_newer_format() {
         let ctx = ctx();
@@ -3374,7 +3569,7 @@ mod tests {
             &ctx,
             Command::EnableProtection {
                 list_id: list.id,
-                duration_minutes: 60,
+                duration_minutes: Some(60),
                 prevent_uninstall: true,
                 prevent_service_stop: true,
                 prevent_modification: true,

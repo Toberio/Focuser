@@ -1,6 +1,6 @@
 use focuser_common::error::Result;
 use focuser_common::extension::ExtensionRuleSet;
-use focuser_common::host::hosts_entries;
+use focuser_common::host::{hosts_entries, name_patterns};
 use focuser_common::ipc::ProtectionInfo;
 use focuser_common::types::{BlockList, EntityId, ExceptionType, WebsiteMatchType};
 use tracing::{debug, info, warn};
@@ -131,15 +131,19 @@ impl BlockEngine {
     /// This separates rules by type: domains go to both hosts file AND extension,
     /// while keywords/wildcards/URL paths are extension-only.
     pub fn compile_extension_rules(&self) -> ExtensionRuleSet {
-        self.compile_extension_rules_with_exceptions(&[])
+        self.compile_extension_rules_with_allowances(&[], &[])
     }
 
-    /// Same as `compile_extension_rules` but adds extra domains to the
-    /// `allowed_domains` set. Used to inject allowance-active domains so
-    /// they act as temporary exceptions until the daily quota is hit.
-    pub fn compile_extension_rules_with_exceptions(
+    /// Same as `compile_extension_rules`, with what the allowances say on top.
+    ///
+    /// `extra_allowed_domains` still have time left today: they act as
+    /// temporary exceptions until the daily quota is hit. `spent_domains` have
+    /// none left and are blocked for the rest of the day, whether or not a
+    /// list names them.
+    pub fn compile_extension_rules_with_allowances(
         &self,
         extra_allowed_domains: &[String],
+        spent_domains: &[String],
     ) -> ExtensionRuleSet {
         let mut rules = ExtensionRuleSet::empty();
 
@@ -156,6 +160,9 @@ impl BlockEngine {
                 match &rule.match_type {
                     WebsiteMatchType::Domain(d) => {
                         rules.blocked_domains.extend(hosts_entries(d));
+                        rules
+                            .blocked_wildcards
+                            .extend(name_patterns(d).into_iter().flatten());
                     }
                     WebsiteMatchType::Keyword(kw) => {
                         rules.blocked_keywords.push(kw.clone());
@@ -185,7 +192,12 @@ impl BlockEngine {
                             }
                             // Both forms, for the same reason as blocked domains —
                             // an exception must release whichever one is listed.
-                            None => rules.allowed_domains.extend(hosts_entries(d)),
+                            None => {
+                                rules.allowed_domains.extend(hosts_entries(d));
+                                rules
+                                    .allowed_wildcards
+                                    .extend(name_patterns(d).into_iter().flatten());
+                            }
                         }
                     }
                     ExceptionType::Wildcard(pat) => {
@@ -202,6 +214,9 @@ impl BlockEngine {
         // accessible until today's quota runs out.
         for d in extra_allowed_domains {
             rules.allowed_domains.extend(hosts_entries(d));
+        }
+        for d in spent_domains {
+            rules.blocked_domains.extend(hosts_entries(d));
         }
 
         rules.blocked_domains.sort();
@@ -236,7 +251,12 @@ impl BlockEngine {
                 let mut scoped = ExtensionRuleSet::empty();
                 for r in list.websites.iter().filter(|r| r.enabled) {
                     match &r.match_type {
-                        WebsiteMatchType::Domain(d) => scoped.blocked_domains.push(d.clone()),
+                        WebsiteMatchType::Domain(d) => {
+                            scoped.blocked_domains.push(d.clone());
+                            scoped
+                                .blocked_wildcards
+                                .extend(name_patterns(d).into_iter().flatten());
+                        }
                         WebsiteMatchType::Keyword(k) => scoped.blocked_keywords.push(k.clone()),
                         WebsiteMatchType::Wildcard(w) => scoped.blocked_wildcards.push(w.clone()),
                         WebsiteMatchType::UrlPath(p) => scoped.blocked_url_paths.push(p.clone()),
@@ -250,7 +270,12 @@ impl BlockEngine {
                                 Some((host, page)) => {
                                     scoped.allowed_url_paths.push(format!("{host}{page}"));
                                 }
-                                None => scoped.allowed_domains.push(d.clone()),
+                                None => {
+                                    scoped.allowed_domains.push(d.clone());
+                                    scoped
+                                        .allowed_wildcards
+                                        .extend(name_patterns(d).into_iter().flatten());
+                                }
                             }
                         }
                         ExceptionType::Wildcard(w) => scoped.allowed_wildcards.push(w.clone()),
@@ -272,6 +297,19 @@ impl BlockEngine {
             // Scoped matching keeps each list's exceptions to that list, so the
             // allowances travel on their own instead of in the flat exceptions.
             rules.allowance_domains = extra_allowed_domains.to_vec();
+            // With scopes present nothing outside them is read, so the spent
+            // sites get one. Marked as hours so no allowance reaches through.
+            if !spent_domains.is_empty() {
+                let mut spent = ExtensionRuleSet::empty();
+                spent.blocked_domains = spent_domains.to_vec();
+                rules
+                    .scopes
+                    .push(focuser_common::extension::ExtensionListScope {
+                        rules: spent,
+                        shared_permits: None,
+                        scheduled: true,
+                    });
+            }
         }
 
         // Stable content-based version hash. Only changes when rules actually
@@ -413,6 +451,26 @@ mod tests {
         db.create_block_list(&games).unwrap();
 
         BlockEngine::new(db).unwrap()
+    }
+
+    #[test]
+    fn a_site_typed_as_a_bare_name_is_blocked_and_reaches_the_extension() {
+        let db = Database::open_in_memory().unwrap();
+        let mut list = BlockList::new("Anime");
+        list.websites.push(WebsiteRule::domain("crunchyroll"));
+        db.create_block_list(&list).unwrap();
+        let engine = BlockEngine::new(db).unwrap();
+
+        assert_eq!(engine.check_domain("www.crunchyroll.com"), Some("Anime"));
+
+        // Sent as host patterns, which every published extension matches. A
+        // hosts file cannot express them, so the UI has to say so.
+        let rules = engine.compile_extension_rules();
+        assert_eq!(
+            rules.blocked_wildcards,
+            ["*.crunchyroll.*", "crunchyroll.*"]
+        );
+        assert!(engine.has_extension_only_rules());
     }
 
     #[test]

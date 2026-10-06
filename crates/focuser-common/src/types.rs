@@ -117,7 +117,7 @@ impl BlockList {
         }
         Some(Protection {
             started_at,
-            expires_at,
+            expires_at: Some(expires_at),
             prevent_modification: true,
             prevent_service_stop: true,
             prevent_uninstall: true,
@@ -140,9 +140,8 @@ impl BlockList {
         }
         // A separate manual commitment can still prohibit editing.
         if self
-            .protection
-            .as_ref()
-            .is_some_and(|p| p.prevent_modification && now.with_timezone(&Utc) < p.expires_at)
+            .manual_protection_at(now.with_timezone(&Utc))
+            .is_some_and(|p| p.prevent_modification)
         {
             return ScheduledLockState::Locked;
         }
@@ -159,15 +158,32 @@ impl BlockList {
         }
     }
 
+    /// The manual lock, while it is on.
+    ///
+    /// One with no end counts only when the list also has a way to unlock it.
+    /// A single command checks that when a lock is made; an imported file or
+    /// an edited database does not go through it, and a lock nobody can end is
+    /// worse than no lock.
+    pub fn manual_protection(&self) -> Option<&Protection> {
+        self.manual_protection_at(Utc::now())
+    }
+
+    fn manual_protection_at(&self, now: DateTime<Utc>) -> Option<&Protection> {
+        self.protection
+            .as_ref()
+            .filter(|p| p.is_active_at(now) && (p.expires_at.is_some() || self.lock.is_some()))
+    }
+
     pub fn effective_protection(&self) -> Option<Protection> {
-        let manual = self.protection.as_ref().filter(|p| p.is_active()).cloned();
+        let manual = self.manual_protection().cloned();
         let scheduled = self.scheduled_protection_at(chrono::Local::now());
         match (manual, scheduled) {
             (Some(mut p), Some(s)) => {
                 p.prevent_modification |= s.prevent_modification;
                 p.prevent_service_stop |= s.prevent_service_stop;
                 p.prevent_uninstall |= s.prevent_uninstall;
-                p.expires_at = p.expires_at.max(s.expires_at);
+                // `None` (until unlocked) outlasts any end time.
+                p.expires_at = p.expires_at.zip(s.expires_at).map(|(a, b)| a.max(b));
                 Some(p)
             }
             (p, s) => p.or(s),
@@ -176,7 +192,7 @@ impl BlockList {
 
     /// Manual commitments take priority when both kinds of protection overlap.
     pub fn effective_lock(&self) -> Option<&Lock> {
-        if self.protection.as_ref().is_some_and(|p| p.is_active()) {
+        if self.manual_protection().is_some() {
             self.lock.as_ref()
         } else {
             self.scheduled_protection
@@ -241,6 +257,46 @@ pub enum WebsiteMatchType {
     UrlPath(String),
     /// Block the entire internet (with exceptions only)
     EntireInternet,
+}
+
+impl WebsiteMatchType {
+    /// Collapse a pattern that only *looks* like a wildcard into what it
+    /// actually is.
+    ///
+    /// `*word*` and `Keyword("word")` match identically — both are a plain
+    /// substring test — so a `Wildcard` of exactly that shape is a keyword
+    /// someone typed with asterisks around it, not a real glob. And `Domain`
+    /// does exact hostname matching with no glob support at all, so a
+    /// `Domain` value containing a `*` (typed into the wrong field) never
+    /// matched anything — it belongs in `Wildcard`, or in `Keyword` if it's
+    /// the `*word*` shape, to actually be evaluated as a pattern.
+    ///
+    /// Skipped when fewer than 3 literal characters remain once the stars
+    /// are stripped: too little to guess intent from, and turning it into a
+    /// live pattern risks matching far more than was meant (`*r` would
+    /// become "any domain ending in r"). Left alone, it stays exactly as
+    /// inert as it already was.
+    pub fn simplify(&mut self) {
+        let was_domain = matches!(self, Self::Domain(_));
+        let pattern = match self {
+            Self::Wildcard(p) => p.clone(),
+            Self::Domain(d) if d.contains('*') => d.clone(),
+            _ => return,
+        };
+
+        if pattern.chars().filter(|&c| c != '*').count() < 3 {
+            return;
+        }
+
+        if let Some(inner) = pattern.strip_prefix('*').and_then(|s| s.strip_suffix('*'))
+            && !inner.is_empty()
+            && !inner.contains(['*', '?'])
+        {
+            *self = Self::Keyword(inner.to_string());
+        } else if was_domain {
+            *self = Self::Wildcard(pattern);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -421,13 +477,71 @@ pub struct ScheduledProtection {
 
 // ─── Protection ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, Type)]
 pub struct Protection {
     pub prevent_uninstall: bool,
     pub prevent_service_stop: bool,
     pub prevent_modification: bool,
     pub started_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    /// `None` means until unlocked: no timer, the list's lock is the only way
+    /// out. It counts only together with a lock, see
+    /// [`BlockList::manual_protection`].
+    ///
+    /// Written down as a date all the same, see [`StoredProtection`].
+    #[specta(type = DateTime<Utc>)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// A protection as it is stored and sent: the end is always a date.
+///
+/// Every release up to 0.9.1 declares `expires_at` as a plain date and skips
+/// a list it cannot read. A `null` there would make the list, and its lock,
+/// vanish for an older version, so "no end" is written as the last second of
+/// the year 9999. The (de)serialising is done by hand rather than with
+/// `#[serde(with)]` because that attribute makes the TypeScript export split
+/// every type that holds a protection in two.
+#[derive(Serialize, Deserialize)]
+struct StoredProtection {
+    prevent_uninstall: bool,
+    prevent_service_stop: bool,
+    prevent_modification: bool,
+    started_at: DateTime<Utc>,
+    /// Optional only to read the `null` that builds of the change which added
+    /// this wrote for a while.
+    expires_at: Option<DateTime<Utc>>,
+}
+
+const NO_END_YEAR: i32 = 9999;
+
+impl Serialize for Protection {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use chrono::TimeZone;
+        let no_end = Utc
+            .with_ymd_and_hms(NO_END_YEAR, 12, 31, 23, 59, 59)
+            .single();
+        StoredProtection {
+            prevent_uninstall: self.prevent_uninstall,
+            prevent_service_stop: self.prevent_service_stop,
+            prevent_modification: self.prevent_modification,
+            started_at: self.started_at,
+            expires_at: self.expires_at.or(no_end),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Protection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use chrono::Datelike;
+        let stored = StoredProtection::deserialize(deserializer)?;
+        Ok(Self {
+            prevent_uninstall: stored.prevent_uninstall,
+            prevent_service_stop: stored.prevent_service_stop,
+            prevent_modification: stored.prevent_modification,
+            started_at: stored.started_at,
+            expires_at: stored.expires_at.filter(|end| end.year() < NO_END_YEAR),
+        })
+    }
 }
 
 impl Protection {
@@ -438,17 +552,29 @@ impl Protection {
             prevent_service_stop: true,
             prevent_modification: true,
             started_at: now,
-            expires_at: now + chrono::Duration::minutes(minutes as i64),
+            expires_at: Some(now + chrono::Duration::minutes(minutes as i64)),
+        }
+    }
+
+    pub fn until_unlocked() -> Self {
+        Self {
+            expires_at: None,
+            ..Self::for_duration(0)
         }
     }
 
     pub fn is_active(&self) -> bool {
-        Utc::now() < self.expires_at
+        self.is_active_at(Utc::now())
     }
 
-    pub fn remaining_seconds(&self) -> u64 {
-        let remaining = self.expires_at - Utc::now();
-        remaining.num_seconds().max(0) as u64
+    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_none_or(|end| now < end)
+    }
+
+    /// `None` while it runs until unlocked.
+    pub fn remaining_seconds(&self) -> Option<u64> {
+        self.expires_at
+            .map(|end| (end - Utc::now()).num_seconds().max(0) as u64)
     }
 }
 
@@ -482,9 +608,10 @@ pub enum Lock {
 
 impl Lock {
     /// A challenge shorter than this is typed too easily to add real
-    /// friction; longer than this is just a typo generator.
+    /// friction. The ceiling is high on purpose: for a lock with no timer,
+    /// a long text is the whole point.
     pub const MIN_RANDOM_TEXT_LEN: u32 = 6;
-    pub const MAX_RANDOM_TEXT_LEN: u32 = 256;
+    pub const MAX_RANDOM_TEXT_LEN: u32 = 5000;
 
     /// Characters that stay unambiguous in a UI font — no `0`/`O`, `1`/`l`/`I`.
     /// A challenge that is impossible to transcribe correctly defeats the
@@ -669,5 +796,157 @@ mod lock_tests {
     fn a_random_text_lock_has_no_password() {
         let text_lock = Lock::RandomText { length: 10 };
         assert!(!text_lock.verify_password("anything"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_star_word_star_wildcard_simplifies_to_a_keyword() {
+        let mut m = WebsiteMatchType::Wildcard("*casino*".into());
+        m.simplify();
+        assert_eq!(m, WebsiteMatchType::Keyword("casino".into()));
+    }
+
+    #[test]
+    fn a_subdomain_wildcard_keeps_its_real_glob_meaning() {
+        for pattern in ["*.reddit.com", "*free*games*", "*a*b*", "**", "*", "*?*"] {
+            let mut m = WebsiteMatchType::Wildcard(pattern.into());
+            m.simplify();
+            assert_eq!(
+                m,
+                WebsiteMatchType::Wildcard(pattern.into()),
+                "{pattern:?} should not have been reclassified"
+            );
+        }
+    }
+
+    #[test]
+    fn simplify_does_nothing_to_a_non_wildcard_match_type() {
+        let mut m = WebsiteMatchType::Domain("reddit.com".into());
+        m.simplify();
+        assert_eq!(m, WebsiteMatchType::Domain("reddit.com".into()));
+    }
+
+    #[test]
+    fn a_domain_typed_with_a_star_word_star_becomes_a_keyword() {
+        // Domain does exact hostname matching only, so this never matched
+        // anything — it was typed into the wrong field.
+        let mut m = WebsiteMatchType::Domain("*casino*".into());
+        m.simplify();
+        assert_eq!(m, WebsiteMatchType::Keyword("casino".into()));
+    }
+
+    #[test]
+    fn a_domain_typed_with_a_real_glob_moves_to_wildcard_unchanged() {
+        for pattern in ["casino*", "*free*games*", "*.example", "search.example.*"] {
+            let mut m = WebsiteMatchType::Domain(pattern.into());
+            m.simplify();
+            assert_eq!(m, WebsiteMatchType::Wildcard(pattern.into()), "{pattern:?}");
+        }
+    }
+
+    #[test]
+    fn too_little_is_left_after_stripping_stars_to_safely_promote() {
+        // "*r" would become "any domain ending in r" as a live Wildcard —
+        // worse than the inert Domain rule it started as. Leave it be.
+        for match_type in [
+            WebsiteMatchType::Domain("*r".into()),
+            WebsiteMatchType::Wildcard("*ai*".into()),
+        ] {
+            let mut m = match_type.clone();
+            m.simplify();
+            assert_eq!(m, match_type);
+        }
+    }
+}
+
+#[cfg(test)]
+mod protection_tests {
+    use super::{BlockList, Lock, Protection};
+    use chrono::{DateTime, Utc};
+
+    /// The field as every release up to 0.9.1 declares it: a date, always.
+    #[derive(serde::Deserialize)]
+    struct ProtectionBefore {
+        expires_at: DateTime<Utc>,
+    }
+
+    /// An older version reads a whole list or skips it. If it cannot read the
+    /// lock, the list is gone for it, and the lock with it: installing an old
+    /// build would be the way out.
+    #[test]
+    fn a_lock_with_no_end_is_still_a_lock_to_an_older_version() {
+        let stored = serde_json::to_string(&Protection::until_unlocked()).unwrap();
+
+        let old: ProtectionBefore =
+            serde_json::from_str(&stored).expect("an older version has to be able to read it");
+
+        assert!(old.expires_at > Utc::now() + chrono::Duration::days(365 * 1000));
+    }
+
+    #[test]
+    fn a_lock_with_no_end_comes_back_from_storage_as_one() {
+        let stored = serde_json::to_string(&Protection::until_unlocked()).unwrap();
+        let back: Protection = serde_json::from_str(&stored).unwrap();
+        assert_eq!(back.expires_at, None);
+        assert!(back.is_active());
+    }
+
+    #[test]
+    fn a_timed_lock_is_stored_as_the_date_it_ends() {
+        let timed = Protection::for_duration(60);
+        let json = serde_json::to_value(&timed).unwrap();
+        assert_eq!(
+            json["expires_at"],
+            serde_json::to_value(timed.expires_at.unwrap()).unwrap()
+        );
+    }
+
+    /// Builds of the pull request wrote `null`, and people ran those.
+    #[test]
+    fn an_end_stored_as_null_reads_as_no_end() {
+        let stored = r#"{"prevent_uninstall":true,"prevent_service_stop":true,
+            "prevent_modification":true,"started_at":"2026-10-01T08:00:00Z",
+            "expires_at":null}"#;
+        let p: Protection = serde_json::from_str(stored).unwrap();
+        assert_eq!(p.expires_at, None);
+    }
+
+    /// Only one command checks that a lock with no end comes with a way to
+    /// unlock it. An imported file or an edited database does not go through
+    /// that command, and the result would be a lock nobody can end.
+    #[test]
+    fn a_lock_with_no_end_and_no_way_to_unlock_it_does_not_hold() {
+        let mut list = BlockList::new("Stuck");
+        list.protection = Some(Protection::until_unlocked());
+
+        assert!(list.effective_protection().is_none());
+        assert!(!list.is_modification_protected());
+        assert!(!list.has_service_protection());
+        assert!(!list.has_uninstall_protection());
+
+        list.lock = Some(Lock::RandomText { length: 12 });
+        assert!(list.is_modification_protected());
+        assert!(list.has_service_protection());
+    }
+
+    #[test]
+    fn a_stored_protection_with_an_end_time_still_loads() {
+        let stored = r#"{"prevent_uninstall":true,"prevent_service_stop":true,
+            "prevent_modification":true,"started_at":"2026-10-01T08:00:00Z",
+            "expires_at":"2026-10-01T09:00:00Z"}"#;
+        let p: Protection = serde_json::from_str(stored).unwrap();
+        assert!(p.expires_at.is_some());
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn a_protection_with_no_end_stays_active() {
+        let p = Protection::until_unlocked();
+        assert!(p.is_active());
+        assert_eq!(p.remaining_seconds(), None);
     }
 }

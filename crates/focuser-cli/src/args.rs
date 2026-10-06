@@ -282,6 +282,10 @@ pub enum ProtectCmd {
         id: EntityId,
         #[arg(long, default_value_t = 60)]
         minutes: u32,
+        /// No timer: stay locked until unlocked with the password or random
+        /// text. Needs one of the two.
+        #[arg(long, conflicts_with = "minutes", requires = "unlock")]
+        until_unlocked: bool,
         /// Permit uninstalling Focuser while protection is active.
         #[arg(long)]
         allow_uninstall: bool,
@@ -291,20 +295,26 @@ pub enum ProtectCmd {
         /// Permit editing this block list while protection is active.
         #[arg(long)]
         allow_modification: bool,
-        /// Require this password (via `protect unlock`) to end the window
-        /// early.
-        #[arg(long, conflicts_with = "random_text_length")]
-        password: Option<String>,
+        /// Require a password to end the window early. Omit the value to
+        /// enter and confirm it without echo. An explicit value is visible
+        /// in shell history and process arguments.
+        #[arg(long, num_args = 0..=1, value_name = "PASSWORD", group = "unlock")]
+        password: Option<Option<String>>,
         /// Require retyping a random string of this many characters to end
         /// the window early. The string is only shown in the app.
-        #[arg(long, conflicts_with = "password")]
+        #[arg(long, group = "unlock")]
         random_text_length: Option<u32>,
     },
     /// Show active protection windows.
     Status,
     /// End a protection window early with its password. Random-text locks
     /// are unlocked in the app, where the text is shown.
-    Unlock { id: EntityId, response: String },
+    Unlock {
+        id: EntityId,
+        /// Omit to enter the password without echo. An explicit value is
+        /// visible in shell history and process arguments.
+        response: Option<String>,
+    },
 }
 
 // ─── Settings ───────────────────────────────────────────────────────
@@ -544,6 +554,7 @@ impl TopLevel {
                 ProtectCmd::Enable {
                     id,
                     minutes,
+                    until_unlocked,
                     allow_uninstall,
                     allow_service_stop,
                     allow_modification,
@@ -551,12 +562,17 @@ impl TopLevel {
                     random_text_length,
                 } => Command::EnableProtection {
                     list_id: id,
-                    duration_minutes: minutes,
+                    duration_minutes: (!until_unlocked).then_some(minutes),
                     prevent_uninstall: !allow_uninstall,
                     prevent_service_stop: !allow_service_stop,
                     prevent_modification: !allow_modification,
                     lock: match (password, random_text_length) {
-                        (Some(password), _) => Some(LockSetup::Password { password }),
+                        (Some(password), _) => Some(LockSetup::Password {
+                            password: match password {
+                                Some(value) => value,
+                                None => crate::password::create()?,
+                            },
+                        }),
                         (None, Some(length)) => Some(LockSetup::RandomText { length }),
                         (None, None) => None,
                     },
@@ -564,7 +580,10 @@ impl TopLevel {
                 ProtectCmd::Status => Command::GetProtectionStatus,
                 ProtectCmd::Unlock { id, response } => Command::UnlockProtection {
                     list_id: id,
-                    response,
+                    response: match response {
+                        Some(value) => value,
+                        None => crate::password::unlock()?,
+                    },
                 },
             },
 
