@@ -21,10 +21,12 @@ import {
 import { formatDuration } from "@/lib/duration";
 import { m } from "@/paraglide/messages.js";
 
-/** Whether a protection is still running. One with no end runs until unlocked. */
+/**
+ * Whether a protection is still running. One with no end arrives with a date in
+ * the year 9999, so that an older version of the app still reads it as a lock.
+ */
 export function protectionActive(protection: Protection | null | undefined): boolean {
-  if (!protection) return false;
-  return protection.expires_at === null || new Date(protection.expires_at).getTime() > Date.now();
+  return !!protection && new Date(protection.expires_at).getTime() > Date.now();
 }
 
 export function effectiveLock(list: BlockList) {

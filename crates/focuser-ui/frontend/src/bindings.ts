@@ -598,9 +598,12 @@ export type Protection = {
 	started_at: string,
 	/**
 	 *  `None` means until unlocked: no timer, the list's lock is the only way
-	 *  out. Only ever set together with a lock, so there always is one.
+	 *  out. It counts only together with a lock, see
+	 *  [`BlockList::manual_protection`].
+	 * 
+	 *  Written down as a date all the same, see [`StoredProtection`].
 	 */
-	expires_at: string | null,
+	expires_at: string,
 };
 
 /**

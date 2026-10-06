@@ -504,7 +504,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             // End the manual commitment, or bypass this scheduled occurrence.
             // Neither action disables blocking. Independent overlapping manual
             // and scheduled commitments must each be unlocked.
-            if list.protection.as_ref().is_some_and(|p| p.is_active()) {
+            if list.manual_protection().is_some() {
                 list.protection = None;
                 list.lock = None;
             } else if let Some(p) = list.scheduled_protection_at(chrono::Local::now()) {
@@ -3479,6 +3479,47 @@ mod tests {
         assert_eq!(lists.len(), 1, "import replaces rather than merges");
         assert_eq!(lists[0].name, "Social media");
         assert_eq!(lists[0].websites.len(), 1);
+    }
+
+    /// A lock with no end has to come with a way to unlock it. Making one
+    /// checks that; a file does not go through that check.
+    #[test]
+    fn an_imported_lock_with_no_end_and_no_way_out_locks_nothing() {
+        let source = ctx();
+        create(&source, "Stuck");
+        let mut doc: serde_json::Value = serde_json::from_str(&text(
+            execute(&source, Command::ExportConfiguration).unwrap(),
+        ))
+        .unwrap();
+        doc["block_lists"][0]["protection"] = serde_json::json!({
+            "prevent_uninstall": true,
+            "prevent_service_stop": true,
+            "prevent_modification": true,
+            "started_at": "2026-10-01T08:00:00Z",
+            "expires_at": "9999-12-31T23:59:59Z",
+        });
+        doc["block_lists"][0]["lock"] = serde_json::Value::Null;
+
+        let target = ctx();
+        execute(
+            &target,
+            Command::ImportConfiguration {
+                json: doc.to_string(),
+            },
+        )
+        .unwrap();
+
+        let id = lists(&target)[0].id;
+        execute(&target, Command::ToggleBlockList { id, enabled: false })
+            .expect("nothing holds this list");
+        assert!(
+            target
+                .engine
+                .lock()
+                .unwrap()
+                .active_protection_info()
+                .is_empty()
+        );
     }
 
     #[test]

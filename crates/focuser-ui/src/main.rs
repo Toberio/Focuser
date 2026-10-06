@@ -718,6 +718,8 @@ mod tests {
         let mut forever = locked(true, 0);
         forever.name = "Full block".into();
         forever.protection.as_mut().unwrap().expires_at = None;
+        // A lock with no end holds only together with a way to unlock it.
+        forever.lock = Some(focuser_common::types::Lock::RandomText { length: 12 });
 
         let db = Database::open_in_memory().unwrap();
         db.create_block_list(&locked(true, 45)).unwrap();
