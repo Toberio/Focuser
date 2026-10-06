@@ -320,7 +320,7 @@
   "websites_kind_wildcard": "Motif",
   "websites_kind_url_path": "Chemin d'URL",
   "websites_kind_entire_internet": "Tout Internet",
-  "websites_hint_domain": "Couvre www. et tous les sous-domaines.",
+  "websites_hint_domain": "Couvre www. et tous les sous-domaines. Un nom sans extension, comme reddit, couvre le site quelle que soit sa terminaison et nécessite l'extension.",
   "websites_hint_keyword": "Bloque toute URL contenant ce mot. Extension requise.",
   "websites_hint_wildcard": "* correspond à n'importe quelle suite de caractères, et *.reddit.com couvre aussi reddit.com. Extension requise.",
   "websites_hint_url_path": "Bloque les URL contenant ce chemin. Extension requise.",

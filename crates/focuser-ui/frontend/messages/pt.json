@@ -320,7 +320,7 @@
   "websites_kind_wildcard": "Padrão",
   "websites_kind_url_path": "Caminho de URL",
   "websites_kind_entire_internet": "A internet inteira",
-  "websites_hint_domain": "Cobre www. e todos os subdomínios.",
+  "websites_hint_domain": "Cobre www. e todos os subdomínios. Um nome sem terminação, como reddit, cobre o site com qualquer terminação e precisa da extensão.",
   "websites_hint_keyword": "Bloqueia qualquer URL que contenha esta palavra. Só com a extensão.",
   "websites_hint_wildcard": "* corresponde a qualquer sequência de caracteres, e *.reddit.com cobre reddit.com também. Só com a extensão.",
   "websites_hint_url_path": "Bloqueia URLs que contenham este caminho. Só com a extensão.",

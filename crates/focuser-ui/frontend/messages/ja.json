@@ -314,7 +314,7 @@
   "websites_kind_wildcard": "パターン",
   "websites_kind_url_path": "URL パス",
   "websites_kind_entire_internet": "インターネット全体",
-  "websites_hint_domain": "www. とすべてのサブドメインを含みます。",
+  "websites_hint_domain": "www. とすべてのサブドメインを含みます。reddit のように末尾のない名前は、どの末尾のサイトも対象にし、拡張機能が必要です。",
   "websites_hint_keyword": "この語を含む URL をすべてブロックします。拡張機能が必要です。",
   "websites_hint_wildcard": "* は任意の文字列に一致し、*.reddit.com は reddit.com 自体も含みます。拡張機能が必要です。",
   "websites_hint_url_path": "このパスを含む URL をブロックします。拡張機能が必要です。",

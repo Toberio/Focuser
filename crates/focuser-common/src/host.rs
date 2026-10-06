@@ -7,6 +7,9 @@
 //! stated once, here, and everything defers to it:
 //!
 //! **`www.` is never significant, and a rule always covers its subdomains.**
+//!
+//! A rule with no dot in it is a name rather than an address, `crunchyroll`,
+//! and covers that site on every ending.
 
 /// Reduce a hostname or a user-typed rule to the form everything compares on.
 ///
@@ -86,7 +89,23 @@ pub fn host_matches(rule: &str, host: &str) -> bool {
     }
 
     let host = canonical_host(host);
-    host == rule || host.ends_with(&format!(".{rule}"))
+    if host == rule || host.ends_with(&format!(".{rule}")) {
+        return true;
+    }
+    // A name, not an address (#24). People type what the site is called and
+    // do not know or care how its address ends, so it matches as one whole
+    // label of the host, wherever that label sits.
+    !rule.contains('.') && host.split('.').any(|label| label == rule)
+}
+
+/// A rule with no dot in it, as host patterns for the extension.
+///
+/// The extension compares its domain list against the end of a host, which a
+/// bare name never is. As wildcards, every published version already matches
+/// it the way [`host_matches`] does, so nobody has to wait for a store update.
+pub fn name_patterns(rule: &str) -> Option<[String; 2]> {
+    let name = canonical_host(rule);
+    (!name.is_empty() && !name.contains('.')).then(|| [format!("*.{name}.*"), format!("{name}.*")])
 }
 
 /// Does `host` fall under any of `rules`?
@@ -238,6 +257,46 @@ mod tests {
     fn suffixes_have_to_be_on_a_label_boundary() {
         assert!(!host_matches("youtube.com", "notyoutube.com"));
         assert!(!host_matches("tube.com", "youtube.com"));
+    }
+
+    /// #24: someone types "crunchyroll" and expects Crunchyroll to be blocked.
+    /// A name is not a host, so as a host rule it used to match nothing.
+    #[test]
+    fn a_name_with_no_ending_covers_that_site_on_every_ending() {
+        for host in [
+            "crunchyroll.com",
+            "www.crunchyroll.com",
+            "beta.crunchyroll.com",
+            "crunchyroll.co.uk",
+        ] {
+            assert!(host_matches("crunchyroll", host), "{host}");
+        }
+        // Still a whole label, never part of one.
+        assert!(!host_matches("crunchyroll", "notcrunchyroll.com"));
+        assert!(!host_matches("crunchy", "crunchyroll.com"));
+    }
+
+    #[test]
+    fn the_extension_gets_a_bare_name_as_two_host_patterns() {
+        let patterns = name_patterns("Crunchyroll").unwrap();
+        for host in [
+            "crunchyroll.com",
+            "beta.crunchyroll.com",
+            "crunchyroll.co.uk",
+        ] {
+            assert!(
+                patterns.iter().any(|p| wildcard_matches(p, host)),
+                "{host} against {patterns:?}"
+            );
+        }
+        assert!(
+            !patterns
+                .iter()
+                .any(|p| wildcard_matches(p, "notcrunchyroll.com"))
+        );
+        // A real address is sent as a domain, as it always was.
+        assert_eq!(name_patterns("crunchyroll.com"), None);
+        assert_eq!(name_patterns("  "), None);
     }
 
     #[test]

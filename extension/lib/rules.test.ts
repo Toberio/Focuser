@@ -100,6 +100,20 @@ describe("match", () => {
     ).not.toBeNull();
   });
 
+  it("blocks a site that was typed as a bare name, on any ending", () => {
+    // The app sends "crunchyroll" as these two patterns, so that a version of
+    // this extension already in the stores blocks it too. If this matcher
+    // stops reading them this way, such a rule quietly blocks nothing again.
+    const r = rules({ blocked_wildcards: ["*.crunchyroll.*", "crunchyroll.*"] });
+    for (const host of ["crunchyroll.com", "www.crunchyroll.com", "beta.crunchyroll.com"]) {
+      expect(match(r, host, `https://${host}/watch`), host).not.toBeNull();
+    }
+    expect(match(r, "crunchyroll.co.uk", "https://crunchyroll.co.uk/")).not.toBeNull();
+    expect(match(r, "notcrunchyroll.com", "https://notcrunchyroll.com/")).toBeNull();
+    // A search for the name is not the site.
+    expect(match(r, "search.test", "https://search.test/?q=crunchyroll")).toBeNull();
+  });
+
   it("matches url paths", () => {
     const r = rules({ blocked_url_paths: ["/shorts/"] });
     expect(match(r, "video.test", "https://video.test/shorts/xyz")?.reason).toBe("url-path");

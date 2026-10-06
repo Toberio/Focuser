@@ -317,7 +317,7 @@
   "websites_kind_wildcard": "Muster",
   "websites_kind_url_path": "URL-Pfad",
   "websites_kind_entire_internet": "Das ganze Internet",
-  "websites_hint_domain": "Umfasst www. und jede Subdomain.",
+  "websites_hint_domain": "Umfasst www. und jede Subdomain. Ein Name ohne Endung, etwa reddit, umfasst die Seite mit jeder Endung und braucht die Erweiterung.",
   "websites_hint_keyword": "Blockiert jede URL, die dieses Wort enthält. Nur mit Erweiterung.",
   "websites_hint_wildcard": "* steht für eine beliebige Zeichenfolge, und *.reddit.com umfasst auch reddit.com. Nur mit Erweiterung.",
   "websites_hint_url_path": "Blockiert URLs, die diesen Pfad enthalten. Nur mit Erweiterung.",
