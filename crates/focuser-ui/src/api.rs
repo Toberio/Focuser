@@ -312,7 +312,10 @@ fn api_lists(state: &AppState) -> (&'static str, String) {
 fn api_rules(state: &AppState) -> (&'static str, String) {
     let eng = state.engine.lock().unwrap();
     let allowance_exceptions = state.allowance_exempt_domains(&eng);
-    let rules = eng.compile_extension_rules_with_exceptions(&allowance_exceptions);
+    let rules = eng.compile_extension_rules_with_allowances(
+        &allowance_exceptions,
+        &spent_domains(state, &eng),
+    );
 
     let mut domain_categories: HashMap<String, String> = HashMap::new();
     for list in eng.block_lists().iter().filter(|l| l.enabled) {
@@ -390,7 +393,7 @@ fn api_check_domain(path: &str, state: &AppState) -> (&'static str, String) {
     {
         false
     } else {
-        eng.check_domain(domain).is_some()
+        eng.check_domain(domain).is_some() || any_host_matches(spent_domains(state, &eng), domain)
     };
     let json = serde_json::json!({ "domain": domain, "blocked": blocked });
     ("200 OK", json.to_string())
@@ -739,14 +742,20 @@ fn api_allowance_tick(body: &str, state: &AppState) -> (&'static str, String) {
     ("200 OK", r#"{"ok":true}"#.into())
 }
 
-fn api_allowance_blocked(state: &AppState) -> (&'static str, String) {
-    let eng = state.engine.lock().unwrap();
-    let domains: Vec<_> = state
+/// Sites whose allowance is used up for today. A running shared allowance
+/// takes over the ones it covers.
+fn spent_domains(state: &AppState, eng: &focuser_core::BlockEngine) -> Vec<String> {
+    state
         .allowance_tracker
         .blocked_domains()
         .into_iter()
         .filter(|d| !eng.shared_covers_domain(d))
-        .collect();
+        .collect()
+}
+
+fn api_allowance_blocked(state: &AppState) -> (&'static str, String) {
+    let eng = state.engine.lock().unwrap();
+    let domains = spent_domains(state, &eng);
     let apps: Vec<_> = state
         .allowance_tracker
         .blocked_apps()
@@ -990,6 +999,41 @@ mod tests {
                 "{host} should be blocked once the budget is spent, got {body}"
             );
         }
+    }
+
+    /// The Allowances page says a site is "blocked for the rest of the day"
+    /// once its budget is used. For a site on no block list nothing carried
+    /// that out while an extension was connected: only the hosts file was ever
+    /// told, and the hosts file is cleared when an extension connects.
+    #[test]
+    fn a_site_on_no_list_is_blocked_once_its_allowance_is_spent() {
+        let state = ctx_with_extension(|db| {
+            db.create_allowance(&focuser_common::allowance::Allowance::new(
+                AllowanceMatch::Domain("youtube.com".into()),
+                60,
+                true,
+            ))
+            .unwrap();
+        });
+        let addr = start(Arc::clone(&state));
+        let blocked_domains = || {
+            let rules: serde_json::Value =
+                serde_json::from_str(&request(&addr, "GET", "/api/rules", None)).unwrap();
+            rules["blocked_domains"].clone()
+        };
+
+        assert_eq!(blocked_domains(), serde_json::json!([]));
+
+        for _ in 0..2 {
+            tick(&addr, "www.youtube.com", 30);
+        }
+
+        assert_eq!(
+            blocked_domains(),
+            serde_json::json!(["www.youtube.com", "youtube.com"])
+        );
+        let body = request(&addr, "GET", "/api/check?domain=www.youtube.com", None);
+        assert!(body.contains(r#""blocked":true"#), "got {body}");
     }
 
     #[test]

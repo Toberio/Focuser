@@ -405,7 +405,7 @@
   "websites_kind_wildcard": "Wildcard",
   "websites_kind_url_path": "URL path",
   "websites_kind_entire_internet": "Entire internet",
-  "websites_hint_domain": "Covers www. and every subdomain.",
+  "websites_hint_domain": "Covers www. and every subdomain. A name with no ending, like reddit, covers the site on every ending and needs the extension.",
   "websites_hint_keyword": "Blocks any URL containing this word. Extension only.",
   "websites_hint_wildcard": "* matches any run of characters, and *.reddit.com covers reddit.com too. Extension only.",
   "websites_hint_url_path": "Blocks URLs containing this path. Extension only.",

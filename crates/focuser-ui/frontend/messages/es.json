@@ -315,7 +315,7 @@
   "websites_kind_wildcard": "Comodín",
   "websites_kind_url_path": "Ruta de URL",
   "websites_kind_entire_internet": "Todo internet",
-  "websites_hint_domain": "Incluye www. y todos los subdominios.",
+  "websites_hint_domain": "Incluye www. y todos los subdominios. Un nombre sin terminación, como reddit, cubre el sitio con cualquier terminación y necesita la extensión.",
   "websites_hint_keyword": "Bloquea cualquier URL que contenga esta palabra. Solo con la extensión.",
   "websites_hint_wildcard": "* coincide con cualquier secuencia de caracteres, y *.reddit.com incluye también reddit.com. Solo con la extensión.",
   "websites_hint_url_path": "Bloquea las URL que contengan esta ruta. Solo con la extensión.",

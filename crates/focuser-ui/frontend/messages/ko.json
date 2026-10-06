@@ -318,7 +318,7 @@
   "websites_kind_wildcard": "패턴",
   "websites_kind_url_path": "URL 경로",
   "websites_kind_entire_internet": "인터넷 전체",
-  "websites_hint_domain": "www.와 모든 하위 도메인을 포함합니다.",
+  "websites_hint_domain": "www.와 모든 하위 도메인을 포함합니다. reddit처럼 끝부분이 없는 이름은 모든 끝부분의 사이트를 포함하며 확장 프로그램이 필요합니다.",
   "websites_hint_keyword": "이 단어가 들어간 URL을 모두 차단합니다. 확장 프로그램 전용입니다.",
   "websites_hint_wildcard": "*는 임의의 문자열과 일치하며, *.reddit.com은 reddit.com 자체도 포함합니다. 확장 프로그램 전용입니다.",
   "websites_hint_url_path": "이 경로가 들어간 URL을 차단합니다. 확장 프로그램 전용입니다.",

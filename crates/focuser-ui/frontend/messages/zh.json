@@ -318,7 +318,7 @@
   "websites_kind_wildcard": "通配符",
   "websites_kind_url_path": "网址路径",
   "websites_kind_entire_internet": "整个互联网",
-  "websites_hint_domain": "包含 www. 及所有子域名。",
+  "websites_hint_domain": "包含 www. 及所有子域名。不带后缀的名称（如 reddit）会涵盖该网站的所有后缀，并且需要扩展程序。",
   "websites_hint_keyword": "拦截网址中含有该词的任何页面。仅扩展支持。",
   "websites_hint_wildcard": "* 匹配任意长度的字符，*.reddit.com 也包含 reddit.com 本身。仅扩展支持。",
   "websites_hint_url_path": "拦截网址中含有该路径的页面。仅扩展支持。",

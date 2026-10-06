@@ -324,7 +324,7 @@
   "websites_kind_wildcard": "Schema",
   "websites_kind_url_path": "Percorso URL",
   "websites_kind_entire_internet": "Tutta Internet",
-  "websites_hint_domain": "Copre www. e ogni sottodominio.",
+  "websites_hint_domain": "Copre www. e ogni sottodominio. Un nome senza estensione, come reddit, copre il sito con qualsiasi terminazione e richiede l'estensione.",
   "websites_hint_keyword": "Blocca qualsiasi URL che contenga questa parola. Solo con l'estensione.",
   "websites_hint_wildcard": "* corrisponde a qualsiasi sequenza di caratteri, e *.reddit.com copre anche reddit.com. Solo con l'estensione.",
   "websites_hint_url_path": "Blocca gli URL che contengono questo percorso. Solo con l'estensione.",

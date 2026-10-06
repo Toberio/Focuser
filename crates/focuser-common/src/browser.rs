@@ -110,23 +110,31 @@ pub static KNOWN_BROWSERS: &[BrowserInfo] = &[
     BrowserInfo {
         browser_type: BrowserType::Chrome,
         display_name: "Google Chrome",
+        // What the kernel reports is cut to 15 characters, so the last name
+        // is `chromium-browser` as a running process actually shows up.
         exe_names: &[
             "chrome",
             "google-chrome",
             "google-chrome-stable",
             "chromium",
             "chromium-browser",
+            "chromium-browse",
         ],
     },
     BrowserInfo {
         browser_type: BrowserType::Firefox,
         display_name: "Mozilla Firefox",
-        exe_names: &["firefox", "firefox-esr"],
+        // Distro packages start `/usr/lib/firefox/firefox`, a launcher that
+        // execs `firefox-bin` — so the long-lived main process reports
+        // `firefox-bin`, and matching only `firefox` never sees it.
+        exe_names: &["firefox", "firefox-bin", "firefox-esr"],
     },
     BrowserInfo {
         browser_type: BrowserType::Edge,
         display_name: "Microsoft Edge",
-        exe_names: &["microsoft-edge", "microsoft-edge-stable"],
+        // `microsoft-edge` is a wrapper script; the process it leaves
+        // running is `msedge`.
+        exe_names: &["microsoft-edge", "microsoft-edge-stable", "msedge"],
     },
     BrowserInfo {
         browser_type: BrowserType::Brave,
@@ -192,6 +200,24 @@ mod tests {
             let info = identify_browser("Chrome.EXE").unwrap();
             assert_eq!(info.browser_type, BrowserType::Chrome);
         }
+    }
+
+    /// The kernel keeps 15 characters of a name, and Edge's wrapper script
+    /// execs a binary called `msedge`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_browsers_are_known_by_the_name_the_kernel_reports() {
+        let chromium = identify_browser("chromium-browse").unwrap();
+        assert_eq!(chromium.browser_type, BrowserType::Chrome);
+        let edge = identify_browser("msedge").unwrap();
+        assert_eq!(edge.browser_type, BrowserType::Edge);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_identify_browser_firefox_bin() {
+        let info = identify_browser("firefox-bin").unwrap();
+        assert_eq!(info.browser_type, BrowserType::Firefox);
     }
 
     #[test]
