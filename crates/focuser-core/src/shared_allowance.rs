@@ -808,7 +808,7 @@ mod tests {
         db.create_block_list(&l).unwrap();
         let engine = crate::BlockEngine::new(db).unwrap();
 
-        let rules = engine.compile_extension_rules_with_exceptions(&["news.com".into()]);
+        let rules = engine.compile_extension_rules_with_allowances(&["news.com".into()], &[]);
         assert_eq!(rules.scopes.len(), 1);
 
         // An extension from before scopes reads only these. They used to be
@@ -822,6 +822,25 @@ mod tests {
         // to, and the allowances from their own field.
         assert_eq!(rules.allowance_domains, ["news.com"]);
         assert_eq!(rules.scopes[0].rules.allowed_domains, ["music.youtube.com"]);
+    }
+
+    /// While a shared block runs, an extension that knows scopes reads only
+    /// those, so a site whose own allowance is spent needs one of its own.
+    #[test]
+    fn a_spent_allowance_blocks_its_site_while_a_shared_block_runs_too() {
+        let db = Database::open_in_memory().unwrap();
+        let mut l = list();
+        l.schedule.as_mut().unwrap().time_slots = running_now();
+        db.create_block_list(&l).unwrap();
+        let engine = crate::BlockEngine::new(db).unwrap();
+
+        let rules = engine.compile_extension_rules_with_allowances(&[], &["news.com".into()]);
+
+        assert!(rules.blocked_domains.contains(&"news.com".into()));
+        let spent = rules.scopes.last().expect("a scope for the spent site");
+        assert_eq!(spent.rules.blocked_domains, ["news.com"]);
+        // Not a shared list, and nothing reaches through it.
+        assert_eq!((spent.shared_permits, spent.scheduled), (None, true));
     }
 
     #[test]

@@ -131,15 +131,19 @@ impl BlockEngine {
     /// This separates rules by type: domains go to both hosts file AND extension,
     /// while keywords/wildcards/URL paths are extension-only.
     pub fn compile_extension_rules(&self) -> ExtensionRuleSet {
-        self.compile_extension_rules_with_exceptions(&[])
+        self.compile_extension_rules_with_allowances(&[], &[])
     }
 
-    /// Same as `compile_extension_rules` but adds extra domains to the
-    /// `allowed_domains` set. Used to inject allowance-active domains so
-    /// they act as temporary exceptions until the daily quota is hit.
-    pub fn compile_extension_rules_with_exceptions(
+    /// Same as `compile_extension_rules`, with what the allowances say on top.
+    ///
+    /// `extra_allowed_domains` still have time left today: they act as
+    /// temporary exceptions until the daily quota is hit. `spent_domains` have
+    /// none left and are blocked for the rest of the day, whether or not a
+    /// list names them.
+    pub fn compile_extension_rules_with_allowances(
         &self,
         extra_allowed_domains: &[String],
+        spent_domains: &[String],
     ) -> ExtensionRuleSet {
         let mut rules = ExtensionRuleSet::empty();
 
@@ -210,6 +214,9 @@ impl BlockEngine {
         // accessible until today's quota runs out.
         for d in extra_allowed_domains {
             rules.allowed_domains.extend(hosts_entries(d));
+        }
+        for d in spent_domains {
+            rules.blocked_domains.extend(hosts_entries(d));
         }
 
         rules.blocked_domains.sort();
@@ -290,6 +297,19 @@ impl BlockEngine {
             // Scoped matching keeps each list's exceptions to that list, so the
             // allowances travel on their own instead of in the flat exceptions.
             rules.allowance_domains = extra_allowed_domains.to_vec();
+            // With scopes present nothing outside them is read, so the spent
+            // sites get one. Marked as hours so no allowance reaches through.
+            if !spent_domains.is_empty() {
+                let mut spent = ExtensionRuleSet::empty();
+                spent.blocked_domains = spent_domains.to_vec();
+                rules
+                    .scopes
+                    .push(focuser_common::extension::ExtensionListScope {
+                        rules: spent,
+                        shared_permits: None,
+                        scheduled: true,
+                    });
+            }
         }
 
         // Stable content-based version hash. Only changes when rules actually
