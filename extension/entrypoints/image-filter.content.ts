@@ -24,6 +24,9 @@ const FEEDBACK = (import.meta.env as Record<string, unknown>).WXT_IMAGE_FILTER_D
  * on a harmless frame need not stay harmless. A video found explicit stays
  * hidden until its source changes.
  *
+ * A blurred image or video cannot be right-clicked or dragged, so it cannot
+ * be saved, copied or opened in a tab to see it unblurred.
+ *
  * Covers `<img>` (including `<picture>` and `srcset`) and `<video>`. Not yet:
  * CSS background images, `<canvas>` and anything inside shadow roots.
  */
@@ -226,6 +229,21 @@ export default defineContentScript({
     document.addEventListener("playing", onLoad, true);
     document.addEventListener("emptied", onEmptied, true);
 
+    // The browser's own menu would offer to save, copy or open the image,
+    // and dragging it out saves it too. Sites often lay a transparent link or
+    // overlay over their images, so look at everything under the pointer,
+    // not just the event's target.
+    const blurred = `:is(img,video)[${ATTR}="hidden"]`;
+    const onSaveAttempt = (event: MouseEvent) => {
+      const target = event.target;
+      const hit =
+        (target instanceof Element && target.matches(blurred)) ||
+        document.elementsFromPoint(event.clientX, event.clientY).some((el) => el.matches(blurred));
+      if (hit) event.preventDefault();
+    };
+    document.addEventListener("contextmenu", onSaveAttempt, true);
+    document.addEventListener("dragstart", onSaveAttempt, true);
+
     // Runs before the next paint, so an image swapped in for a hidden one is
     // not blurred for its predecessor's sake, nor shown with its blur kept.
     const mutations = new MutationObserver((records) => {
@@ -320,6 +338,8 @@ export default defineContentScript({
       document.removeEventListener("loadeddata", onLoad, true);
       document.removeEventListener("playing", onLoad, true);
       document.removeEventListener("emptied", onEmptied, true);
+      document.removeEventListener("contextmenu", onSaveAttempt, true);
+      document.removeEventListener("dragstart", onSaveAttempt, true);
       browser.runtime.onMessage.removeListener(onMessage);
       style.remove();
       for (const el of Array.from(document.querySelectorAll(`[${ATTR}]`))) {
