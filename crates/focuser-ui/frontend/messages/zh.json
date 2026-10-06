@@ -473,7 +473,7 @@
   "lock_method_question": "如何提前解锁？",
   "lock_length_unit": "个字符",
   "schedule_lock_turn_on": "开启锁定",
-  "lists_lock_dialog_title": "将 {name} 锁定一段固定时间",
+  "lists_lock_dialog_title": "锁定 {name}",
   "shared_allowance_left": "剩余 {remaining} 分钟",
   "shared_allowance_used_up": "已用完",
   "schedule_needs_gap_title": "该时间表需要空档",

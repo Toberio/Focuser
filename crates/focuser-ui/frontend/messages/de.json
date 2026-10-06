@@ -481,7 +481,7 @@
   "lock_method_question": "Wie lässt sich vorzeitig entsperren?",
   "lock_length_unit": "Zeichen",
   "schedule_lock_turn_on": "Sperre einschalten",
-  "lists_lock_dialog_title": "{name} für eine feste Zeit sperren",
+  "lists_lock_dialog_title": "{name} sperren",
   "shared_allowance_left": "Noch {remaining} Min.",
   "shared_allowance_used_up": "Aufgebraucht",
   "schedule_needs_gap_title": "Dieser Zeitplan braucht eine Lücke",

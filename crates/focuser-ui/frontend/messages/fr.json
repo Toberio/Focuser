@@ -489,7 +489,7 @@
   "lock_method_question": "Comment déverrouiller plus tôt ?",
   "lock_length_unit": "caractères",
   "schedule_lock_turn_on": "Activer le verrouillage",
-  "lists_lock_dialog_title": "Verrouiller {name} pour une durée fixe",
+  "lists_lock_dialog_title": "Verrouiller {name}",
   "shared_allowance_left": "{remaining} min restantes",
   "shared_allowance_used_up": "Épuisé",
   "schedule_needs_gap_title": "Cet horaire a besoin d'une pause",

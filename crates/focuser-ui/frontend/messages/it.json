@@ -489,7 +489,7 @@
   "lock_method_question": "Come si può sbloccare prima?",
   "lock_length_unit": "caratteri",
   "schedule_lock_turn_on": "Attiva blocco",
-  "lists_lock_dialog_title": "Blocca {name} per un tempo fisso",
+  "lists_lock_dialog_title": "Blocca {name}",
   "shared_allowance_left": "{remaining} min rimasti",
   "shared_allowance_used_up": "Esaurito",
   "schedule_needs_gap_title": "Questo orario ha bisogno di una pausa",

@@ -473,7 +473,7 @@
   "lock_method_question": "어떻게 일찍 잠금을 해제할 수 있나요?",
   "lock_length_unit": "자",
   "schedule_lock_turn_on": "잠금 켜기",
-  "lists_lock_dialog_title": "{name}을(를) 정해진 시간 동안 잠금",
+  "lists_lock_dialog_title": "{name} 잠금",
   "shared_allowance_left": "{remaining}분 남음",
   "shared_allowance_used_up": "모두 사용함",
   "schedule_needs_gap_title": "이 일정에는 빈 시간이 필요합니다",

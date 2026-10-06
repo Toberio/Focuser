@@ -497,7 +497,7 @@
   "lock_method_question": "Как снять блокировку раньше?",
   "lock_length_unit": "символов",
   "schedule_lock_turn_on": "Включить блокировку",
-  "lists_lock_dialog_title": "Заблокировать {name} на заданное время",
+  "lists_lock_dialog_title": "Заблокировать {name}",
   "shared_allowance_left": "Осталось {remaining} мин",
   "shared_allowance_used_up": "Израсходовано",
   "schedule_needs_gap_title": "Этому расписанию нужен перерыв",

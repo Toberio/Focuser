@@ -489,7 +489,7 @@
   "lock_method_question": "¿Cómo se puede desbloquear antes?",
   "lock_length_unit": "caracteres",
   "schedule_lock_turn_on": "Activar bloqueo",
-  "lists_lock_dialog_title": "Bloquear {name} durante un tiempo fijo",
+  "lists_lock_dialog_title": "Bloquear {name}",
   "shared_allowance_left": "Quedan {remaining} min",
   "shared_allowance_used_up": "Agotado",
   "schedule_needs_gap_title": "Este horario necesita un hueco",
