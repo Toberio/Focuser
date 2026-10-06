@@ -15,6 +15,9 @@ StartLimitBurst=5
 
 [Service]
 ExecStart=/usr/bin/focuser-ui --autostart
+# Tells the app it is already supervised. On desktops without
+# graphical-session.target the login launch starts this unit and exits.
+Environment=FOCUSER_SUPERVISED=1
 # on-failure, not always: a clean quit exits 0, which is not a failure and
 # must not be resurrected — only a crash or a kill (including SIGKILL,
 # which no process can catch) counts. A stop from systemd itself, at logout

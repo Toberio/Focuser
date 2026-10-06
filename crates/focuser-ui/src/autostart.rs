@@ -18,7 +18,10 @@
 //! `graphical-session.target`, the unit *is* the login launcher: the app
 //! enables it itself, the toggle enables and disables it, and the plugin's XDG
 //! autostart entry is kept off, since with both, login launched Focuser twice.
-//! Desktops without that target keep the XDG entry, as before.
+//!
+//! Some desktops (Cinnamon, for one) never start that target. There the XDG
+//! entry stays the launcher, and the login launch hands itself over to the
+//! unit (see [`hand_off_to_unit`]), so a kill still brings Focuser back.
 
 use std::sync::Arc;
 
@@ -140,6 +143,16 @@ fn enable_launcher() {
     }
 }
 
+/// Move a login launch into the systemd unit, on desktops that never start it.
+///
+/// True when the unit took over and this process should exit. Called before
+/// anything else opens, so the two copies never both hold the database or the
+/// single-instance lock. When the hand-off fails, Focuser just runs as it is,
+/// without the restart on kill.
+pub fn hand_off_to_unit() -> bool {
+    imp::hand_off_to_unit()
+}
+
 /// Write or remove the plugin's own registration, unless a platform launcher
 /// replaces it, in which case it is always removed.
 fn set_plugin(app: &AppHandle, enabled: bool) {
@@ -167,6 +180,10 @@ mod imp {
     /// The Run entry and the task both fire; the single-instance handler
     /// ignores whichever login launch comes second.
     pub fn replaces_plugin() -> bool {
+        false
+    }
+
+    pub fn hand_off_to_unit() -> bool {
         false
     }
 
@@ -223,26 +240,83 @@ mod imp {
     use std::path::Path;
     use std::process::Command;
     use std::sync::OnceLock;
-    use tracing::warn;
+    use tracing::{info, warn};
 
     /// Where the .deb puts the unit. Tied to the packaging in tauri.conf.json.
     const SYSTEMD_UNIT: &str = "/usr/lib/systemd/user/focuser.service";
     const UNIT: &str = "focuser.service";
 
+    /// Set by the unit, so a copy it started never tries to hand off again.
+    const SUPERVISED: &str = "FOCUSER_SUPERVISED";
+
+    /// What a window needs to open, which the systemd user manager does not
+    /// have unless the desktop hands it over.
+    const DISPLAY_VARS: &[&str] = &[
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "XDG_SESSION_TYPE",
+        "XDG_CURRENT_DESKTOP",
+    ];
+
+    fn systemctl(args: &[&str]) -> bool {
+        Command::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    fn unit_installed() -> bool {
+        Path::new(SYSTEMD_UNIT).exists()
+    }
+
     /// The unit is installed and this session starts it.
     ///
     /// The unit hangs off `graphical-session.target`, which some desktops
-    /// never start. There it would never run, so the XDG entry stays the
-    /// launcher. Checked once per run: it does not change mid-session.
+    /// never start. There the XDG entry stays the launcher and hands off to
+    /// the unit instead. Checked once per run: it does not change mid-session.
     fn has_unit() -> bool {
         static USABLE: OnceLock<bool> = OnceLock::new();
         *USABLE.get_or_init(|| {
-            Path::new(SYSTEMD_UNIT).exists()
-                && Command::new("systemctl")
-                    .args(["--user", "is-active", "--quiet", "graphical-session.target"])
-                    .status()
-                    .is_ok_and(|s| s.success())
+            unit_installed() && systemctl(&["is-active", "--quiet", "graphical-session.target"])
         })
+    }
+
+    pub fn hand_off_to_unit() -> bool {
+        if std::env::var_os(SUPERVISED).is_some() || !unit_installed() || has_unit() {
+            return false;
+        }
+        // Already running under the unit: carry on, and the single-instance
+        // handler drops this second login launch as usual.
+        if systemctl(&["is-active", "--quiet", UNIT]) {
+            return false;
+        }
+        let vars: Vec<&str> = DISPLAY_VARS
+            .iter()
+            .copied()
+            .filter(|v| std::env::var_os(v).is_some())
+            .collect();
+        if vars.is_empty() {
+            return false;
+        }
+
+        let mut import = vec!["import-environment"];
+        import.extend(vars);
+        if !systemctl(&import) {
+            warn!("could not pass the display to systemd; running without restart on kill");
+            return false;
+        }
+        // A unit that used up its restarts at the last logout would otherwise
+        // refuse to start. Fails harmlessly when there is nothing to reset.
+        systemctl(&["reset-failed", UNIT]);
+        let started = systemctl(&["start", UNIT]);
+        if started {
+            info!("handed over to {UNIT}, which restarts Focuser if it is killed");
+        } else {
+            warn!("could not start {UNIT}; running without restart on kill");
+        }
+        started
     }
 
     pub fn replaces_plugin() -> bool {
@@ -294,6 +368,9 @@ mod imp {
     }
     pub fn set_task(_enabled: bool) -> TaskChange {
         TaskChange::NoTask
+    }
+    pub fn hand_off_to_unit() -> bool {
+        false
     }
 }
 
