@@ -33,6 +33,8 @@ import {
   trackingKey,
 } from "@/lib/rules";
 import {
+  appDecodes,
+  COPY_SIZE,
   type FilterLevel,
   type Judgement,
   MAX_CACHE_KEY,
@@ -428,8 +430,21 @@ export default defineBackground(() => {
   /** Verdicts by level and URL, so a picture seen in many tabs is judged once. */
   const verdicts = new VerdictCache();
 
-  /** The image itself: the page's own download where Firefox shared it, else fetched. */
+  /**
+   * The image itself, in a format the app reads: the page's own download
+   * where Firefox shared it, else fetched; converted by the browser first if
+   * the app could not decode it.
+   */
   async function imageBytes(src: string): Promise<{ bytes: ArrayBuffer; via: string } | null> {
+    const image = await rawImageBytes(src);
+    if (!image || appDecodes(new Uint8Array(image.bytes, 0, Math.min(16, image.bytes.byteLength)))) {
+      return image;
+    }
+    const converted = await toJpeg(image.bytes);
+    return converted ? { bytes: converted, via: `${image.via}, converted` } : null;
+  }
+
+  async function rawImageBytes(src: string): Promise<{ bytes: ArrayBuffer; via: string } | null> {
     if (tap && src.startsWith("http")) {
       // The page asks once the image has loaded, so it has nearly always
       // finished streaming.
@@ -442,6 +457,24 @@ export default defineBackground(() => {
       const response = await fetch(src, { cache: "force-cache", credentials: "include" });
       if (!response.ok) return null;
       return { bytes: await response.arrayBuffer(), via: src.startsWith("data:") ? "copy" : "fetch" };
+    } catch {
+      return null;
+    }
+  }
+
+  /** A JPEG copy, no larger than either model takes, of any image the browser can decode. */
+  async function toJpeg(bytes: ArrayBuffer): Promise<ArrayBuffer | null> {
+    try {
+      const bitmap = await createImageBitmap(new Blob([bytes]));
+      const scale = Math.min(1, COPY_SIZE / Math.max(bitmap.width, bitmap.height));
+      const canvas = new OffscreenCanvas(
+        Math.max(1, Math.round(bitmap.width * scale)),
+        Math.max(1, Math.round(bitmap.height * scale)),
+      );
+      canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.9 });
+      return await blob.arrayBuffer();
     } catch {
       return null;
     }

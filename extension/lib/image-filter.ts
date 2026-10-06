@@ -88,6 +88,67 @@ export function sourceKind(src: string): "url" | "pixels" | "skip" {
  */
 export const COPY_SIZE = 384;
 
+/**
+ * Whether the app can decode these bytes itself: JPEG, PNG, GIF, WebP or BMP,
+ * by their first bytes. Anything else (AVIF above all, which some image hosts
+ * serve to every browser that accepts it) the browser decodes and sends on as
+ * a JPEG copy. Sent as it was, the app could not read it, and the filter,
+ * failing open, showed it.
+ */
+export function appDecodes(head: Uint8Array): boolean {
+  const starts = (...bytes: number[]) => bytes.every((b, i) => head[i] === b);
+  const ascii = (at: number, text: string) =>
+    [...text].every((c, i) => head[at + i] === c.charCodeAt(0));
+  return (
+    starts(0xff, 0xd8, 0xff) ||
+    starts(0x89, 0x50, 0x4e, 0x47) ||
+    ascii(0, "GIF8") ||
+    (ascii(0, "RIFF") && ascii(8, "WEBP")) ||
+    ascii(0, "BM")
+  );
+}
+
+/**
+ * Where a video stands. Unlike an image, a video starts out hidden: it is
+ * judged a frame at a time, and sites swap its source or element as it starts
+ * playing, so "show until judged" let it play unfiltered each time.
+ */
+export interface VideoWatch {
+  state: "pending" | "clear" | "hidden";
+  /** Different frames (or the poster) judged clear, in a row. */
+  clearLooks: number;
+  /** Looks that could not be judged: the app was unreachable, or the frame unreadable. */
+  failedLooks: number;
+}
+
+/** Clear looks in a row before a video is shown: one harmless frame proves little. */
+export const VIDEO_CLEAR_LOOKS = 2;
+/**
+ * Unjudgeable looks before a pending video is shown anyway: fail open, as the
+ * filter does everywhere (see `Verdict`). A frame from another site served
+ * without CORS can never be read, and would otherwise stay hidden for good.
+ */
+export const VIDEO_FAILED_LOOKS = 2;
+
+export function newVideoWatch(): VideoWatch {
+  return { state: "pending", clearLooks: 0, failedLooks: 0 };
+}
+
+/** One more look at a video. Any explicit frame hides it for good. */
+export function afterVideoLook(watch: VideoWatch, verdict: Verdict): VideoWatch {
+  if (watch.state === "hidden" || verdict === "hidden") {
+    return { ...watch, state: "hidden" };
+  }
+  if (verdict === "clear") {
+    const clearLooks = watch.clearLooks + 1;
+    const shown = watch.state === "clear" || clearLooks >= VIDEO_CLEAR_LOOKS;
+    return { ...watch, clearLooks, state: shown ? "clear" : "pending" };
+  }
+  const failedLooks = watch.failedLooks + 1;
+  const shown = watch.state === "clear" || failedLooks >= VIDEO_FAILED_LOOKS;
+  return { ...watch, failedLooks, state: shown ? "clear" : "pending" };
+}
+
 /** A small LRU. `Map` keeps insertion order, so the first key is the oldest. */
 export class VerdictCache {
   private readonly entries = new Map<string, Judgement>();

@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { MIN_SIDE, skipPatterns, sourceKind, VerdictCache, worthChecking } from "./image-filter";
+import {
+  afterVideoLook,
+  appDecodes,
+  MIN_SIDE,
+  newVideoWatch,
+  skipPatterns,
+  sourceKind,
+  type Verdict,
+  VerdictCache,
+  worthChecking,
+} from "./image-filter";
 
 describe("worthChecking", () => {
   const big = { width: 800, height: 600 };
@@ -74,5 +84,53 @@ describe("skipPatterns", () => {
   it("is empty when nothing is skipped", () => {
     expect(skipPatterns(undefined)).toEqual([]);
     expect(skipPatterns(["", "  "])).toEqual([]);
+  });
+});
+
+describe("afterVideoLook", () => {
+  const looks = (...verdicts: Verdict[]) => verdicts.reduce(afterVideoLook, newVideoWatch()).state;
+
+  it("starts hidden, and one clear frame is not enough", () => {
+    expect(newVideoWatch().state).toBe("pending");
+    expect(looks("clear")).toBe("pending");
+  });
+
+  it("shows a video after two clear looks", () => {
+    expect(looks("clear", "clear")).toBe("clear");
+  });
+
+  it("hides it for good on any explicit frame, before or after it was shown", () => {
+    expect(looks("clear", "hidden", "clear", "clear")).toBe("hidden");
+    expect(looks("clear", "clear", "hidden", "clear")).toBe("hidden");
+  });
+
+  it("fails open when its frames cannot be judged, like the rest of the filter", () => {
+    expect(looks("error")).toBe("pending");
+    expect(looks("error", "error")).toBe("clear");
+    expect(looks("error", "error", "hidden")).toBe("hidden");
+  });
+
+  it("does not let a failed look undo a shown video", () => {
+    expect(looks("clear", "clear", "error")).toBe("clear");
+  });
+});
+
+describe("appDecodes", () => {
+  const bytes = (...b: (number | string)[]) =>
+    new Uint8Array(b.flatMap((x) => (typeof x === "string" ? [...x].map((c) => c.charCodeAt(0)) : [x])));
+
+  it("passes the formats the app reads straight through", () => {
+    expect(appDecodes(bytes(0xff, 0xd8, 0xff, 0xe0))).toBe(true);
+    expect(appDecodes(bytes(0x89, "PNG", 0x0d, 0x0a))).toBe(true);
+    expect(appDecodes(bytes("GIF89a"))).toBe(true);
+    expect(appDecodes(bytes("RIFF", 0, 0, 0, 0, "WEBPVP8 "))).toBe(true);
+    expect(appDecodes(bytes("BM", 0, 0))).toBe(true);
+  });
+
+  it("sends AVIF and anything unknown through the browser first", () => {
+    // An AVIF file as one image host served it.
+    expect(appDecodes(bytes(0, 0, 0, 0x1c, "ftypavif", 0, 0, 0, 0))).toBe(false);
+    expect(appDecodes(bytes("RIFF", 0, 0, 0, 0, "WAVE"))).toBe(false);
+    expect(appDecodes(new Uint8Array())).toBe(false);
   });
 });
