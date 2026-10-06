@@ -21,10 +21,12 @@ import {
 import { formatDuration } from "@/lib/duration";
 import { m } from "@/paraglide/messages.js";
 
-/** Whether a protection is still running. One with no end runs until unlocked. */
+/**
+ * Whether a protection is still running. One with no end arrives with a date in
+ * the year 9999, so that an older version of the app still reads it as a lock.
+ */
 export function protectionActive(protection: Protection | null | undefined): boolean {
-  if (!protection) return false;
-  return protection.expires_at === null || new Date(protection.expires_at).getTime() > Date.now();
+  return !!protection && new Date(protection.expires_at).getTime() > Date.now();
 }
 
 export function effectiveLock(list: BlockList) {
@@ -162,6 +164,9 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
   const isRandomText = lock !== null && "RandomText" in lock;
   const challenge = requestChallenge.data;
   const challengeCharacters = Array.from(challenge ?? "");
+  // Counted once here. Counted inside the loop below it was one pass over the
+  // typed text for every character shown, which is felt at 5000 characters.
+  const typedCount = Array.from(response).length;
   const mismatchIndex =
     isRandomText && challenge
       ? Array.from(response).findIndex(
@@ -219,8 +224,7 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
                     className={
                       index === mismatchIndex
                         ? "text-destructive"
-                        : index < Array.from(response).length &&
-                            (mismatchIndex === -1 || index < mismatchIndex)
+                        : index < typedCount && (mismatchIndex === -1 || index < mismatchIndex)
                           ? "text-success"
                           : undefined
                     }

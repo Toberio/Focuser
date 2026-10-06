@@ -336,14 +336,14 @@ mod tests {
     #[test]
     fn a_star_word_star_wildcard_already_in_the_database_becomes_a_keyword() {
         let mut list = BlockList::new("Distractions");
-        list.websites.push(WebsiteRule::wildcard("*avadumbdumb*"));
+        list.websites.push(WebsiteRule::wildcard("*casino*"));
         let conn = conn_with_a_stored_list(&list);
 
         reclassify_mistyped_website_rules(&conn).unwrap();
 
         assert_eq!(
             stored_match_type(&conn, list.id),
-            WebsiteMatchType::Keyword("avadumbdumb".into())
+            WebsiteMatchType::Keyword("casino".into())
         );
     }
 
@@ -378,28 +378,28 @@ mod tests {
     #[test]
     fn a_domain_typed_with_a_star_word_star_becomes_a_keyword() {
         let mut list = BlockList::new("Distractions");
-        list.websites.push(WebsiteRule::domain("*avadumbdumb*"));
+        list.websites.push(WebsiteRule::domain("*casino*"));
         let conn = conn_with_a_stored_list(&list);
 
         reclassify_mistyped_website_rules(&conn).unwrap();
 
         assert_eq!(
             stored_match_type(&conn, list.id),
-            WebsiteMatchType::Keyword("avadumbdumb".into())
+            WebsiteMatchType::Keyword("casino".into())
         );
     }
 
     #[test]
     fn a_domain_typed_with_a_real_glob_moves_to_wildcard() {
         let mut list = BlockList::new("Distractions");
-        list.websites.push(WebsiteRule::domain("*ai*nsfw*"));
+        list.websites.push(WebsiteRule::domain("*free*games*"));
         let conn = conn_with_a_stored_list(&list);
 
         reclassify_mistyped_website_rules(&conn).unwrap();
 
         assert_eq!(
             stored_match_type(&conn, list.id),
-            WebsiteMatchType::Wildcard("*ai*nsfw*".into())
+            WebsiteMatchType::Wildcard("*free*games*".into())
         );
     }
 

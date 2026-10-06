@@ -691,7 +691,7 @@ describe("the manual lock", () => {
     show(<BlockLists />);
     fireEvent.click(await screen.findByRole("button", { name: "Protect Weekly" }));
 
-    const dialog = within(screen.getByRole("dialog", { name: "Lock Weekly for a set time" }));
+    const dialog = within(screen.getByRole("dialog", { name: "Lock Weekly" }));
     expect(dialog.getByRole("radio", { name: "None — wait it out" })).toBeChecked();
     fireEvent.click(dialog.getByRole("button", { name: /Lock for/ }));
 

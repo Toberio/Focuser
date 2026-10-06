@@ -466,10 +466,9 @@ pub struct BrowserStatus {
     pub display_name: String,
     pub running: bool,
     pub extension_connected: bool,
-    /// Whether the extension has been granted "Allow in Incognito". Only
-    /// meaningful when `extension_connected` is true — an extension that
-    /// has never checked in has not been granted anything either way, and
-    /// this is `false` for it too rather than a separate "unknown" state.
+    /// Whether the extension can see private windows. Only meaningful when
+    /// `extension_connected` is true. An extension too old to report it
+    /// counts as allowed, as it did before this was checked.
     ///
     /// `extension_connected && !incognito_allowed` is the real gap: the
     /// extension is present and working, but a private window in this

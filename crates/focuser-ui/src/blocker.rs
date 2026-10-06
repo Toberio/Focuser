@@ -26,7 +26,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
     info!("Background blocker started");
 
     // Browser enforcement state
-    let mut grace_periods: HashMap<BrowserType, Instant> = HashMap::new();
+    let mut grace_periods: HashMap<BrowserType, Grace> = HashMap::new();
     let mut was_using_hosts = true;
     let mut cleared_processes = HashSet::new();
 
@@ -75,6 +75,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
 
         // Refresh engine cache (every ~3s)
         let mut watch_uninstalls = false;
+        let mut enforce_browsers = None;
         if let Ok(mut eng) = state.engine.lock() {
             let _ = eng.refresh();
 
@@ -130,7 +131,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
             let (grace_duration, enforce_enabled) = enforcement_settings(eng.db());
             if enforce_enabled {
                 let has_active_blocks = eng.block_lists().iter().any(|l| l.is_effectively_active());
-                enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
+                enforce_browsers = Some((has_active_blocks, grace_duration));
             }
         }
 
@@ -138,6 +139,9 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         // from the window and every request from the extension waits for that
         // lock, and reading command lines is the one step here whose cost
         // depends on what else the machine is running.
+        if let Some((has_active_blocks, grace_duration)) = enforce_browsers {
+            enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
+        }
         if watch_uninstalls {
             block_uninstall_attempts(&mut cleared_processes);
         }
@@ -337,7 +341,7 @@ fn kill_allowance_blocked_apps(
 fn enforce_browser_extension(
     has_active_blocks: bool,
     grace_duration: Duration,
-    grace_periods: &mut HashMap<BrowserType, Instant>,
+    grace_periods: &mut HashMap<BrowserType, Grace>,
 ) {
     if !has_active_blocks {
         grace_periods.clear();
@@ -346,33 +350,7 @@ fn enforce_browser_extension(
 
     let now = Instant::now();
 
-    let mut running: HashMap<BrowserType, Vec<u32>> = HashMap::new();
-    for proc in process::list() {
-        if !proc.is_killable() {
-            continue;
-        }
-        let Some(info) = identify_browser(&proc.name) else {
-            continue;
-        };
-        // Chromium's renderer, GPU, zygote, and utility subprocesses exec the
-        // same binary as the browser itself, so on Linux they report the
-        // identical `/proc/[pid]/comm` name as the top-level process — there
-        // is no way to tell them apart by name. Killing them individually
-        // bypasses the browser's own shutdown path entirely and reads as a
-        // crash, not a close. Every subprocess carries `--type=...`; the
-        // top-level process never does. Firefox's equivalent is
-        // `-contentproc`: its children usually rename themselves ("Web
-        // Content", "forkserver"), but not reliably before we look.
-        let is_subprocess = process::cmdline(proc.pid)
-            .is_some_and(|cmd| cmd.contains("--type=") || cmd.contains("-contentproc"));
-        if is_subprocess {
-            continue;
-        }
-        running
-            .entry(info.browser_type.clone())
-            .or_default()
-            .push(proc.pid);
-    }
+    let running = browser_main_processes(&process::list(), process::cmdline);
 
     // Generous 2-minute window: extensions use chrome.alarms, which fires
     // every 30s once the service worker sleeps. Anything tighter would call a
@@ -392,18 +370,46 @@ fn enforce_browser_extension(
             continue;
         }
 
-        let Some(started_at) = grace_periods.get(browser) else {
+        let grace = grace_periods.entry(browser.clone()).or_insert_with(|| {
             warn!(
                 browser = ?browser,
                 grace_secs = grace_duration.as_secs(),
                 "Browser running without full Focuser coverage — grace period started"
             );
-            grace_periods.insert(browser.clone(), now);
-            continue;
-        };
+            Grace {
+                started: now,
+                warned: false,
+            }
+        });
+        let waited = now.duration_since(grace.started);
 
-        if now.duration_since(*started_at) < grace_duration {
-            continue;
+        // The extension may still be checking in — just without incognito
+        // access — which changes what the user needs to be told to fix.
+        let reason = || {
+            if crate::api::get_connected_browsers(180).contains(browser) {
+                crate::api::ClosedReason::IncognitoNotAllowed
+            } else {
+                crate::api::ClosedReason::NotInstalled
+            }
+        };
+        let name = focuser_common::browser::KNOWN_BROWSERS
+            .iter()
+            .find(|b| b.browser_type == *browser)
+            .map(|b| b.display_name)
+            .unwrap_or("your browser");
+
+        match grace_step(waited, grace_duration, grace.warned) {
+            GraceStep::Wait => continue,
+            GraceStep::Warn => {
+                grace.warned = true;
+                crate::api::prompt_about_browser(crate::api::BrowserPrompt {
+                    browser: name.to_string(),
+                    reason: reason(),
+                    closing_in_secs: Some(grace_duration.saturating_sub(waited).as_secs()),
+                });
+                continue;
+            }
+            GraceStep::Close => {}
         }
 
         // Last look before closing anything, with a wider window still: the
@@ -418,14 +424,7 @@ fn enforce_browser_extension(
             continue;
         }
 
-        // The extension may still be checking in — just without incognito
-        // access — which changes what the user needs to be told to fix.
-        let reason = if crate::api::get_connected_browsers(180).contains(browser) {
-            crate::api::ClosedReason::IncognitoNotAllowed
-        } else {
-            crate::api::ClosedReason::NotInstalled
-        };
-
+        let reason = reason();
         info!(
             browser = ?browser,
             pid_count = pids.len(),
@@ -436,12 +435,11 @@ fn enforce_browser_extension(
             process::terminate(pid);
         }
 
-        let name = focuser_common::browser::KNOWN_BROWSERS
-            .iter()
-            .find(|b| b.browser_type == *browser)
-            .map(|b| b.display_name)
-            .unwrap_or("your browser");
-        crate::api::set_killed_browser(name, reason);
+        crate::api::prompt_about_browser(crate::api::BrowserPrompt {
+            browser: name.to_string(),
+            reason,
+            closing_in_secs: None,
+        });
         crate::api::SHOW_WINDOW_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Reset so the grace period restarts if the browser is relaunched.
@@ -449,6 +447,83 @@ fn enforce_browser_extension(
     }
 
     grace_periods.retain(|browser, _| running.contains_key(browser));
+}
+
+/// How long a browser has been running without cover, and whether the user
+/// has been told.
+struct Grace {
+    started: Instant,
+    warned: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GraceStep {
+    Wait,
+    Warn,
+    Close,
+}
+
+/// A browser that has only just started has not heard from its extension yet,
+/// so its first seconds say nothing. Warning then would be a false alarm on
+/// every start.
+const SETTLE: Duration = Duration::from_secs(15);
+
+/// What to do about a browser that has run without cover for `waited`.
+///
+/// It is closed when the grace period ends. Before that the user is told
+/// once, with time left to fix it: closing a browser loses work, and nobody
+/// should learn why only afterwards.
+fn grace_step(waited: Duration, grace: Duration, warned: bool) -> GraceStep {
+    if waited >= grace {
+        GraceStep::Close
+    } else if !warned && waited >= SETTLE {
+        GraceStep::Warn
+    } else {
+        GraceStep::Wait
+    }
+}
+
+/// The main process of every running browser.
+///
+/// Chromium's renderer, GPU, zygote, and utility subprocesses exec the same
+/// binary as the browser itself, so on Linux and Windows they report the same
+/// name as the top-level process. Killing them individually bypasses the
+/// browser's own shutdown path entirely and reads as a crash, not a close.
+/// Every subprocess carries `--type=...`; the top-level process never does.
+/// Firefox's equivalent is `-contentproc`: its children usually rename
+/// themselves ("Web Content", "forkserver"), but not reliably before we look.
+fn browser_main_processes(
+    procs: &[process::Process],
+    mut read_cmdline: impl FnMut(u32) -> Option<String>,
+) -> HashMap<BrowserType, Vec<u32>> {
+    // On macOS a helper runs from its own bundle under its own name ("Google
+    // Chrome Helper (Renderer)", "plugin-container"), so the name already
+    // picks out the main process, and every command line read starts `ps`.
+    let helpers_share_the_name = !cfg!(target_os = "macos");
+
+    let mut running: HashMap<BrowserType, Vec<u32>> = HashMap::new();
+    for proc in procs.iter().filter(|p| p.is_killable()) {
+        let Some(info) = identify_browser(&proc.name) else {
+            continue;
+        };
+        if helpers_share_the_name
+            && read_cmdline(proc.pid).is_some_and(|cmd| is_browser_subprocess(&cmd))
+        {
+            continue;
+        }
+        running
+            .entry(info.browser_type.clone())
+            .or_default()
+            .push(proc.pid);
+    }
+    running
+}
+
+/// Whether a browser process command line belongs to a child process
+/// (Chromium `--type=...`, Firefox `-contentproc`) rather than the browser
+/// itself.
+fn is_browser_subprocess(cmdline: &str) -> bool {
+    cmdline.contains("--type=") || cmdline.contains("-contentproc")
 }
 
 fn hosts_path() -> String {
@@ -527,8 +602,94 @@ fn flush_dns() {
 
 #[cfg(test)]
 mod tests {
+    use super::is_browser_subprocess;
+
+    #[test]
+    fn a_browser_main_process_is_not_a_subprocess() {
+        assert!(!is_browser_subprocess(
+            "/app/brave/brave --no-default-browser-check"
+        ));
+        assert!(!is_browser_subprocess("/usr/lib/firefox/firefox-bin"));
+    }
+
+    #[test]
+    fn chromium_and_firefox_children_are_subprocesses() {
+        assert!(is_browser_subprocess(
+            "/app/brave/brave --type=zygote --no-zygote-sandbox"
+        ));
+        assert!(is_browser_subprocess(
+            "/opt/google/chrome/chrome --type=renderer"
+        ));
+        assert!(is_browser_subprocess(
+            "/usr/lib/firefox/firefox-bin -contentproc -childID 3 tab"
+        ));
+    }
+
     use super::*;
     use focuser_common::process::Process;
+
+    const MINUTE: Duration = Duration::from_secs(60);
+    const fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// A browser that has only just started has not heard from its extension
+    /// yet. Telling the user then would be a false alarm on every start.
+    #[test]
+    fn a_browser_that_has_just_started_is_given_time_to_report() {
+        assert_eq!(grace_step(secs(0), MINUTE, false), GraceStep::Wait);
+        assert_eq!(grace_step(secs(9), MINUTE, false), GraceStep::Wait);
+    }
+
+    #[test]
+    fn the_user_is_warned_once_while_there_is_still_time_to_fix_it() {
+        assert_eq!(grace_step(SETTLE, MINUTE, false), GraceStep::Warn);
+        assert_eq!(grace_step(secs(30), MINUTE, false), GraceStep::Warn);
+        assert_eq!(grace_step(secs(30), MINUTE, true), GraceStep::Wait);
+    }
+
+    #[test]
+    fn the_browser_is_closed_when_the_grace_period_is_over() {
+        assert_eq!(grace_step(MINUTE, MINUTE, true), GraceStep::Close);
+        assert_eq!(grace_step(secs(61), MINUTE, false), GraceStep::Close);
+    }
+
+    /// Someone who set the grace period this short asked for a quick close.
+    #[test]
+    fn a_grace_period_shorter_than_the_settle_time_closes_with_no_warning() {
+        assert_eq!(grace_step(secs(3), secs(5), false), GraceStep::Wait);
+        assert_eq!(grace_step(secs(6), secs(5), false), GraceStep::Close);
+    }
+
+    #[test]
+    fn a_browser_is_closed_through_its_main_process_only() {
+        let name = focuser_common::browser::KNOWN_BROWSERS[0].exe_names[0];
+        let procs = [10, 11].map(|pid| Process {
+            pid,
+            name: name.into(),
+        });
+        let mut reads = 0;
+        let running = browser_main_processes(&procs, |pid| {
+            reads += 1;
+            Some(
+                if pid == 11 {
+                    "browser --type=renderer"
+                } else {
+                    "browser"
+                }
+                .to_string(),
+            )
+        });
+        let pids = running.into_values().next().unwrap_or_default();
+
+        if cfg!(target_os = "macos") {
+            // A helper has its own name there, so both of these are main
+            // processes, and nothing had to start `ps` to find that out.
+            assert_eq!((pids, reads), (vec![10, 11], 0));
+        } else {
+            assert_eq!(pids, [10]);
+        }
+    }
 
     #[test]
     fn a_harmless_shell_is_read_once_and_an_uninstall_every_time() {

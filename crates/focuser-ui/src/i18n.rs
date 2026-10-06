@@ -38,6 +38,12 @@ pub struct Strings {
     /// Takes `{browser}`. The button this labels opens the browser's own
     /// extension settings, not a store page — installing again does nothing.
     pub extension_incognito_action: &'static str,
+
+    /// The two bodies above, said before the browser is closed instead of
+    /// after. Takes `{browser}`, `{seconds}` and `{store}`.
+    pub extension_warning_body: &'static str,
+    /// Takes `{browser}` and `{seconds}`.
+    pub extension_incognito_warning_body: &'static str,
 }
 
 const EN: Strings = Strings {
@@ -53,6 +59,8 @@ const EN: Strings = Strings {
     extension_incognito_title: "Allow the extension in Incognito",
     extension_incognito_body: "Focuser closed {browser} because its Incognito windows are not covered — the extension is installed, but is not allowed to run there. Turn on \"Allow in Incognito\" to keep using {browser} while blocks are active.",
     extension_incognito_action: "Open extension settings for {browser}",
+    extension_warning_body: "Focuser will close {browser} in {seconds} seconds because the Focuser browser extension is not installed. Install it from the {store} to keep {browser} open while blocks are active.",
+    extension_incognito_warning_body: "Focuser will close {browser} in {seconds} seconds because its Incognito windows are not covered — the extension is installed, but is not allowed to run there. Turn on \"Allow in Incognito\" to keep {browser} open while blocks are active.",
 };
 
 const ES: Strings = Strings {
@@ -68,6 +76,8 @@ const ES: Strings = Strings {
     extension_incognito_title: "Permite la extensión en Incógnito",
     extension_incognito_body: "Focuser ha cerrado {browser} porque sus ventanas de Incógnito no están cubiertas: la extensión está instalada, pero no tiene permiso para funcionar ahí. Activa \"Permitir en Incógnito\" para seguir usando {browser} mientras los bloqueos estén activos.",
     extension_incognito_action: "Abrir la configuración de la extensión para {browser}",
+    extension_warning_body: "Focuser cerrará {browser} en {seconds} segundos porque la extensión de Focuser no está instalada. Instálala desde {store} para mantener {browser} abierto mientras los bloqueos estén activos.",
+    extension_incognito_warning_body: "Focuser cerrará {browser} en {seconds} segundos porque sus ventanas de Incógnito no están cubiertas: la extensión está instalada, pero no tiene permiso para funcionar ahí. Activa \"Permitir en Incógnito\" para mantener {browser} abierto mientras los bloqueos estén activos.",
 };
 
 const FR: Strings = Strings {
@@ -83,6 +93,8 @@ const FR: Strings = Strings {
     extension_incognito_title: "Autoriser l'extension en navigation privée",
     extension_incognito_body: "Focuser a fermé {browser} parce que ses fenêtres de navigation privée ne sont pas couvertes : l'extension est installée, mais n'est pas autorisée à s'y exécuter. Activez « Autoriser en navigation privée » pour continuer à utiliser {browser} pendant que les blocages sont actifs.",
     extension_incognito_action: "Ouvrir les paramètres de l'extension pour {browser}",
+    extension_warning_body: "Focuser fermera {browser} dans {seconds} secondes parce que l'extension de navigateur Focuser n'est pas installée. Installez-la depuis {store} pour garder {browser} ouvert pendant que les blocages sont actifs.",
+    extension_incognito_warning_body: "Focuser fermera {browser} dans {seconds} secondes parce que ses fenêtres de navigation privée ne sont pas couvertes : l'extension est installée, mais n'est pas autorisée à s'y exécuter. Activez « Autoriser en navigation privée » pour garder {browser} ouvert pendant que les blocages sont actifs.",
 };
 
 const DE: Strings = Strings {
@@ -98,6 +110,8 @@ const DE: Strings = Strings {
     extension_incognito_title: "Erweiterung im Inkognitomodus zulassen",
     extension_incognito_body: "Focuser hat {browser} geschlossen, weil Inkognitofenster nicht abgedeckt sind — die Erweiterung ist installiert, darf dort aber nicht laufen. Aktiviere „In Inkognitofenstern zulassen“, um {browser} weiter zu nutzen, während Sperren aktiv sind.",
     extension_incognito_action: "Erweiterungseinstellungen für {browser} öffnen",
+    extension_warning_body: "Focuser schließt {browser} in {seconds} Sekunden, weil die Focuser-Browsererweiterung nicht installiert ist. Installiere sie über {store}, damit {browser} offen bleibt, während Sperren aktiv sind.",
+    extension_incognito_warning_body: "Focuser schließt {browser} in {seconds} Sekunden, weil Inkognitofenster nicht abgedeckt sind — die Erweiterung ist installiert, darf dort aber nicht laufen. Aktiviere „In Inkognitofenstern zulassen“, damit {browser} offen bleibt, während Sperren aktiv sind.",
 };
 
 const PT: Strings = Strings {
@@ -113,6 +127,8 @@ const PT: Strings = Strings {
     extension_incognito_title: "Permitir a extensão no modo anônimo",
     extension_incognito_body: "O Focuser fechou o {browser} porque as janelas anônimas não estão cobertas — a extensão está instalada, mas não tem permissão para funcionar nelas. Ative \"Permitir no modo anônimo\" para continuar usando o {browser} enquanto os bloqueios estiverem ativos.",
     extension_incognito_action: "Abrir as configurações da extensão para o {browser}",
+    extension_warning_body: "O Focuser vai fechar o {browser} em {seconds} segundos porque a extensão de navegador do Focuser não está instalada. Instale pela {store} para manter o {browser} aberto enquanto os bloqueios estiverem ativos.",
+    extension_incognito_warning_body: "O Focuser vai fechar o {browser} em {seconds} segundos porque as janelas anônimas não estão cobertas — a extensão está instalada, mas não tem permissão para funcionar nelas. Ative \"Permitir no modo anônimo\" para manter o {browser} aberto enquanto os bloqueios estiverem ativos.",
 };
 
 const IT: Strings = Strings {
@@ -128,6 +144,8 @@ const IT: Strings = Strings {
     extension_incognito_title: "Consenti l'estensione in Incognito",
     extension_incognito_body: "Focuser ha chiuso {browser} perché le finestre in incognito non sono coperte: l'estensione è installata, ma non è autorizzata a funzionare lì. Attiva \"Consenti in incognito\" per continuare a usare {browser} mentre i blocchi sono attivi.",
     extension_incognito_action: "Apri le impostazioni dell'estensione per {browser}",
+    extension_warning_body: "Focuser chiuderà {browser} tra {seconds} secondi perché l'estensione del browser non è installata. Installala da {store} per tenere aperto {browser} mentre i blocchi sono attivi.",
+    extension_incognito_warning_body: "Focuser chiuderà {browser} tra {seconds} secondi perché le finestre in incognito non sono coperte: l'estensione è installata, ma non è autorizzata a funzionare lì. Attiva \"Consenti in incognito\" per tenere aperto {browser} mentre i blocchi sono attivi.",
 };
 
 const RU: Strings = Strings {
@@ -143,6 +161,8 @@ const RU: Strings = Strings {
     extension_incognito_title: "Разрешить расширение в режиме инкогнито",
     extension_incognito_body: "Focuser закрыл {browser}, потому что окна в режиме инкогнито не защищены — расширение установлено, но ему не разрешено там работать. Включите «Разрешить в режиме инкогнито», чтобы продолжать пользоваться {browser} при активных блокировках.",
     extension_incognito_action: "Открыть настройки расширения для {browser}",
+    extension_warning_body: "Focuser закроет {browser} через {seconds} сек., потому что расширение Focuser для браузера не установлено. Установите его из {store}, чтобы {browser} оставался открытым при активных блокировках.",
+    extension_incognito_warning_body: "Focuser закроет {browser} через {seconds} сек., потому что окна в режиме инкогнито не защищены — расширение установлено, но ему не разрешено там работать. Включите «Разрешить в режиме инкогнито», чтобы {browser} оставался открытым при активных блокировках.",
 };
 
 const ZH: Strings = Strings {
@@ -158,6 +178,8 @@ const ZH: Strings = Strings {
     extension_incognito_title: "允许扩展在隐身模式下运行",
     extension_incognito_body: "Focuser 关闭了 {browser}，因为它的隐身窗口没有被覆盖——扩展已安装，但不允许在隐身模式下运行。请开启\"在隐身模式下启用\"，以便在拦截生效期间继续使用 {browser}。",
     extension_incognito_action: "打开 {browser} 的扩展设置",
+    extension_warning_body: "Focuser 将在 {seconds} 秒后关闭 {browser}，因为没有安装 Focuser 浏览器扩展。请从{store}安装，以便在拦截生效期间保持 {browser} 打开。",
+    extension_incognito_warning_body: "Focuser 将在 {seconds} 秒后关闭 {browser}，因为它的隐身窗口没有被覆盖——扩展已安装，但不允许在隐身模式下运行。请开启\"在隐身模式下启用\"，以便在拦截生效期间保持 {browser} 打开。",
 };
 
 const JA: Strings = Strings {
@@ -173,6 +195,8 @@ const JA: Strings = Strings {
     extension_incognito_title: "シークレットモードで拡張機能を許可",
     extension_incognito_body: "シークレットウィンドウがカバーされていないため、Focuser が {browser} を終了しました。拡張機能はインストール済みですが、そこで動作する許可がありません。ブロック中も {browser} を使い続けるには、「シークレットモードでの実行を許可する」をオンにしてください。",
     extension_incognito_action: "{browser} の拡張機能の設定を開く",
+    extension_warning_body: "Focuser 拡張機能がインストールされていないため、Focuser は {seconds} 秒後に {browser} を終了します。ブロック中も {browser} を開いたままにするには、{store} からインストールしてください。",
+    extension_incognito_warning_body: "シークレットウィンドウがカバーされていないため、Focuser は {seconds} 秒後に {browser} を終了します。拡張機能はインストール済みですが、そこで動作する許可がありません。ブロック中も {browser} を開いたままにするには、「シークレットモードでの実行を許可する」をオンにしてください。",
 };
 
 const KO: Strings = Strings {
@@ -188,6 +212,8 @@ const KO: Strings = Strings {
     extension_incognito_title: "시크릿 모드에서 확장 프로그램 허용",
     extension_incognito_body: "시크릿 창이 보호되지 않아 Focuser가 {browser}을(를) 종료했습니다. 확장 프로그램은 설치되어 있지만 그곳에서 실행할 권한이 없습니다. 차단이 켜져 있는 동안에도 {browser}을(를) 계속 쓰려면 \"시크릿 모드에서 허용\"을 켜 주세요.",
     extension_incognito_action: "{browser} 확장 프로그램 설정 열기",
+    extension_warning_body: "Focuser 브라우저 확장 프로그램이 설치되어 있지 않아 Focuser가 {seconds}초 후에 {browser}을(를) 종료합니다. 차단이 켜져 있는 동안에도 {browser}을(를) 열어 두려면 {store}에서 설치해 주세요.",
+    extension_incognito_warning_body: "시크릿 창이 보호되지 않아 Focuser가 {seconds}초 후에 {browser}을(를) 종료합니다. 확장 프로그램은 설치되어 있지만 그곳에서 실행할 권한이 없습니다. 차단이 켜져 있는 동안에도 {browser}을(를) 열어 두려면 \"시크릿 모드에서 허용\"을 켜 주세요.",
 };
 
 /// Strings for `locale`, falling back to English for anything we do not ship.
@@ -253,6 +279,25 @@ mod tests {
             assert!(
                 t.extension_incognito_action.contains("{browser}"),
                 "{locale} incognito action"
+            );
+        }
+    }
+
+    /// The warning says which browser, how long is left, and where to go.
+    #[test]
+    fn the_warnings_keep_their_placeholders_in_every_language() {
+        for locale in ["en", "es", "fr", "de", "pt", "it", "ru", "zh", "ja", "ko"] {
+            let t = strings(locale);
+            for (name, text) in [
+                ("warning", t.extension_warning_body),
+                ("incognito warning", t.extension_incognito_warning_body),
+            ] {
+                assert!(text.contains("{browser}"), "{locale} {name}: browser");
+                assert!(text.contains("{seconds}"), "{locale} {name}: seconds");
+            }
+            assert!(
+                t.extension_warning_body.contains("{store}"),
+                "{locale} warning: store"
             );
         }
     }
