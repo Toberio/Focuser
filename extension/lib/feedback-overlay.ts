@@ -12,6 +12,8 @@
  * Local to this fork, and only built with WXT_IMAGE_FILTER_DEBUG=true.
  */
 
+import { deepElementsFromPoint } from "./shadow";
+
 export type FeedbackLabel = "show" | "hide";
 type Media = HTMLImageElement | HTMLVideoElement;
 
@@ -47,8 +49,9 @@ export function startFeedbackOverlay(
   let frame = 0;
   let pointer = { x: -1, y: -1 };
 
+  // A video waiting for its second clear look is hidden too.
   const labelFor = (el: Media): FeedbackLabel =>
-    el.getAttribute(attr) === "hidden" ? "show" : "hide";
+    el.getAttribute(attr) === "hidden" || el.getAttribute(attr) === "pending" ? "show" : "hide";
 
   function place() {
     if (!target || !target.isConnected) return hide();
@@ -86,7 +89,8 @@ export function startFeedbackOverlay(
   }
 
   function mediaAt(x: number, y: number): Media | null {
-    for (const el of document.elementsFromPoint(x, y)) {
+    // Inside shadow roots too: a player component's <video> is in its own.
+    for (const el of deepElementsFromPoint(x, y)) {
       if (el === host) return target;
       if ((el instanceof HTMLImageElement || el instanceof HTMLVideoElement) && el.hasAttribute(attr)) return el;
     }

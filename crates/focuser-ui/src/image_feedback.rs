@@ -2,14 +2,16 @@
 //! the personal filter trained on them.
 //!
 //! The extension's debug build puts a Show/Hide button on judged images. A
-//! confirmed click sends the image here. It is kept with its scores and CLIP's
-//! embedding, and the user's filter ([`focuser_vision::probe::Probe`]) is
-//! retrained on every label so far:
+//! confirmed click sends the image here. It is kept with its scores and the
+//! image model's embedding, and the user's filter
+//! ([`focuser_vision::probe::Probe`]) is retrained on every label so far:
 //!
 //! - `image-feedback/labels.jsonl`: one line per click;
 //! - `image-feedback/<hash>.<ext>`: the image itself;
-//! - `image-feedback/embeddings/<hash>.json`: CLIP's embedding, for labels
-//!   saved before embeddings were kept;
+//! - `image-feedback/embeddings/<model>/<hash>.frames.json`: the embedding of
+//!   each judged frame, for labels saved before embeddings (or an
+//!   animation's frames) were kept, or by an earlier model. A new model
+//!   re-embeds every saved image once, so no label is lost to a switch;
 //! - `image-feedback/probe.json`: the trained filter, for inspection.
 //!
 //! Local to this fork. Nothing is sent anywhere; delete the folder to forget.
@@ -21,8 +23,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use focuser_common::types::ImageFilter;
+use focuser_vision::Scores;
 use focuser_vision::probe::Probe;
 use tracing::{info, warn};
+
+/// The model whose embeddings the user's filter is trained on.
+const EMBEDDER: &str = focuser_vision::models::SIGLIP_IMAGE.name;
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 static PROBE: RwLock<Option<Probe>> = RwLock::new(None);
@@ -31,6 +37,18 @@ static TRAINING: Mutex<()> = Mutex::new(());
 
 pub fn init(dir: PathBuf) {
     let _ = DIR.set(dir);
+}
+
+/// Each judged frame's scores, with the user's filter's say added.
+pub fn scores_of(frames: &[focuser_vision::Judged]) -> Vec<Scores> {
+    frames
+        .iter()
+        .map(|j| {
+            let mut s = j.scores;
+            s.personal = personal(&j.embedding);
+            s
+        })
+        .collect()
 }
 
 /// How likely the user would want this image hidden, once they have labelled
@@ -80,21 +98,27 @@ pub fn record(bytes: &[u8], label: &str, url: &str, level: ImageFilter) -> Resul
     let file = format!("{:016x}.{}", hasher.finish(), extension(bytes));
     std::fs::write(dir.join(&file), bytes).map_err(|e| e.to_string())?;
 
-    let judged = crate::image_filter::judge(bytes).ok();
-    let scores = judged.as_ref().map(|j| {
-        let mut s = j.scores;
-        s.personal = personal(&j.embedding);
-        s
-    });
+    // Every frame the filter judges, as it judged them: an animation is
+    // hidden by any one.
+    let frames = crate::image_filter::judge_frames(bytes).unwrap_or_default();
+    let scores = scores_of(&frames);
+    let hidden = focuser_vision::first_hidden(&scores, level);
     let line = serde_json::json!({
         "time": chrono::Utc::now().to_rfc3339(),
         "label": label,
         "url": url,
         "level": level,
         "file": file,
-        "scores": scores,
-        "hidden_at_level": scores.as_ref().and_then(|s| focuser_vision::is_hidden(s, level)),
-        "embedding": judged.as_ref().map(|j| &j.embedding),
+        "scores": scores.get(hidden.unwrap_or(0)),
+        "hidden_at_level": (!scores.is_empty() && level != ImageFilter::Off).then_some(hidden.is_some()),
+        "embedding": frames.first().map(|j| &j.embedding),
+        "frames": (frames.len() > 1).then(|| {
+            frames
+                .iter()
+                .map(|j| serde_json::json!({ "scores": j.scores, "embedding": j.embedding }))
+                .collect::<Vec<_>>()
+        }),
+        "model": EMBEDDER,
     });
     let mut log = std::fs::OpenOptions::new()
         .create(true)
@@ -115,7 +139,8 @@ pub fn retrain() {
     let Ok(log) = std::fs::read_to_string(dir.join("labels.jsonl")) else {
         return;
     };
-    let mut latest: HashMap<String, (bool, Option<Vec<f32>>)> = HashMap::new();
+    // Each image's latest label, and the embeddings logged with any label.
+    let mut latest: HashMap<String, (bool, Option<Vec<Logged>>)> = HashMap::new();
     for line in log.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -123,16 +148,19 @@ pub fn retrain() {
         let (Some(file), Some(label)) = (v["file"].as_str(), v["label"].as_str()) else {
             continue;
         };
-        let embedding = serde_json::from_value::<Vec<f32>>(v["embedding"].clone()).ok();
+        let logged = logged(&v);
         let previous = latest.remove(file).and_then(|(_, e)| e);
-        latest.insert(file.to_string(), (label == "hide", embedding.or(previous)));
+        latest.insert(file.to_string(), (label == "hide", logged.or(previous)));
     }
 
     let mut examples = Vec::with_capacity(latest.len());
-    for (file, (hide, embedding)) in latest {
-        if let Some(e) = embedding.or_else(|| cached_embedding(dir, &file)) {
-            examples.push((e, hide));
-        }
+    for (file, (hide, logged)) in latest {
+        // An animation logged with one frame was labelled before frames were.
+        let frames = match logged {
+            Some(frames) if !(animated(&file) && frames.len() == 1) => Some(frames),
+            _ => cached_frames(dir, &file),
+        };
+        examples.extend(frames.map(|f| examples_of(f, hide)).unwrap_or_default());
     }
     let probe = Probe::train(&examples);
     match &probe {
@@ -157,26 +185,91 @@ pub fn retrain() {
     }
 }
 
-/// An older label's embedding: computed from its saved image once, then kept.
-fn cached_embedding(dir: &Path, file: &str) -> Option<Vec<f32>> {
-    let cache = dir.join("embeddings").join(format!("{file}.json"));
+/// One judged frame of a labelled image, as the log keeps it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Logged {
+    embedding: Vec<f32>,
+    /// How nude or suggestive the prompts found it.
+    explicitness: f32,
+}
+
+/// The frames logged with a label, if this model logged them: another
+/// model's numbers mean nothing to this one's filter.
+fn logged(v: &serde_json::Value) -> Option<Vec<Logged>> {
+    if v["model"].as_str() != Some(EMBEDDER) {
+        return None;
+    }
+    let frame = |f: &serde_json::Value| {
+        let scores = serde_json::from_value::<Scores>(f["scores"].clone()).ok();
+        Some(Logged {
+            embedding: serde_json::from_value(f["embedding"].clone()).ok()?,
+            explicitness: scores.map_or(0.0, |s| s.nudity + s.suggestive),
+        })
+    };
+    match v["frames"].as_array() {
+        Some(frames) => {
+            Some(frames.iter().filter_map(frame).collect::<Vec<_>>()).filter(|f| !f.is_empty())
+        }
+        None => frame(v).map(|f| vec![f]),
+    }
+}
+
+/// What a label teaches. "Show" on an animation means every frame is fine.
+/// "Hide" means some frame is not, and the harmless ones (often the first)
+/// must not be learned as hide-worthy: only the frame the prompts find most
+/// explicit is.
+fn examples_of(frames: Vec<Logged>, hide: bool) -> Vec<(Vec<f32>, bool)> {
+    if !hide {
+        return frames.into_iter().map(|f| (f.embedding, false)).collect();
+    }
+    frames
+        .into_iter()
+        .max_by(|a, b| a.explicitness.total_cmp(&b.explicitness))
+        .map(|f| vec![(f.embedding, true)])
+        .unwrap_or_default()
+}
+
+/// Whether a saved image may be an animation, judged on several frames.
+fn animated(file: &str) -> bool {
+    file.ends_with(".gif") || file.ends_with(".webp")
+}
+
+/// A label's frames where its log line has none for this model: computed
+/// from the saved image once, then kept. An animation labelled before its
+/// frames were logged is judged again here, frame by frame.
+fn cached_frames(dir: &Path, file: &str) -> Option<Vec<Logged>> {
+    let cached = dir.join("embeddings").join(EMBEDDER);
+    let cache = cached.join(format!("{file}.frames.json"));
     if let Ok(text) = std::fs::read_to_string(&cache)
-        && let Ok(e) = serde_json::from_str(&text)
+        && let Ok(frames) = serde_json::from_str(&text)
     {
-        return Some(e);
+        return Some(frames);
+    }
+    // One embedding per still image, as earlier versions kept them.
+    if !animated(file)
+        && let Ok(text) = std::fs::read_to_string(cached.join(format!("{file}.json")))
+        && let Ok(embedding) = serde_json::from_str(&text)
+    {
+        return Some(vec![Logged {
+            embedding,
+            explicitness: 0.0,
+        }]);
     }
     let bytes = std::fs::read(dir.join(file)).ok()?;
-    let judged = match crate::image_filter::judge(&bytes) {
-        Ok(j) => j,
+    let frames: Vec<Logged> = match crate::image_filter::judge_frames(&bytes) {
+        Ok(frames) => frames
+            .into_iter()
+            .map(|j| Logged {
+                explicitness: j.scores.nudity + j.scores.suggestive,
+                embedding: j.embedding,
+            })
+            .collect(),
         Err(_) => {
             warn!(file, "could not embed a labelled image");
             return None;
         }
     };
-    let _ = std::fs::create_dir_all(dir.join("embeddings"));
-    let _ = std::fs::write(
-        &cache,
-        serde_json::to_string(&judged.embedding).unwrap_or_default(),
-    );
-    Some(judged.embedding)
+    let _ = std::fs::create_dir_all(&cached);
+    let _ = std::fs::write(&cache, serde_json::to_string(&frames).unwrap_or_default());
+    Some(frames)
 }
