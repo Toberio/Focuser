@@ -127,6 +127,54 @@ describe("moving between pages without a page load", () => {
   });
 });
 
+describe("telling the app about private windows", () => {
+  /** The first heartbeat a freshly started worker sent, as a parsed address. */
+  async function firstHeartbeat() {
+    const fetched = await start();
+    const beat = fetched.mock.calls
+      .map(([url]) => new URL(String(url)))
+      .find((url) => url.pathname === "/api/heartbeat");
+    if (!beat) throw new Error("the worker sent no heartbeat");
+    return beat;
+  }
+  const privateWindows = (answer: () => Promise<unknown>) =>
+    Object.assign(fakeBrowser, { extension: { isAllowedIncognitoAccess: answer } });
+
+  it("says no when the browser keeps it out of them, and which profile is talking", async () => {
+    privateWindows(async () => false);
+    const beat = await firstHeartbeat();
+
+    expect(beat.searchParams.get("incognito_allowed")).toBe("false");
+    // The app holds each profile to its own answer, so it needs to tell them
+    // apart. Two profiles of one browser are two copies of this extension.
+    expect(beat.searchParams.get("profile")).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("keeps its id from one start of the worker to the next", async () => {
+    privateWindows(async () => true);
+    const first = await firstHeartbeat();
+    const second = await firstHeartbeat();
+
+    expect(second.searchParams.get("profile")).toBe(first.searchParams.get("profile"));
+  });
+
+  it("says nothing when it cannot find out", async () => {
+    // "I do not know" must not read as "no": the app closes the browser on no.
+    for (const answer of [
+      async () => {
+        throw new Error("not in this browser");
+      },
+      async () => undefined,
+    ]) {
+      privateWindows(answer);
+      const beat = await firstHeartbeat();
+
+      expect(beat.searchParams.get("browser")).toBeTruthy();
+      expect(beat.searchParams.has("incognito_allowed")).toBe(false);
+    }
+  });
+});
+
 describe("opening a blocked site", () => {
   const visit = (url: string, frameId = 0) =>
     fakeBrowser.webNavigation.onCommitted.trigger({ tabId: 7, frameId, url } as never);

@@ -5,6 +5,7 @@ import {
   fetchRules,
   isIncognitoAllowed,
   POLL_INTERVAL_MS,
+  profileId,
   reportBlocked,
   sendAllowanceTick,
   sendHeartbeat,
@@ -138,8 +139,8 @@ export default defineBackground(() => {
    * cheap local call, not worth caching around a reload edge case.
    */
   async function heartbeat() {
-    const incognitoAllowed = await isIncognitoAllowed();
-    await sendHeartbeat(browserName, incognitoAllowed);
+    const [incognitoAllowed, profile] = await Promise.all([isIncognitoAllowed(), profileId()]);
+    await sendHeartbeat(browserName, incognitoAllowed, profile);
   }
 
   function updateBadge() {

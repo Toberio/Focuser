@@ -26,7 +26,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
     info!("Background blocker started");
 
     // Browser enforcement state
-    let mut grace_periods: HashMap<BrowserType, Instant> = HashMap::new();
+    let mut grace_periods: HashMap<BrowserType, Grace> = HashMap::new();
     let mut was_using_hosts = true;
     let mut cleared_processes = HashSet::new();
 
@@ -341,7 +341,7 @@ fn kill_allowance_blocked_apps(
 fn enforce_browser_extension(
     has_active_blocks: bool,
     grace_duration: Duration,
-    grace_periods: &mut HashMap<BrowserType, Instant>,
+    grace_periods: &mut HashMap<BrowserType, Grace>,
 ) {
     if !has_active_blocks {
         grace_periods.clear();
@@ -370,18 +370,46 @@ fn enforce_browser_extension(
             continue;
         }
 
-        let Some(started_at) = grace_periods.get(browser) else {
+        let grace = grace_periods.entry(browser.clone()).or_insert_with(|| {
             warn!(
                 browser = ?browser,
                 grace_secs = grace_duration.as_secs(),
                 "Browser running without full Focuser coverage — grace period started"
             );
-            grace_periods.insert(browser.clone(), now);
-            continue;
-        };
+            Grace {
+                started: now,
+                warned: false,
+            }
+        });
+        let waited = now.duration_since(grace.started);
 
-        if now.duration_since(*started_at) < grace_duration {
-            continue;
+        // The extension may still be checking in — just without incognito
+        // access — which changes what the user needs to be told to fix.
+        let reason = || {
+            if crate::api::get_connected_browsers(180).contains(browser) {
+                crate::api::ClosedReason::IncognitoNotAllowed
+            } else {
+                crate::api::ClosedReason::NotInstalled
+            }
+        };
+        let name = focuser_common::browser::KNOWN_BROWSERS
+            .iter()
+            .find(|b| b.browser_type == *browser)
+            .map(|b| b.display_name)
+            .unwrap_or("your browser");
+
+        match grace_step(waited, grace_duration, grace.warned) {
+            GraceStep::Wait => continue,
+            GraceStep::Warn => {
+                grace.warned = true;
+                crate::api::prompt_about_browser(crate::api::BrowserPrompt {
+                    browser: name.to_string(),
+                    reason: reason(),
+                    closing_in_secs: Some(grace_duration.saturating_sub(waited).as_secs()),
+                });
+                continue;
+            }
+            GraceStep::Close => {}
         }
 
         // Last look before closing anything, with a wider window still: the
@@ -396,14 +424,7 @@ fn enforce_browser_extension(
             continue;
         }
 
-        // The extension may still be checking in — just without incognito
-        // access — which changes what the user needs to be told to fix.
-        let reason = if crate::api::get_connected_browsers(180).contains(browser) {
-            crate::api::ClosedReason::IncognitoNotAllowed
-        } else {
-            crate::api::ClosedReason::NotInstalled
-        };
-
+        let reason = reason();
         info!(
             browser = ?browser,
             pid_count = pids.len(),
@@ -414,12 +435,11 @@ fn enforce_browser_extension(
             process::terminate(pid);
         }
 
-        let name = focuser_common::browser::KNOWN_BROWSERS
-            .iter()
-            .find(|b| b.browser_type == *browser)
-            .map(|b| b.display_name)
-            .unwrap_or("your browser");
-        crate::api::set_killed_browser(name, reason);
+        crate::api::prompt_about_browser(crate::api::BrowserPrompt {
+            browser: name.to_string(),
+            reason,
+            closing_in_secs: None,
+        });
         crate::api::SHOW_WINDOW_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Reset so the grace period restarts if the browser is relaunched.
@@ -427,6 +447,40 @@ fn enforce_browser_extension(
     }
 
     grace_periods.retain(|browser, _| running.contains_key(browser));
+}
+
+/// How long a browser has been running without cover, and whether the user
+/// has been told.
+struct Grace {
+    started: Instant,
+    warned: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GraceStep {
+    Wait,
+    Warn,
+    Close,
+}
+
+/// A browser that has only just started has not heard from its extension yet,
+/// so its first seconds say nothing. Warning then would be a false alarm on
+/// every start.
+const SETTLE: Duration = Duration::from_secs(15);
+
+/// What to do about a browser that has run without cover for `waited`.
+///
+/// It is closed when the grace period ends. Before that the user is told
+/// once, with time left to fix it: closing a browser loses work, and nobody
+/// should learn why only afterwards.
+fn grace_step(waited: Duration, grace: Duration, warned: bool) -> GraceStep {
+    if waited >= grace {
+        GraceStep::Close
+    } else if !warned && waited >= SETTLE {
+        GraceStep::Warn
+    } else {
+        GraceStep::Wait
+    }
 }
 
 /// The main process of every running browser.
@@ -573,6 +627,39 @@ mod tests {
 
     use super::*;
     use focuser_common::process::Process;
+
+    const MINUTE: Duration = Duration::from_secs(60);
+    const fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// A browser that has only just started has not heard from its extension
+    /// yet. Telling the user then would be a false alarm on every start.
+    #[test]
+    fn a_browser_that_has_just_started_is_given_time_to_report() {
+        assert_eq!(grace_step(secs(0), MINUTE, false), GraceStep::Wait);
+        assert_eq!(grace_step(secs(9), MINUTE, false), GraceStep::Wait);
+    }
+
+    #[test]
+    fn the_user_is_warned_once_while_there_is_still_time_to_fix_it() {
+        assert_eq!(grace_step(SETTLE, MINUTE, false), GraceStep::Warn);
+        assert_eq!(grace_step(secs(30), MINUTE, false), GraceStep::Warn);
+        assert_eq!(grace_step(secs(30), MINUTE, true), GraceStep::Wait);
+    }
+
+    #[test]
+    fn the_browser_is_closed_when_the_grace_period_is_over() {
+        assert_eq!(grace_step(MINUTE, MINUTE, true), GraceStep::Close);
+        assert_eq!(grace_step(secs(61), MINUTE, false), GraceStep::Close);
+    }
+
+    /// Someone who set the grace period this short asked for a quick close.
+    #[test]
+    fn a_grace_period_shorter_than_the_settle_time_closes_with_no_warning() {
+        assert_eq!(grace_step(secs(3), secs(5), false), GraceStep::Wait);
+        assert_eq!(grace_step(secs(6), secs(5), false), GraceStep::Close);
+    }
 
     #[test]
     fn a_browser_is_closed_through_its_main_process_only() {

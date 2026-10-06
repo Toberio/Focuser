@@ -56,32 +56,56 @@ export async function fetchRules(browser: BrowserName): Promise<RuleSet | null> 
  * an uncovered one, since Chrome hides incognito windows from an extension
  * that lacks the permission entirely. The app treats "not allowed" the same
  * as "not installed": it is a real gap, not a false alarm.
+ *
+ * `null` is "could not find out" and sends nothing. The app closes the
+ * browser on a no, so only a real no may be sent as one.
  */
 export async function sendHeartbeat(
   browser: BrowserName,
-  incognitoAllowed: boolean,
+  incognitoAllowed: boolean | null = null,
+  profile = "",
 ): Promise<void> {
+  const answer =
+    incognitoAllowed === null
+      ? ""
+      : `&incognito_allowed=${incognitoAllowed}&profile=${encodeURIComponent(profile)}`;
   try {
-    await fetch(
-      `${API_BASE}/api/heartbeat?browser=${encodeURIComponent(browser)}&incognito_allowed=${incognitoAllowed}`,
-    );
+    await fetch(`${API_BASE}/api/heartbeat?browser=${encodeURIComponent(browser)}${answer}`);
   } catch {
     /* app closed */
   }
 }
 
 /**
- * Whether this extension can run in private/incognito windows.
- *
- * `false` on browsers without the API (nothing in our supported list lacks
- * it, but a future one might) — the safe default, since "unknown" must not
- * read as "covered".
+ * Whether this extension can run in private/incognito windows. `null` when
+ * the browser does not say: the call is missing, throws, or answers with
+ * something that is not a yes or a no.
  */
-export async function isIncognitoAllowed(): Promise<boolean> {
+export async function isIncognitoAllowed(): Promise<boolean | null> {
   try {
-    return await browser.extension.isAllowedIncognitoAccess();
+    const allowed: unknown = await browser.extension.isAllowedIncognitoAccess();
+    return typeof allowed === "boolean" ? allowed : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+/**
+ * A name for this copy of the extension, made up once and kept.
+ *
+ * A browser runs one copy per profile, and each has its own answer about
+ * private windows. The app needs to tell them apart to hold each to its own.
+ * It never leaves this machine.
+ */
+export async function profileId(): Promise<string> {
+  try {
+    const stored: unknown = (await browser.storage.local.get("profileId")).profileId;
+    if (typeof stored === "string" && stored) return stored;
+    const id = crypto.randomUUID();
+    await browser.storage.local.set({ profileId: id });
+    return id;
+  } catch {
+    return "";
   }
 }
 

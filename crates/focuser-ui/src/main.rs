@@ -274,10 +274,11 @@ fn main() {
                     if api::EXTENSION_PROMPT_REQUESTED
                         .swap(false, std::sync::atomic::Ordering::Relaxed)
                     {
-                        let (browser_name, reason) =
-                            api::take_killed_browser().unwrap_or_else(|| {
-                                ("your browser".into(), api::ClosedReason::NotInstalled)
-                            });
+                        let prompt = api::take_browser_prompt().unwrap_or(api::BrowserPrompt {
+                            browser: "your browser".into(),
+                            reason: api::ClosedReason::NotInstalled,
+                            closing_in_secs: None,
+                        });
 
                         if let Some(window) = show_handle.get_webview_window("main") {
                             let _ = window.show();
@@ -285,7 +286,7 @@ fn main() {
 
                             // Inject themed in-app modal with retry
                             // The webview may not be ready immediately after show()
-                            let js = build_extension_modal_js(&browser_name, reason, &show_state);
+                            let js = build_extension_modal_js(&prompt, &show_state);
                             let win = window.clone();
                             std::thread::spawn(move || {
                                 // Try multiple times with increasing delays
@@ -528,11 +529,41 @@ fn format_remaining(secs: u64) -> String {
     }
 }
 
-fn build_extension_modal_js(
-    browser_name: &str,
-    reason: api::ClosedReason,
-    state: &Arc<AppState>,
-) -> String {
+/// Title, body and button label for a prompt about a browser.
+///
+/// The same two reasons are said twice: as a warning while there is still
+/// time to fix it, and as a report once the browser has been closed.
+fn prompt_text(
+    text: &'static i18n::Strings,
+    prompt: &api::BrowserPrompt,
+) -> (&'static str, &'static str, &'static str) {
+    let warning = prompt.closing_in_secs.is_some();
+    match prompt.reason {
+        api::ClosedReason::NotInstalled => (
+            text.extension_title,
+            if warning {
+                text.extension_warning_body
+            } else {
+                text.extension_body
+            },
+            text.extension_install,
+        ),
+        api::ClosedReason::IncognitoNotAllowed => (
+            text.extension_incognito_title,
+            if warning {
+                text.extension_incognito_warning_body
+            } else {
+                text.extension_incognito_body
+            },
+            text.extension_incognito_action,
+        ),
+    }
+}
+
+fn build_extension_modal_js(prompt: &api::BrowserPrompt, state: &Arc<AppState>) -> String {
+    let browser_name = prompt.browser.as_str();
+    let reason = prompt.reason;
+    let seconds = prompt.closing_in_secs.unwrap_or_default();
     // The two reasons need different destinations: "not installed" sends
     // someone to the store, "incognito not allowed" sends them to the
     // browser's own extension settings — installing again would do nothing.
@@ -557,18 +588,7 @@ fn build_extension_modal_js(
         .unwrap_or_else(|_| "en".to_string());
     let text = i18n::strings(&locale);
 
-    let (title, body, action_label) = match reason {
-        api::ClosedReason::NotInstalled => (
-            text.extension_title,
-            text.extension_body,
-            text.extension_install,
-        ),
-        api::ClosedReason::IncognitoNotAllowed => (
-            text.extension_incognito_title,
-            text.extension_incognito_body,
-            text.extension_incognito_action,
-        ),
-    };
+    let (title, body, action_label) = prompt_text(text, prompt);
 
     // Encoded as JSON so an apostrophe in a translation cannot close a JS
     // string, then substituted in the page rather than here.
@@ -605,7 +625,7 @@ fn build_extension_modal_js(
 
   var msg = document.createElement('p');
   msg.style.cssText = 'font-size:14px;line-height:1.6;color:#b0b0bc;margin-bottom:24px';
-  msg.textContent = {ext_body}.split('{{browser}}').join('{browser_name}').split('{{store}}').join('{action_target_label}');
+  msg.textContent = {ext_body}.split('{{browser}}').join('{browser_name}').split('{{store}}').join('{action_target_label}').split('{{seconds}}').join('{seconds}');
 
   var btnRow = document.createElement('div');
   btnRow.style.cssText = 'display:flex;gap:12px;flex-direction:column';
@@ -693,6 +713,49 @@ mod tests {
     use super::*;
     use focuser_common::types::{BlockList, Protection};
     use focuser_core::Database;
+
+    fn prompt(reason: api::ClosedReason, closing_in_secs: Option<u64>) -> api::BrowserPrompt {
+        api::BrowserPrompt {
+            browser: "Brave Browser".into(),
+            reason,
+            closing_in_secs,
+        }
+    }
+
+    /// Before the browser is closed the prompt says it is about to be, and
+    /// how long is left. Afterwards it says that it was.
+    #[test]
+    fn the_browser_prompt_warns_first_and_reports_afterwards() {
+        let text = i18n::strings("en");
+        for (reason, warning, closed) in [
+            (
+                api::ClosedReason::NotInstalled,
+                text.extension_warning_body,
+                text.extension_body,
+            ),
+            (
+                api::ClosedReason::IncognitoNotAllowed,
+                text.extension_incognito_warning_body,
+                text.extension_incognito_body,
+            ),
+        ] {
+            assert_eq!(prompt_text(text, &prompt(reason, Some(45))).1, warning);
+            assert_eq!(prompt_text(text, &prompt(reason, None)).1, closed);
+        }
+    }
+
+    #[test]
+    fn the_warning_on_screen_names_the_browser_and_the_seconds_left() {
+        let state = Arc::new(AppState::new_headless(
+            BlockEngine::new(Database::open_in_memory().unwrap()).unwrap(),
+        ));
+        let js = build_extension_modal_js(
+            &prompt(api::ClosedReason::IncognitoNotAllowed, Some(45)),
+            &state,
+        );
+        assert!(js.contains(".split('{seconds}').join('45')"), "{js}");
+        assert!(js.contains(".split('{browser}').join('Brave Browser')"));
+    }
 
     fn state_with(list: BlockList) -> Arc<AppState> {
         let db = Database::open_in_memory().unwrap();
