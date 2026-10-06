@@ -109,12 +109,17 @@ pub(crate) fn decode_frames(bytes: &[u8]) -> Result<Vec<RgbImage>> {
     }
 }
 
-/// Frames at 0, 1 s, 2 s… of play time, as the frame delays add up. A frame
-/// that fails to decode ends the animation there: a truncated download still
-/// has its earlier frames.
+/// Frames at 0, 1 s, 2 s… of play time, as the frame delays add up, and the
+/// last frame decoded. A frame that fails to decode ends the animation there:
+/// a truncated download still has its earlier frames. The last one matters
+/// most for those: the extension sends a GIF's first half-megabyte for a
+/// quick verdict, which may hold under a second of it, and the first and
+/// last frames of it are two looks instead of one.
 fn sample(frames: Frames) -> Vec<RgbImage> {
     let mut out = Vec::new();
     let (mut at, mut next) = (0u32, 0u32);
+    // The latest frame not sampled, kept undecoded until it is known to be last.
+    let mut last = None;
     for frame in frames {
         let Ok(frame) = frame else { break };
         let (numer, denom) = frame.delay().numer_denom_ms();
@@ -125,13 +130,19 @@ fn sample(frames: Frames) -> Vec<RgbImage> {
             delay
         };
         if at >= next {
+            last = None;
             out.push(DynamicImage::ImageRgba8(frame.into_buffer()).to_rgb8());
             if out.len() == MAX_FRAMES {
-                break;
+                return out;
             }
             next = at + FRAME_EVERY_MS;
+        } else {
+            last = Some(frame);
         }
         at = at.saturating_add(delay);
+    }
+    if let Some(frame) = last {
+        out.push(DynamicImage::ImageRgba8(frame.into_buffer()).to_rgb8());
     }
     out
 }
@@ -245,11 +256,24 @@ mod tests {
     }
 
     #[test]
-    fn an_animation_is_judged_a_frame_a_second() {
-        // 30 frames of 200 ms: 6 s, so frames 0, 5, 10, 15, 20 and 25.
+    fn an_animation_is_judged_a_frame_a_second_and_at_its_end() {
+        // 30 frames of 200 ms: 6 s, so frames 0, 5, 10, 15, 20 and 25, and
+        // the last, 29.
         let frames = decode_frames(&gif(30, 200)).expect("decodes");
         let greys: Vec<u8> = frames.iter().map(|f| f.get_pixel(0, 0)[0]).collect();
-        assert_eq!(greys, [0, 5, 10, 15, 20, 25]);
+        assert_eq!(greys, [0, 5, 10, 15, 20, 25, 29]);
+    }
+
+    #[test]
+    fn a_cut_off_animation_is_judged_at_its_first_and_last_frames() {
+        // The start of a GIF, as the extension sends it: under a second.
+        let whole = gif(30, 100);
+        let start = &whole[..whole.len() / 4];
+        let frames = decode_frames(start).expect("decodes");
+        let greys: Vec<u8> = frames.iter().map(|f| f.get_pixel(0, 0)[0]).collect();
+        assert_eq!(greys.len(), 2, "first and last frames: {greys:?}");
+        assert_eq!(greys[0], 0);
+        assert!(greys[1] > 0);
     }
 
     #[test]
@@ -265,7 +289,7 @@ mod tests {
         // 0 ms frames run at 100 ms each: one sample every ten frames.
         let frames = decode_frames(&gif(25, 0)).expect("decodes");
         let greys: Vec<u8> = frames.iter().map(|f| f.get_pixel(0, 0)[0]).collect();
-        assert_eq!(greys, [0, 10, 20]);
+        assert_eq!(greys, [0, 10, 20, 24]);
     }
 
     #[test]

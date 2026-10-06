@@ -459,6 +459,9 @@ fn api_image_verdict(bytes: &[u8], state: &AppState) -> (&'static str, String) {
             match scores.get(shown) {
                 Some(s) => serde_json::json!({
                     "verdict": if hidden.is_some() { "hidden" } else { "clear" },
+                    // Frames judged: each a look, for the extension's count
+                    // of clear looks before it shows an animation.
+                    "frames": scores.len(),
                     "score": format!("{}{frame} · {} ms", s.describe(), started.elapsed().as_millis()),
                 }),
                 None => serde_json::json!({ "verdict": "error" }),
