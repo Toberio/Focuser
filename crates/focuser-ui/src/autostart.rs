@@ -14,9 +14,11 @@
 //! the privileges to finish the job.
 //!
 //! On Linux the .deb ships a systemd user unit that also respawns Focuser if
-//! it is killed. When that unit is installed it *is* the login launcher: the
-//! toggle enables and disables it, and the plugin's XDG autostart entry is
-//! kept off, since with both, login launched Focuser twice.
+//! it is killed. When that unit is installed and the session runs
+//! `graphical-session.target`, the unit *is* the login launcher: the app
+//! enables it itself, the toggle enables and disables it, and the plugin's XDG
+//! autostart entry is kept off, since with both, login launched Focuser twice.
+//! Desktops without that target keep the XDG entry, as before.
 
 use std::sync::Arc;
 
@@ -98,15 +100,18 @@ pub fn set_autostart(
 pub fn reconcile(app: &AppHandle, db: &focuser_core::db::Database) {
     if db.get_setting(INITIALISED).ok().flatten().is_none() {
         set_plugin(app, true);
+        enable_launcher();
         let _ = db.set_setting(INITIALISED, "1");
         return;
     }
 
     let Ok(Some(saved)) = db.get_setting(ENABLED) else {
         // Never touched, so the default (on) stands. Still clear an XDG entry
-        // left over from before the systemd unit was installed.
+        // left over from before the systemd unit was installed, and enable
+        // the unit in its place.
         if imp::replaces_plugin() {
             set_plugin(app, true);
+            enable_launcher();
         }
         return;
     };
@@ -122,6 +127,16 @@ pub fn reconcile(app: &AppHandle, db: &focuser_core::db::Database) {
         TaskChange::NeedsAdmin => {
             warn!("logon task still needs admin to change; will retry next start")
         }
+    }
+}
+
+/// Turn on a platform launcher that replaces the plugin.
+///
+/// Nothing else would: a package installed through a software center runs no
+/// script as the user, so the app has to enable its own unit.
+fn enable_launcher() {
+    if imp::replaces_plugin() && !imp::task_enabled() {
+        imp::set_task(true);
     }
 }
 
@@ -207,14 +222,27 @@ mod imp {
     use super::TaskChange;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::OnceLock;
     use tracing::warn;
 
     /// Where the .deb puts the unit. Tied to the packaging in tauri.conf.json.
     const SYSTEMD_UNIT: &str = "/usr/lib/systemd/user/focuser.service";
     const UNIT: &str = "focuser.service";
 
+    /// The unit is installed and this session starts it.
+    ///
+    /// The unit hangs off `graphical-session.target`, which some desktops
+    /// never start. There it would never run, so the XDG entry stays the
+    /// launcher. Checked once per run: it does not change mid-session.
     fn has_unit() -> bool {
-        Path::new(SYSTEMD_UNIT).exists()
+        static USABLE: OnceLock<bool> = OnceLock::new();
+        *USABLE.get_or_init(|| {
+            Path::new(SYSTEMD_UNIT).exists()
+                && Command::new("systemctl")
+                    .args(["--user", "is-active", "--quiet", "graphical-session.target"])
+                    .status()
+                    .is_ok_and(|s| s.success())
+        })
     }
 
     pub fn replaces_plugin() -> bool {
