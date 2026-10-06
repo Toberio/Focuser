@@ -282,6 +282,10 @@ pub enum ProtectCmd {
         id: EntityId,
         #[arg(long, default_value_t = 60)]
         minutes: u32,
+        /// No timer: stay locked until unlocked with the password or random
+        /// text. Needs one of the two.
+        #[arg(long, conflicts_with = "minutes")]
+        until_unlocked: bool,
         /// Permit uninstalling Focuser while protection is active.
         #[arg(long)]
         allow_uninstall: bool,
@@ -550,6 +554,7 @@ impl TopLevel {
                 ProtectCmd::Enable {
                     id,
                     minutes,
+                    until_unlocked,
                     allow_uninstall,
                     allow_service_stop,
                     allow_modification,
@@ -557,7 +562,7 @@ impl TopLevel {
                     random_text_length,
                 } => Command::EnableProtection {
                     list_id: id,
-                    duration_minutes: minutes,
+                    duration_minutes: (!until_unlocked).then_some(minutes),
                     prevent_uninstall: !allow_uninstall,
                     prevent_service_stop: !allow_service_stop,
                     prevent_modification: !allow_modification,
