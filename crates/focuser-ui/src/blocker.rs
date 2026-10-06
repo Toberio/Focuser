@@ -75,6 +75,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
 
         // Refresh engine cache (every ~3s)
         let mut watch_uninstalls = false;
+        let mut enforce_browsers = None;
         if let Ok(mut eng) = state.engine.lock() {
             let _ = eng.refresh();
 
@@ -130,7 +131,7 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
             let (grace_duration, enforce_enabled) = enforcement_settings(eng.db());
             if enforce_enabled {
                 let has_active_blocks = eng.block_lists().iter().any(|l| l.is_effectively_active());
-                enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
+                enforce_browsers = Some((has_active_blocks, grace_duration));
             }
         }
 
@@ -138,6 +139,9 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         // from the window and every request from the extension waits for that
         // lock, and reading command lines is the one step here whose cost
         // depends on what else the machine is running.
+        if let Some((has_active_blocks, grace_duration)) = enforce_browsers {
+            enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
+        }
         if watch_uninstalls {
             block_uninstall_attempts(&mut cleared_processes);
         }
@@ -346,33 +350,7 @@ fn enforce_browser_extension(
 
     let now = Instant::now();
 
-    let mut running: HashMap<BrowserType, Vec<u32>> = HashMap::new();
-    for proc in process::list() {
-        if !proc.is_killable() {
-            continue;
-        }
-        let Some(info) = identify_browser(&proc.name) else {
-            continue;
-        };
-        // Chromium's renderer, GPU, zygote, and utility subprocesses exec the
-        // same binary as the browser itself, so on Linux they report the
-        // identical `/proc/[pid]/comm` name as the top-level process — there
-        // is no way to tell them apart by name. Killing them individually
-        // bypasses the browser's own shutdown path entirely and reads as a
-        // crash, not a close. Every subprocess carries `--type=...`; the
-        // top-level process never does. Firefox's equivalent is
-        // `-contentproc`: its children usually rename themselves ("Web
-        // Content", "forkserver"), but not reliably before we look.
-        let is_subprocess =
-            process::cmdline(proc.pid).is_some_and(|cmd| is_browser_subprocess(&cmd));
-        if is_subprocess {
-            continue;
-        }
-        running
-            .entry(info.browser_type.clone())
-            .or_default()
-            .push(proc.pid);
-    }
+    let running = browser_main_processes(&process::list(), process::cmdline);
 
     // Generous 2-minute window: extensions use chrome.alarms, which fires
     // every 30s once the service worker sleeps. Anything tighter would call a
@@ -432,6 +410,42 @@ fn enforce_browser_extension(
     }
 
     grace_periods.retain(|browser, _| running.contains_key(browser));
+}
+
+/// The main process of every running browser.
+///
+/// Chromium's renderer, GPU, zygote, and utility subprocesses exec the same
+/// binary as the browser itself, so on Linux and Windows they report the same
+/// name as the top-level process. Killing them individually bypasses the
+/// browser's own shutdown path entirely and reads as a crash, not a close.
+/// Every subprocess carries `--type=...`; the top-level process never does.
+/// Firefox's equivalent is `-contentproc`: its children usually rename
+/// themselves ("Web Content", "forkserver"), but not reliably before we look.
+fn browser_main_processes(
+    procs: &[process::Process],
+    mut read_cmdline: impl FnMut(u32) -> Option<String>,
+) -> HashMap<BrowserType, Vec<u32>> {
+    // On macOS a helper runs from its own bundle under its own name ("Google
+    // Chrome Helper (Renderer)", "plugin-container"), so the name already
+    // picks out the main process, and every command line read starts `ps`.
+    let helpers_share_the_name = !cfg!(target_os = "macos");
+
+    let mut running: HashMap<BrowserType, Vec<u32>> = HashMap::new();
+    for proc in procs.iter().filter(|p| p.is_killable()) {
+        let Some(info) = identify_browser(&proc.name) else {
+            continue;
+        };
+        if helpers_share_the_name
+            && read_cmdline(proc.pid).is_some_and(|cmd| is_browser_subprocess(&cmd))
+        {
+            continue;
+        }
+        running
+            .entry(info.browser_type.clone())
+            .or_default()
+            .push(proc.pid);
+    }
+    running
 }
 
 /// Whether a browser process command line belongs to a child process
@@ -542,6 +556,36 @@ mod tests {
 
     use super::*;
     use focuser_common::process::Process;
+
+    #[test]
+    fn a_browser_is_closed_through_its_main_process_only() {
+        let name = focuser_common::browser::KNOWN_BROWSERS[0].exe_names[0];
+        let procs = [10, 11].map(|pid| Process {
+            pid,
+            name: name.into(),
+        });
+        let mut reads = 0;
+        let running = browser_main_processes(&procs, |pid| {
+            reads += 1;
+            Some(
+                if pid == 11 {
+                    "browser --type=renderer"
+                } else {
+                    "browser"
+                }
+                .to_string(),
+            )
+        });
+        let pids = running.into_values().next().unwrap_or_default();
+
+        if cfg!(target_os = "macos") {
+            // A helper has its own name there, so both of these are main
+            // processes, and nothing had to start `ps` to find that out.
+            assert_eq!((pids, reads), (vec![10, 11], 0));
+        } else {
+            assert_eq!(pids, [10]);
+        }
+    }
 
     #[test]
     fn a_harmless_shell_is_read_once_and_an_uninstall_every_time() {
