@@ -164,6 +164,9 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
   const isRandomText = lock !== null && "RandomText" in lock;
   const challenge = requestChallenge.data;
   const challengeCharacters = Array.from(challenge ?? "");
+  // Counted once here. Counted inside the loop below it was one pass over the
+  // typed text for every character shown, which is felt at 5000 characters.
+  const typedCount = Array.from(response).length;
   const mismatchIndex =
     isRandomText && challenge
       ? Array.from(response).findIndex(
@@ -221,8 +224,7 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
                     className={
                       index === mismatchIndex
                         ? "text-destructive"
-                        : index < Array.from(response).length &&
-                            (mismatchIndex === -1 || index < mismatchIndex)
+                        : index < typedCount && (mismatchIndex === -1 || index < mismatchIndex)
                           ? "text-success"
                           : undefined
                     }
