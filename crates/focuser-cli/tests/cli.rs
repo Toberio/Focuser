@@ -557,6 +557,41 @@ fn wipe_and_import_are_refused_while_a_list_is_locked() {
 // ─── Diagnostics ────────────────────────────────────────────────────
 
 #[test]
+fn a_lock_with_no_end_names_the_flags_it_needs() {
+    let cli = Cli::new();
+    let id = cli.make_list("Forever");
+
+    let (code, error) = cli.fail(&["protect", "enable", &id, "--until-unlocked"]);
+
+    assert_eq!(code, 2);
+    assert!(
+        error.contains("--password") && error.contains("--random-text-length"),
+        "got: {error}"
+    );
+    cli.ok(&["list", "disable", &id]);
+}
+
+#[test]
+fn a_lock_with_no_end_says_so_and_ends_with_its_password() {
+    let cli = Cli::new();
+    let id = cli.make_list("Forever");
+    cli.ok(&[
+        "protect",
+        "enable",
+        &id,
+        "--until-unlocked",
+        "--password",
+        "open-sesame",
+    ]);
+
+    assert!(cli.ok(&["protect", "status"]).contains("until unlocked"));
+    assert_eq!(cli.fail(&["list", "disable", &id]).0, 5);
+
+    cli.ok(&["protect", "unlock", &id, "open-sesame"]);
+    cli.ok(&["list", "disable", &id]);
+}
+
+#[test]
 fn explicit_password_arguments_still_enable_and_unlock_protection() {
     let cli = Cli::new();
     let id = cli.make_list("Password protected");

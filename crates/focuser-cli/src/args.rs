@@ -284,7 +284,7 @@ pub enum ProtectCmd {
         minutes: u32,
         /// No timer: stay locked until unlocked with the password or random
         /// text. Needs one of the two.
-        #[arg(long, conflicts_with = "minutes")]
+        #[arg(long, conflicts_with = "minutes", requires = "unlock")]
         until_unlocked: bool,
         /// Permit uninstalling Focuser while protection is active.
         #[arg(long)]
@@ -298,11 +298,11 @@ pub enum ProtectCmd {
         /// Require a password to end the window early. Omit the value to
         /// enter and confirm it without echo. An explicit value is visible
         /// in shell history and process arguments.
-        #[arg(long, num_args = 0..=1, value_name = "PASSWORD", conflicts_with = "random_text_length")]
+        #[arg(long, num_args = 0..=1, value_name = "PASSWORD", group = "unlock")]
         password: Option<Option<String>>,
         /// Require retyping a random string of this many characters to end
         /// the window early. The string is only shown in the app.
-        #[arg(long, conflicts_with = "password")]
+        #[arg(long, group = "unlock")]
         random_text_length: Option<u32>,
     },
     /// Show active protection windows.
