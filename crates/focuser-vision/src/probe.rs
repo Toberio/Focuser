@@ -1,10 +1,10 @@
 //! A filter that learns from the user's own Show/Hide labels.
 //!
-//! CLIP describes every image as 512 numbers. A logistic regression on those
+//! SigLIP describes every image as 768 numbers. A logistic regression on those
 //! numbers, trained on the images a user marked, learns where *their* line is
-//! far better than thresholds on a handful of prompts can: held out, it
-//! missed and wrongly hid several times fewer images than the best
-//! thresholds did.
+//! far better than thresholds on a handful of prompts can: held out, at
+//! Strict it missed about a third as many images that should have been
+//! hidden as the prompts did, while wrongly hiding no more.
 //!
 //! It trains in milliseconds, entirely on the machine.
 
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Fewest labels of each kind before the probe is trusted over the prompts.
 pub const MIN_PER_CLASS: usize = 5;
 
-/// CLIP embeddings are unit vectors with coordinates around ±0.05; scaled up,
+/// Embeddings are unit vectors with coordinates around ±0.04; scaled up,
 /// plain gradient descent settles in a few hundred steps.
 const SCALE: f32 = 10.0;
 const EPOCHS: usize = 400;

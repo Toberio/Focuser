@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         path,
                         std::fs::read(path)
                             .map_err(Into::into)
-                            .and_then(|b| c.judge(&b)),
+                            .and_then(|b| c.judge_frames(&b)),
                     )
                 })
             })
@@ -47,25 +47,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|n| n.to_str())
             .unwrap_or("?");
         match result {
-            Ok(judged) => {
-                let s = judged.scores;
-                if let Ok(dir) = std::env::var("FOCUSER_EMBEDDINGS_DIR") {
-                    let file = std::path::Path::new(&dir).join(format!("{name}.json"));
-                    let _ = std::fs::write(
-                        file,
-                        serde_json::to_string(&judged.embedding).unwrap_or_default(),
-                    );
+            Ok(frames) => {
+                for (i, judged) in frames.iter().enumerate() {
+                    let s = judged.scores;
+                    // Frames after the first get their own names.
+                    let name = match i {
+                        0 => name.to_string(),
+                        i => format!("{name}#{i}"),
+                    };
+                    if let Ok(dir) = std::env::var("FOCUSER_EMBEDDINGS_DIR") {
+                        let file = std::path::Path::new(&dir).join(format!("{name}.json"));
+                        let _ = std::fs::write(
+                            file,
+                            serde_json::to_string(&judged.embedding).unwrap_or_default(),
+                        );
+                    }
+                    let levels: Vec<&str> = [
+                        (ImageFilter::Explicit, "E"),
+                        (ImageFilter::Balanced, "B"),
+                        (ImageFilter::Strict, "S"),
+                    ]
+                    .iter()
+                    .filter(|(l, _)| is_hidden(&s, *l) == Some(true))
+                    .map(|(_, n)| *n)
+                    .collect();
+                    println!("{name:28} {} hidden at [{}]", s.describe(), levels.join(""));
                 }
-                let levels: Vec<&str> = [
-                    (ImageFilter::Explicit, "E"),
-                    (ImageFilter::Balanced, "B"),
-                    (ImageFilter::Strict, "S"),
-                ]
-                .iter()
-                .filter(|(l, _)| is_hidden(&s, *l) == Some(true))
-                .map(|(_, n)| *n)
-                .collect();
-                println!("{name:28} {} hidden at [{}]", s.describe(), levels.join(""));
             }
             Err(e) => println!("{name:28} error: {e}"),
         }

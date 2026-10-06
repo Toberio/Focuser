@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// - `nsfw` is Marqo's ViT, trained on nudity against everything else. It is
 ///   reliable about real nudity, but close-ups of skin (tattoos) and painted
 ///   skin set it off too, so it never decides alone.
-/// - `nudity` and `suggestive` are CLIP's: the share of an image's similarity
+/// - `nudity` and `suggestive` are SigLIP's: the share of an image's similarity
 ///   that goes to prompts describing each, against neutral prompts (sport,
 ///   portraits, art, tattoos, activewear and more).
 /// - `personal` is the user's own trained filter ([`crate::probe::Probe`]),
@@ -38,51 +38,74 @@ impl Scores {
 }
 
 struct Thresholds {
-    /// Nudity: Marqo at least `nsfw` *and* CLIP's nudity plus suggestive at
-    /// least `clip`. Both, because each misfires where the other does not.
+    /// Nudity: Marqo at least `nsfw` *and* SigLIP's nudity plus suggestive at
+    /// least `prompts`. Both, because each misfires where the other does not.
     nsfw: f32,
-    clip: f32,
+    prompts: f32,
     /// The user's filter, where there is one. Infinity: not at this level.
     personal: f32,
-    /// Without one: CLIP's suggestive share alone.
+    /// Without one: SigLIP's suggestive share alone.
     suggestive: f32,
 }
 
 /// Each level's numbers are at or below the one before it, so each level
 /// hides everything the one before it does.
 fn thresholds(level: ImageFilter) -> Option<Thresholds> {
-    let t = |nsfw, clip, personal, suggestive| Thresholds {
+    let t = |nsfw, prompts, personal, suggestive| Thresholds {
         nsfw,
-        clip,
+        prompts,
         personal,
         suggestive,
     };
     match level {
         ImageFilter::Off => None,
         ImageFilter::Explicit => Some(t(0.8, 0.7, f32::INFINITY, f32::INFINITY)),
-        ImageFilter::Balanced => Some(t(0.7, 0.65, 0.5, 0.85)),
-        ImageFilter::Strict => Some(t(0.6, 0.6, 0.3, 0.7)),
+        ImageFilter::Balanced => Some(t(0.7, 0.65, 0.6, 0.85)),
+        ImageFilter::Strict => Some(t(0.6, 0.6, 0.4, 0.7)),
     }
 }
 
-/// Below this the user's filter is sure they would want the image shown, and
-/// it may overrule the nudity check at the levels it applies to. Their labels
-/// taught it that paintings and tattoos are fine; the nudity models never
-/// learn that.
-const PERSONAL_SURE_SHOW: f32 = 0.05;
+/// Below this the user's filter is sure enough they would want the image
+/// shown to overrule the nudity check, at the levels it applies to. Their
+/// labels taught it which paintings, tattoos and swimwear are fine; the
+/// nudity models never learn that.
+///
+/// Set on held-out labels at Strict: at 0.05 the nudity check alone wrongly
+/// hid nearly three times as many images as at 0.3 with [`NSFW_SURE`] below,
+/// which lets about one more through that should have been hidden.
+const PERSONAL_SURE_SHOW: f32 = 0.3;
+
+/// Where Marqo is this sure, only a filter nearly certain of "show" may
+/// overrule it: in testing, every image a 0.3 bar would otherwise have let
+/// through wrongly had Marqo at 0.9 or more.
+const NSFW_SURE: f32 = 0.9;
+const PERSONAL_SURE_SHOW_OVER_NSFW_SURE: f32 = 0.05;
 
 /// Whether an image should be hidden at `level`. `None` when the filter is off.
 pub fn is_hidden(scores: &Scores, level: ImageFilter) -> Option<bool> {
     let t = thresholds(level)?;
     let personal = scores.personal.filter(|_| t.personal.is_finite());
-    let nudity = scores.nsfw >= t.nsfw && scores.nudity + scores.suggestive >= t.clip;
-    if nudity && personal.is_none_or(|p| p >= PERSONAL_SURE_SHOW) {
+    let nudity = scores.nsfw >= t.nsfw && scores.nudity + scores.suggestive >= t.prompts;
+    let sure_show = if scores.nsfw >= NSFW_SURE {
+        PERSONAL_SURE_SHOW_OVER_NSFW_SURE
+    } else {
+        PERSONAL_SURE_SHOW
+    };
+    if nudity && personal.is_none_or(|p| p >= sure_show) {
         return Some(true);
     }
     Some(match personal {
         Some(p) => p >= t.personal,
         None => scores.suggestive >= t.suggestive,
     })
+}
+
+/// An animation's verdict: the first of its judged frames that would be
+/// hidden at `level`, if any. One explicit frame is enough.
+pub fn first_hidden(frames: &[Scores], level: ImageFilter) -> Option<usize> {
+    frames
+        .iter()
+        .position(|s| is_hidden(s, level) == Some(true))
 }
 
 #[cfg(test)]
@@ -122,10 +145,10 @@ mod tests {
     #[test]
     fn nudity_needs_both_models() {
         assert_eq!(hidden_at(scores(0.9, 0.8, 0.1, None)), LEVELS);
-        // Real scores: tattoos and paintings Marqo took for nudity, CLIP not.
+        // Real scores: tattoos and paintings Marqo took for nudity, the prompts not.
         assert!(hidden_at(scores(0.95, 0.01, 0.01, None)).is_empty());
         assert!(hidden_at(scores(0.85, 0.0, 0.0, None)).is_empty());
-        // And a wallpaper CLIP put nearest its nudity prompts, Marqo not.
+        // And a wallpaper the prompt model put nearest its nudity prompts, Marqo not.
         assert!(hidden_at(scores(0.06, 0.48, 0.03, None)).is_empty());
     }
 
@@ -143,9 +166,9 @@ mod tests {
 
     #[test]
     fn with_labels_the_users_filter_decides() {
-        // CLIP calls it suggestive; the user taught their filter otherwise.
+        // The prompts call it suggestive; the user taught their filter otherwise.
         assert!(hidden_at(scores(0.08, 0.09, 0.80, Some(0.1))).is_empty());
-        // CLIP saw little; the user's filter knows what they meant.
+        // The prompts saw little; the user's filter knows what they meant.
         assert_eq!(
             hidden_at(scores(0.26, 0.02, 0.21, Some(0.4))),
             [ImageFilter::Strict]
@@ -163,11 +186,30 @@ mod tests {
             hidden_at(scores(0.9, 0.8, 0.1, Some(0.01))),
             [ImageFilter::Explicit]
         );
-        // Unsure, the user's filter does not overrule them.
+        // Fairly sure, it overrules them where Marqo has doubts...
+        assert_eq!(
+            hidden_at(scores(0.8, 0.8, 0.1, Some(0.2))),
+            [ImageFilter::Explicit]
+        );
+        // ...but not where Marqo is sure.
         assert_eq!(hidden_at(scores(0.9, 0.8, 0.1, Some(0.2))), LEVELS);
+        // Unsure, the user's filter overrules nothing.
+        assert_eq!(hidden_at(scores(0.8, 0.8, 0.1, Some(0.35))), LEVELS);
         // Real scores: a painting both nudity models half-believed. Below the
         // explicit bar, and the user's filter shows it.
         assert!(hidden_at(scores(0.87, 0.51, 0.12, Some(0.01))).is_empty());
+    }
+
+    #[test]
+    fn one_explicit_frame_hides_an_animation() {
+        let clean = scores(0.1, 0.1, 0.1, None);
+        let explicit = scores(0.9, 0.8, 0.1, None);
+        assert_eq!(first_hidden(&[clean, clean], ImageFilter::Strict), None);
+        assert_eq!(
+            first_hidden(&[clean, explicit, clean], ImageFilter::Strict),
+            Some(1)
+        );
+        assert_eq!(first_hidden(&[explicit], ImageFilter::Off), None);
     }
 
     #[test]

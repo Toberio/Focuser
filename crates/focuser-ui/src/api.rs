@@ -249,7 +249,12 @@ fn handle_request(mut stream: std::net::TcpStream, state: &AppState) {
     // A body is read only up to the cap: the largest is an image, and
     // anything past that is a mistake or an attack on a loopback port that
     // every local page can reach.
-    if content_length > MAX_BODY_BYTES {
+    let max = if request_line.starts_with("POST /api/image-") {
+        MAX_IMAGE_BYTES
+    } else {
+        MAX_BODY_BYTES
+    };
+    if content_length > max {
         respond(
             &mut stream,
             "413 Payload Too Large",
@@ -279,8 +284,12 @@ fn handle_request(mut stream: std::net::TcpStream, state: &AppState) {
     respond(&mut stream, status, &response_body);
 }
 
-/// Largest request body accepted: an image the filter is asked to judge.
+/// Largest request body accepted, other than an image.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// Largest image the filter is asked to judge. Animated GIFs run large: one
+/// of 102 frames on Reddit was 17 MB, and was shown unjudged under the old
+/// 16 MiB cap.
+const MAX_IMAGE_BYTES: usize = 100 * 1024 * 1024;
 
 fn respond(stream: &mut std::net::TcpStream, status: &str, response_body: &str) {
     let response = format!(
@@ -429,17 +438,31 @@ fn api_image_verdict(bytes: &[u8], state: &AppState) -> (&'static str, String) {
         eng.compile_extension_rules().image_filter
     };
     let started = Instant::now();
-    let body = match crate::image_filter::judge(bytes) {
-        Ok(judged) => {
-            let mut scores = judged.scores;
-            scores.personal = crate::image_feedback::personal(&judged.embedding);
-            serde_json::json!({
-            "verdict": match focuser_vision::is_hidden(&scores, level) {
-                Some(true) => "hidden",
-                _ => "clear",
-            },
-            "score": format!("{} · {} ms", scores.describe(), started.elapsed().as_millis()),
-            })
+    let body = match crate::image_filter::judge_frames(bytes) {
+        Ok(frames) => {
+            let scores: Vec<_> = frames
+                .iter()
+                .map(|judged| {
+                    let mut scores = judged.scores;
+                    scores.personal = crate::image_feedback::personal(&judged.embedding);
+                    scores
+                })
+                .collect();
+            // An animation is hidden if any frame judged would be. The scores
+            // shown are that frame's, or the first's.
+            let hidden = focuser_vision::first_hidden(&scores, level);
+            let shown = hidden.unwrap_or(0);
+            let frame = match scores.len() {
+                0 | 1 => String::new(),
+                n => format!(" · frame {} of {n}", shown + 1),
+            };
+            match scores.get(shown) {
+                Some(s) => serde_json::json!({
+                    "verdict": if hidden.is_some() { "hidden" } else { "clear" },
+                    "score": format!("{}{frame} · {} ms", s.describe(), started.elapsed().as_millis()),
+                }),
+                None => serde_json::json!({ "verdict": "error" }),
+            }
         }
         // Not ready, or the image would not decode: the extension shows it.
         Err(status) => serde_json::json!({ "verdict": "error", "status": status }),

@@ -125,21 +125,31 @@ pub fn status() -> Status {
     status_of(&state)
 }
 
-/// Judge one image: scores and CLIP's embedding. `Err` carries the status
-/// when the models are not ready.
+/// Judge one image, or an animation's first frame: scores and SigLIP's
+/// embedding. `Err` carries the status when the models are not ready.
 pub fn judge(bytes: &[u8]) -> Result<focuser_vision::Judged, Status> {
-    let classifier = {
-        let svc = service().ok_or(Status::Off)?;
-        let state = svc.state.lock().map_err(|_| Status::Off)?;
-        match &*state {
-            // Cloned out so the lock is not held through inference.
-            State::Ready(c) => c.clone(),
-            _ => return Err(status_of(&state)),
-        }
-    };
-    classifier.judge(bytes).map_err(|e| Status::Failed {
+    ready()?.judge(bytes).map_err(|e| Status::Failed {
         error: e.to_string(),
     })
+}
+
+/// Judge every frame worth judging, one for a still image and several spread
+/// through an animation: scores and SigLIP's embedding of each. `Err` carries
+/// the status when the models are not ready.
+pub fn judge_frames(bytes: &[u8]) -> Result<Vec<focuser_vision::Judged>, Status> {
+    ready()?.judge_frames(bytes).map_err(|e| Status::Failed {
+        error: e.to_string(),
+    })
+}
+
+fn ready() -> Result<Classifier, Status> {
+    let svc = service().ok_or(Status::Off)?;
+    let state = svc.state.lock().map_err(|_| Status::Off)?;
+    match &*state {
+        // Cloned out so the lock is not held through inference.
+        State::Ready(c) => Ok(c.clone()),
+        _ => Err(status_of(&state)),
+    }
 }
 
 fn status_of(state: &State) -> Status {

@@ -4,8 +4,9 @@
 //! DirectX 12) so nothing vendor-specific needs installing:
 //!
 //! - Marqo's nsfw-image-detection-384, a small ViT, for nudity;
-//! - OpenAI's CLIP ViT-B/32 image tower, compared with a handful of text
-//!   prompts, for suggestive pictures, which nudity models do not see.
+//! - Google's SigLIP 2 ViT-B/16 image tower, for suggestive pictures, which
+//!   nudity models do not see: compared with a handful of text prompts, and
+//!   its embedding learned from the user's own labels (`probe`).
 //!
 //! Images never leave the machine. The models are downloaded once, from
 //! Hugging Face, the first time the filter is turned on (`models`).
@@ -20,7 +21,7 @@ pub mod vit;
 pub mod weights;
 
 pub use classifier::{Classifier, Judged};
-pub use verdict::{Scores, is_hidden};
+pub use verdict::{Scores, first_hidden, is_hidden};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VisionError {

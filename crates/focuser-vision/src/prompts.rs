@@ -1,7 +1,7 @@
-//! CLIP's half of the judgement: how an image compares with descriptions.
+//! SigLIP's half of the judgement: how an image compares with descriptions.
 //!
 //! The descriptions are embedded once, ahead of time, by
-//! `examples/embed_prompts.rs`, so the app never needs CLIP's text tower or
+//! `examples/embed_prompts.rs`, so the app never needs SigLIP's text tower or
 //! tokenizer. Change a prompt and that example must be run again; the test
 //! below fails if the two drift apart.
 
@@ -76,11 +76,11 @@ pub(crate) const EMBEDDED_JSON: &str = include_str!("prompts.json");
 pub(crate) fn embedded() -> crate::Result<Embedded> {
     let e: Embedded = serde_json::from_str(EMBEDDED_JSON)
         .map_err(|e| crate::VisionError::Model(e.to_string()))?;
-    // Embeddings from another CLIP would compare as noise against this one's
+    // Embeddings from another model would compare as noise against this one's
     // images, and every verdict would be wrong without anything failing.
-    if e.model != crate::models::CLIP_IMAGE.name || e.prompts.len() != PROMPTS.len() {
+    if e.model != crate::models::SIGLIP_IMAGE.name || e.prompts.len() != PROMPTS.len() {
         return Err(crate::VisionError::Model(
-            "prompts.json does not match the CLIP model; run examples/embed_prompts.rs".into(),
+            "prompts.json does not match the SigLIP model; run examples/embed_prompts.rs".into(),
         ));
     }
     Ok(e)
@@ -109,14 +109,14 @@ mod tests {
     #[test]
     fn the_embedded_prompts_match_the_list() {
         let e = embedded().expect("prompts.json parses");
-        assert_eq!(e.model, crate::models::CLIP_IMAGE.name);
+        assert_eq!(e.model, crate::models::SIGLIP_IMAGE.name);
         let texts: Vec<_> = e
             .prompts
             .iter()
             .map(|p| (p.group, p.text.as_str()))
             .collect();
         assert_eq!(texts, PROMPTS, "run examples/embed_prompts.rs again");
-        assert!(e.prompts.iter().all(|p| p.embedding.len() == 512));
+        assert!(e.prompts.iter().all(|p| p.embedding.len() == 768));
     }
 
     #[test]

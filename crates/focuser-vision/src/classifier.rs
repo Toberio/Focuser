@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::{Tensor, TensorData, activation};
+use image::RgbImage;
 use tracing::{info, warn};
 
-use crate::preprocess::{self, CLIP, MARQO};
+use crate::preprocess::{self, MARQO, SIGLIP};
 use crate::prompts::{self, Group};
 use crate::verdict::Scores;
 use crate::vit::{self, Vit};
@@ -22,12 +23,12 @@ const MAX_BATCH: usize = 16;
 /// How long a request may wait for its verdict, queue included.
 const TIMEOUT: Duration = Duration::from_secs(20);
 
-/// One image's inputs: Marqo's 384 px square, then CLIP's 224 px one.
+/// One image's inputs: Marqo's 384 px square, then SigLIP's 224 px one.
 type Inputs = (Vec<f32>, Vec<f32>);
 
 struct Job {
     marqo: Vec<f32>,
-    clip: Vec<f32>,
+    siglip: Vec<f32>,
     reply: mpsc::Sender<Result<Judged>>,
 }
 
@@ -42,7 +43,7 @@ impl Classifier {
     /// a few seconds, most of it compiling GPU kernels.
     pub fn load(dir: &Path) -> Result<Self> {
         let marqo = Weights::read(&models::path(dir, &models::MARQO))?;
-        let clip = Weights::read(&models::path(dir, &models::CLIP_IMAGE))?;
+        let siglip = Weights::read(&models::path(dir, &models::SIGLIP_IMAGE))?;
         let embedded = prompts::embedded()?;
 
         let (jobs, queue) = mpsc::channel::<Job>();
@@ -54,7 +55,7 @@ impl Classifier {
                 // there is one, else integrated graphics or a software device.
                 let device = WgpuDevice::default();
                 let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Models::load(&marqo, &clip, &embedded, &device)
+                    Models::load(&marqo, &siglip, &embedded, &device)
                 }));
                 let models = match loaded {
                     Ok(Ok(m)) => m,
@@ -69,7 +70,7 @@ impl Classifier {
                         return;
                     }
                 };
-                drop((marqo, clip));
+                drop((marqo, siglip));
                 let _ = ready_tx.send(Ok(()));
                 worker(models, queue, &device);
             })?;
@@ -86,24 +87,43 @@ impl Classifier {
         self.judge(bytes).map(|j| j.scores)
     }
 
-    /// The scores and CLIP's embedding of the image: a unit vector of 512
-    /// numbers describing what is in it, for learning from labels.
+    /// The scores and SigLIP's embedding of the image, or of an animation's
+    /// first frame: a unit vector of 768 numbers describing what is in it,
+    /// for learning from labels.
     pub fn judge(&self, bytes: &[u8]) -> Result<Judged> {
         let img = preprocess::decode(bytes)?;
-        let job_marqo = preprocess::square(&img, MARQO);
-        let job_clip = preprocess::square(&img, CLIP);
+        wait(self.submit(&img)?)
+    }
+
+    /// Each frame worth judging: one for a still image, several spread
+    /// through an animated GIF or WebP. They are queued together, so the
+    /// worker batches them into one pass.
+    pub fn judge_frames(&self, bytes: &[u8]) -> Result<Vec<Judged>> {
+        let frames = preprocess::decode_frames(bytes)?;
+        let pending = frames
+            .iter()
+            .map(|f| self.submit(f))
+            .collect::<Result<Vec<_>>>()?;
+        pending.into_iter().map(wait).collect()
+    }
+
+    fn submit(&self, img: &RgbImage) -> Result<mpsc::Receiver<Result<Judged>>> {
         let (reply, result) = mpsc::channel();
         self.jobs
             .send(Job {
-                marqo: job_marqo,
-                clip: job_clip,
+                marqo: preprocess::square(img, MARQO),
+                siglip: preprocess::square(img, SIGLIP),
                 reply,
             })
             .map_err(|_| VisionError::Model("image filter worker has stopped".into()))?;
-        result
-            .recv_timeout(TIMEOUT)
-            .map_err(|_| VisionError::Model("image filter timed out".into()))?
+        Ok(result)
     }
+}
+
+fn wait(result: mpsc::Receiver<Result<Judged>>) -> Result<Judged> {
+    result
+        .recv_timeout(TIMEOUT)
+        .map_err(|_| VisionError::Model("image filter timed out".into()))?
 }
 
 /// Everything the models say about one image.
@@ -115,8 +135,8 @@ pub struct Judged {
 
 struct Models {
     marqo: Vit<B>,
-    clip: Vit<B>,
-    /// `[prompts, 512]`, unit vectors.
+    siglip: Vit<B>,
+    /// `[prompts, 768]`, unit vectors.
     prompts: Tensor<B, 2>,
     groups: Vec<Group>,
     logit_scale: f32,
@@ -125,12 +145,12 @@ struct Models {
 impl Models {
     fn load(
         marqo: &Weights,
-        clip: &Weights,
+        siglip: &Weights,
         embedded: &prompts::Embedded,
         device: &WgpuDevice,
     ) -> Result<Self> {
         let marqo = vit::marqo(marqo, device)?;
-        let clip = vit::clip_image(clip, device)?;
+        let siglip = vit::siglip_image(siglip, device)?;
         let dim = embedded.prompts.first().map_or(0, |p| p.embedding.len());
         let flat: Vec<f32> = embedded
             .prompts
@@ -144,7 +164,7 @@ impl Models {
         .reshape([embedded.prompts.len(), dim]);
         let models = Self {
             marqo,
-            clip,
+            siglip,
             prompts,
             groups: embedded.prompts.iter().map(|p| p.group).collect(),
             logit_scale: embedded.logit_scale,
@@ -163,7 +183,7 @@ impl Models {
                 .reshape([n, 3, size, size])
         };
         let nsfw = activation::softmax(self.marqo.forward(stack(384, &|b| &b.0)), 1);
-        let embeds = self.clip.forward(stack(224, &|b| &b.1));
+        let embeds = self.siglip.forward(stack(224, &|b| &b.1));
         let embeds = embeds.clone() / embeds.powi_scalar(2).sum_dim(1).sqrt();
         let logits = embeds.clone().matmul(self.prompts.clone().transpose()) * self.logit_scale;
         let dim = embeds.dims()[1];
@@ -211,7 +231,7 @@ fn worker(models: Models, queue: mpsc::Receiver<Job>, device: &WgpuDevice) {
         }
         let inputs: Vec<Inputs> = jobs
             .iter_mut()
-            .map(|j| (std::mem::take(&mut j.marqo), std::mem::take(&mut j.clip)))
+            .map(|j| (std::mem::take(&mut j.marqo), std::mem::take(&mut j.siglip)))
             .collect();
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| models.run(&inputs, device)));

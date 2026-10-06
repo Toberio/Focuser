@@ -1,6 +1,6 @@
 //! Fetching the two models on first use.
 //!
-//! The weights are not shipped with the app: they are 190 MB, and most people
+//! The weights are not shipped with the app: they are 200 MB, and most people
 //! never turn the filter on. They come from Hugging Face the first time it is
 //! turned on, and are checked twice:
 //!
@@ -9,9 +9,9 @@
 //! - the converted file written to disk must hash to the value pinned here,
 //!   so a truncated or tampered download is never loaded.
 //!
-//! Only the tensors needed are downloaded, by byte range: CLIP's image tower
-//! is 350 MB of a 605 MB file whose text half the app never uses. Everything
-//! is stored as float16, halving it again.
+//! Only the tensors needed are downloaded, by byte range: SigLIP 2's image
+//! tower is 370 MB of a 1.5 GB file whose text half the app never uses.
+//! Everything is stored as float16, halving it again.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -46,19 +46,24 @@ pub const MARQO: ModelSpec = ModelSpec {
     licence: "Apache-2.0",
 };
 
-/// OpenAI CLIP ViT-B/32 (MIT), image tower only: 176 MB on disk. Taken from
-/// timm's mirror, which has it as safetensors; OpenAI's own repository has
-/// only a pickle.
-pub const CLIP_IMAGE: ModelSpec = ModelSpec {
-    name: "openai-clip-vit-b-32-image",
-    url: "https://huggingface.co/timm/vit_base_patch32_clip_224.openai/resolve/a6f597a30f7b82c51704746581f9a4e41421e878/open_clip_model.safetensors",
-    source_sha256: "e6d1bd7789aa45192b3bf90570a789b478bae1b74ebcce7eddd908e83a2b7c31",
+/// Google's SigLIP 2 ViT-B/16 (Apache-2.0), image tower only: 186 MB on
+/// disk. Compared with twelve other image models on held-out labelled
+/// images, it separated what should be hidden from what should be shown far
+/// better than OpenAI's CLIP ViT-B/32, which it replaced, at a quarter of the
+/// cost of the larger models that matched it.
+pub const SIGLIP_IMAGE: ModelSpec = ModelSpec {
+    name: "google-siglip2-vit-b-16-image",
+    url: "https://huggingface.co/timm/ViT-B-16-SigLIP2/resolve/eee10eff6dd8cabae2d7f379d4e8cfcd352030aa/open_clip_model.safetensors",
+    source_sha256: "d0a51069d2fa6c95b371b3bffd2a2c765c1815004798ee99f075290dbca73041",
     keep_prefix: "visual.",
-    output_sha256: "775b9cbd3b597f54e6784a04448d96143f5507a8a4c11d376a85ec5c44709bc7",
-    licence: "MIT",
+    output_sha256: "31cf2c82730453062c658ce630344b8cfc5f9b94658b65d9261385dbf192ff5d",
+    licence: "Apache-2.0",
 };
 
-pub const ALL: [&ModelSpec; 2] = [&MARQO, &CLIP_IMAGE];
+pub const ALL: [&ModelSpec; 2] = [&MARQO, &SIGLIP_IMAGE];
+
+/// Models an earlier version downloaded, removed once the current ones are in.
+const RETIRED: [&str; 1] = ["openai-clip-vit-b-32-image"];
 
 pub fn path(dir: &Path, spec: &ModelSpec) -> PathBuf {
     dir.join(format!("{}.safetensors", spec.name))
@@ -146,6 +151,12 @@ pub fn ensure(dir: &Path, progress: Progress) -> Result<()> {
             bytes = out.len(),
             "image filter model ready"
         );
+    }
+    for name in RETIRED {
+        let old = dir.join(format!("{name}.safetensors"));
+        if std::fs::remove_file(&old).is_ok() {
+            info!(model = name, "removed a retired image filter model");
+        }
     }
     Ok(())
 }
