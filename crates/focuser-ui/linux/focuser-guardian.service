@@ -1,0 +1,17 @@
+[Unit]
+Description=Focuser guardian — keeps Focuser running while a lock is on
+# Users' managers and sessions are what it watches; nothing to do before them.
+After=systemd-user-sessions.service
+
+[Service]
+ExecStart=/usr/lib/focuser/focuser-guardian
+# A root system unit is the point: the user it protects against cannot stop,
+# mask or edit it without sudo. Restarted on any exit, kill included.
+Restart=always
+RestartSec=1
+# It only reads users' databases and talks to their managers over D-Bus.
+ProtectHome=read-only
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

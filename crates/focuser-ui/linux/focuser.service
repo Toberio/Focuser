@@ -12,6 +12,10 @@ PartOf=graphical-session.target
 # itself, which is why this lives here and not below.
 StartLimitIntervalSec=60
 StartLimitBurst=5
+# Everything here can be undone by the user it runs as: `systemctl --user
+# stop` is never restarted, and mask, edit or five quick kills keep it down.
+# focuser-guardian.service, a root system unit, covers that while a lock
+# forbids stopping: it reverts and restarts this unit within seconds.
 
 [Service]
 ExecStart=/usr/bin/focuser-ui --autostart

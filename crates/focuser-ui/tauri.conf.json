@@ -69,9 +69,12 @@
           "libcap2-bin"
         ],
         "files": {
-          "/usr/lib/systemd/user/focuser.service": "linux/focuser.service"
+          "/usr/lib/systemd/user/focuser.service": "linux/focuser.service",
+          "/usr/lib/systemd/system/focuser-guardian.service": "linux/focuser-guardian.service",
+          "/usr/lib/focuser/focuser-guardian": "binaries/focuser-guardian"
         },
-        "postInstallScript": "linux/postinst.sh"
+        "postInstallScript": "linux/postinst.sh",
+        "preRemoveScript": "linux/prerm.sh"
       },
       "appimage": {
         "bundleMediaFramework": false

@@ -3224,6 +3224,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "focuser-guardian"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "focuser-core",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "focuser-native"
 version = "0.10.0"
 dependencies = [

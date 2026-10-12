@@ -73,6 +73,12 @@ jobs:
             cp "target/${{ matrix.target }}/release/focuser-cli" "crates/focuser-ui/binaries/focuser-cli-${{ matrix.target }}"
             cp "target/${{ matrix.target }}/release/focuser-native" "crates/focuser-ui/binaries/focuser-native-${{ matrix.target }}"
           fi
+          # Linux only: the .deb installs it as a root system unit
+          # (tauri.conf.json bundle.linux.deb.files), not as a sidecar.
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo build --release --target ${{ matrix.target }} -p focuser-guardian
+            cp "target/${{ matrix.target }}/release/focuser-guardian" "crates/focuser-ui/binaries/focuser-guardian"
+          fi
           ls -la crates/focuser-ui/binaries/
 
       # npx, not `cargo install tauri-cli`. The CLI ships as a prebuilt binary

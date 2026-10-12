@@ -1,0 +1,12 @@
+[package]
+name = "focuser-guardian"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Root service that keeps Focuser running while a lock forbids stopping it"
+
+[dependencies]
+focuser-core = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

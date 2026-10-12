@@ -4,7 +4,7 @@ mod pomodoro;
 
 use focuser_common::error::{FocuserError, Result};
 use focuser_common::types::{BlockList, BlockedEvent, EntityId, UsageStat};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::Mutex;
 use tracing::info;
@@ -57,6 +57,25 @@ impl Database {
         db.run_migrations()?;
         info!("Database initialized");
         Ok(db)
+    }
+
+    /// Open an existing database without the right to change it.
+    ///
+    /// For focuser-guardian, which runs as root and reads the user's database:
+    /// [`Database::open`] would run migrations and could leave root-owned
+    /// journal files in the user's data directory, which the app then cannot
+    /// write. Fails if the file does not exist rather than creating it.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| FocuserError::Database(e.to_string()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Open an in-memory database (for testing).
@@ -547,6 +566,30 @@ impl Database {
 mod tests {
     use super::*;
     use focuser_common::types::BlockList;
+
+    #[test]
+    fn read_only_open_reads_lists_and_refuses_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro.db");
+        Database::open(&path)
+            .unwrap()
+            .create_block_list(&BlockList::new("Work"))
+            .unwrap();
+
+        let ro = Database::open_read_only(&path).unwrap();
+        let lists = ro.list_block_lists().unwrap();
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].name, "Work");
+        assert!(ro.create_block_list(&BlockList::new("Nope")).is_err());
+    }
+
+    #[test]
+    fn read_only_open_does_not_create_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.db");
+        assert!(Database::open_read_only(&path).is_err());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn scheduled_protection_and_bypass_survive_reopening_database() {

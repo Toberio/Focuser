@@ -11,6 +11,7 @@ Built in Rust for maximum performance and safety. Targets Windows, macOS, and Li
   - `focuser-app` — Command core: every action the app can perform, in one enum
   - `focuser-cli` — Command-line interface
   - `focuser-native` — Native messaging host (browser extension bridge)
+  - `focuser-guardian` — Linux root service: restarts Focuser while a lock forbids stopping it
   - `focuser-devserver` — Dev-only HTTP bridge, for running the UI in a browser
   - `focuser-ui` — Tauri desktop app; owns the blocking loop and extension API
 - **Docs**: `internal-docs/` holds working notes and is **gitignored — never commit or push it**.
@@ -61,9 +62,11 @@ cargo clippy --workspace             # Lint
 3. **One command core** — `focuser-app` holds every action as a `Command` variant;
    the GUI, CLI and devserver are deserialize-and-forward shims over `execute()`
 4. **The GUI owns the engine** — it runs the blocking loop, hosts-file sync and the
-   extension API directly. There is no daemon; a standalone service used to exist
-   and was removed in 0.4.2 because nothing launched it and its IPC port collided
-   with the extension API on 17549
+   extension API directly. The old standalone service was removed in 0.4.2 because
+   nothing launched it and its IPC port collided with the extension API on 17549.
+   `focuser-guardian` (Linux, root system unit) is not that service: it opens no
+   port, only reads users' databases, and restarts their `focuser.service` while a
+   list has "prevent service stop" on
 5. **The CLI goes straight to the database** — no IPC, so it works in a shipped install
 6. **TypeScript types are generated from Rust** via tauri-specta; CI fails on drift
 7. **Extension-ready architecture** — browser extension support is deferred but the

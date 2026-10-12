@@ -15,6 +15,12 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
 
+    # The guardian is a root system unit, so unlike the user unit below it
+    # needs no session. Restart rather than start, so an upgrade swaps in the
+    # new binary.
+    systemctl enable focuser-guardian.service >/dev/null 2>&1 || true
+    systemctl restart focuser-guardian.service >/dev/null 2>&1 || true
+
     # The auto-respawn unit is a --user unit (no root needed to run Focuser
     # itself), so it has to be enabled inside the invoking user's own systemd
     # session, not root's. SUDO_USER is the closest thing dpkg gives us to

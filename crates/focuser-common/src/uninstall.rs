@@ -446,7 +446,10 @@ impl Target {
             Target::Unit => args.iter().any(|a| {
                 let lower = a.to_lowercase();
                 let unit = lower.rsplit('/').next().unwrap_or(&lower);
-                unit == "focuser" || unit == "focuser.service"
+                matches!(
+                    unit,
+                    "focuser" | "focuser.service" | "focuser-guardian" | "focuser-guardian.service"
+                )
             }),
         }
     }
@@ -752,6 +755,10 @@ mod tests {
                 "systemctl --user disable --now focuser.service",
             ),
             ("systemctl", "systemctl --user mask focuser"),
+            (
+                "systemctl",
+                "systemctl disable --now focuser-guardian.service",
+            ),
             ("bash", "bash -c sudo apt remove focuser"),
             ("sh", "sh -c echo bye; rm -rf ~/.local/share/focuser"),
             ("bash", "bash -c cd /tmp && sudo -E dpkg -r focuser"),
