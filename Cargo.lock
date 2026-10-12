@@ -3228,7 +3228,9 @@ name = "focuser-guardian"
 version = "0.10.0"
 dependencies = [
  "anyhow",
+ "focuser-common",
  "focuser-core",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

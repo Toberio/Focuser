@@ -5,16 +5,13 @@
 use std::path::PathBuf;
 
 /// A user with an active login session.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct User {
-    pub uid: u32,
     pub name: String,
     pub db_path: PathBuf,
-    /// Their session has a display, so a window would actually open.
-    pub session_ready: bool,
 }
 
-pub use imp::{active_users, ensure_supported, revive, ui_running};
+pub use imp::{active_uids, ensure_supported, revive, session_ready, ui_running, user};
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -40,7 +37,9 @@ mod imp {
         Ok(())
     }
 
-    pub fn active_users() -> Vec<User> {
+    /// Users with an active session, read from logind's state files rather
+    /// than by asking `loginctl`, so a tick with no lock on spawns nothing.
+    pub fn active_uids() -> Vec<u32> {
         let Ok(entries) = std::fs::read_dir("/run/user") else {
             return Vec::new();
         };
@@ -48,44 +47,46 @@ mod imp {
             .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
             .filter(|uid| *uid >= FIRST_REGULAR_UID)
             .filter(|uid| session_active(*uid))
-            .filter_map(user)
             .collect()
     }
 
     /// `active` excludes `closing` (logging out) and `lingering` (no
     /// session at all), the two states in which a revive would be wrong.
+    /// This file is what `sd_uid_get_state` and `loginctl` read too.
     fn session_active(uid: u32) -> bool {
-        output(
-            "loginctl",
-            &["show-user", &uid.to_string(), "--property=State", "--value"],
-        )
-        .is_some_and(|s| s.trim() == "active")
+        std::fs::read_to_string(format!("/run/systemd/users/{uid}"))
+            .is_ok_and(|s| s.lines().any(|l| l == "STATE=active"))
     }
 
-    fn user(uid: u32) -> Option<User> {
+    pub fn user(uid: u32) -> Option<User> {
         // getent rather than /etc/passwd, so network accounts resolve too.
         let entry = output("getent", &["passwd", &uid.to_string()])?;
         let fields: Vec<&str> = entry.trim().split(':').collect();
         let (name, home) = (fields.first()?.to_string(), PathBuf::from(fields.get(5)?));
 
-        let env = user_systemctl(&name, &["show-environment"]).unwrap_or_default();
-        let var = |key: &str| {
-            env.lines()
-                .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
-                .map(str::to_string)
-        };
-        let session_ready = var("DISPLAY").is_some() || var("WAYLAND_DISPLAY").is_some();
         // Where `directories::ProjectDirs` puts it for the app itself.
-        let data_home = var("XDG_DATA_HOME")
+        let data_home = user_env(&name, "XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
 
         Some(User {
-            uid,
             name,
             db_path: data_home.join("focuser").join("focuser.db"),
-            session_ready,
         })
+    }
+
+    /// Their session has a display, so a window would actually open.
+    pub fn session_ready(name: &str) -> bool {
+        user_env(name, "DISPLAY").is_some() || user_env(name, "WAYLAND_DISPLAY").is_some()
+    }
+
+    /// A variable from the user's systemd manager, which is where the
+    /// session puts DISPLAY and friends for the units it starts.
+    fn user_env(name: &str, key: &str) -> Option<String> {
+        let env = user_systemctl(name, &["show-environment"])?;
+        env.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .map(str::to_string)
     }
 
     /// The installed app. Only a process running this file counts.
@@ -215,8 +216,16 @@ mod imp {
         bail!("focuser-guardian is only implemented for Linux")
     }
 
-    pub fn active_users() -> Vec<User> {
+    pub fn active_uids() -> Vec<u32> {
         Vec::new()
+    }
+
+    pub fn user(_uid: u32) -> Option<User> {
+        None
+    }
+
+    pub fn session_ready(_name: &str) -> bool {
+        false
     }
 
     pub fn ui_running(_uid: u32) -> bool {
