@@ -114,7 +114,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             let key = website_key(&created);
             let mut out = created.clone();
 
-            mutate_list_for_addition(ctx, &mut engine, list_id, |list| {
+            add_to_list(ctx, &mut engine, list_id, |list| {
                 // Adding the same site twice should not make two rules.
                 match list.websites.iter().find(|r| website_key(r) == key) {
                     Some(existing) => out = existing.clone(),
@@ -138,7 +138,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             kind,
         } => {
             let mut added = 0u32;
-            mutate_list_for_addition(ctx, &mut engine, list_id, |list| {
+            add_to_list(ctx, &mut engine, list_id, |list| {
                 for raw in &values {
                     let value = raw.trim().to_lowercase();
                     // Blank lines and `#` comments come from pasted host files
@@ -183,7 +183,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 enabled: true,
             };
             let out = created.clone();
-            mutate_list_for_addition(ctx, &mut engine, list_id, |list| {
+            add_to_list(ctx, &mut engine, list_id, |list| {
                 list.applications.push(created);
                 Ok(())
             })?;
@@ -627,30 +627,46 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         Command::PomodoroStart {
             block_list_id,
             config,
+            lock_rounds,
         } => {
             config
                 .validate()
                 .map_err(|e| CommandError::Validation(e.to_string()))?;
+            if lock_rounds.is_some_and(|n| !(1..=MAX_FOCUS_LOCK_ROUNDS).contains(&n)) {
+                return Err(CommandError::Validation(format!(
+                    "a focus session can be locked for 1 to {MAX_FOCUS_LOCK_ROUNDS} rounds"
+                )));
+            }
 
             // No lock check: a session can only tighten a locked list. Its breaks
             // and its end leave such a list on (#14).
-            let session = pomodoro::start_session(&mut engine, block_list_id, config)?;
+            let session = pomodoro::start_session(
+                &mut engine,
+                block_list_id,
+                config,
+                lock_rounds.unwrap_or(0),
+            )?;
             // A work phase suspends allowances and can change what is blocked.
             ctx.sync_hosts(&engine);
             Ok(CommandResult::PomodoroSession(Box::new(session)))
         }
 
-        Command::PomodoroPause => Ok(CommandResult::Flag(pomodoro::pause_session(&mut engine)?)),
+        Command::PomodoroPause => {
+            ensure_focus_unlocked(&engine)?;
+            Ok(CommandResult::Flag(pomodoro::pause_session(&mut engine)?))
+        }
 
         Command::PomodoroResume => Ok(CommandResult::Flag(pomodoro::resume_session(&mut engine)?)),
 
         Command::PomodoroSkip => {
+            ensure_focus_unlocked(&engine)?;
             let advanced = pomodoro::skip_phase(&mut engine)?.is_some();
             ctx.sync_hosts(&engine);
             Ok(CommandResult::Flag(advanced))
         }
 
         Command::PomodoroStop => {
+            ensure_focus_unlocked(&engine)?;
             let stopped = pomodoro::stop_session(&mut engine)?;
             ctx.sync_hosts(&engine);
             Ok(CommandResult::Flag(stopped))
@@ -937,6 +953,18 @@ fn ensure_schedule_ends(list: &BlockList) -> CommandOutcome<()> {
     Ok(())
 }
 
+/// A focus session can be locked for at most this many rounds, so a slip of
+/// the finger cannot lock one for a week.
+pub const MAX_FOCUS_LOCK_ROUNDS: u32 = 12;
+
+/// Stop, Skip and Pause wait for a locked focus session's rounds (#47).
+fn ensure_focus_unlocked(engine: &BlockEngine) -> CommandOutcome<()> {
+    match engine.locked_focus_session() {
+        Some(_) => Err(CommandError::Protected),
+        None => Ok(()),
+    }
+}
+
 /// Wholesale operations cannot replace or disable a protected list.
 fn ensure_nothing_protected(engine: &BlockEngine) -> CommandOutcome<()> {
     for list in engine.block_lists() {
@@ -951,12 +979,16 @@ fn ensure_nothing_protected(engine: &BlockEngine) -> CommandOutcome<()> {
 pub const SETTING_CLOSE_BROWSERS: &str = "block_unsupported_browsers";
 pub const SETTING_GRACE_PERIOD: &str = "extension_grace_period";
 pub const DEFAULT_GRACE_PERIOD_SECS: u64 = 60;
+/// Leave browsers a test tool started open (#45). Off unless asked for.
+pub const SETTING_SPARE_AUTOMATION: &str = "spare_automation_browsers";
 
 /// Turning browser closing off, or giving browsers longer, is refused during a
 /// lock (#18). Tightening either one is always fine.
 fn loosens_enforcement(engine: &BlockEngine, key: &str, value: &str) -> CommandOutcome<bool> {
     Ok(match key {
         SETTING_CLOSE_BROWSERS => value != "true",
+        // An automation browser left open has no blocking at all.
+        SETTING_SPARE_AUTOMATION => value == "true",
         SETTING_GRACE_PERIOD => {
             let current = engine
                 .db()
@@ -1021,27 +1053,16 @@ fn mutate_list(
     edit: impl FnOnce(&mut BlockList) -> CommandOutcome<()>,
 ) -> CommandOutcome<()> {
     ensure_unprotected(engine, list_id)?;
-
-    let mut list = engine.db().get_block_list(list_id)?;
-    edit(&mut list)?;
-    list.reconcile_schedule_bypass();
-    list.updated_at = chrono::Utc::now();
-
-    engine.db().update_block_list(&list)?;
-    engine.refresh()?;
-    ctx.sync_hosts(engine);
-    Ok(())
+    add_to_list(ctx, engine, list_id, edit)
 }
 
-/// Load a list, apply `edit`, persist, refresh, re-sync hosts — with no
-/// protection check.
+/// [`mutate_list`] without the protection check, for new block rules only.
 ///
-/// For additions only: a locked or protected list exists to stop someone
-/// from escaping a commitment by loosening it, and a brand-new block rule
-/// only makes blocking stricter, so there is nothing for the lock to guard
-/// against. [`mutate_list`] still gates removals, since those do loosen
-/// coverage.
-fn mutate_list_for_addition(
+/// A lock exists so a list cannot be loosened before it ends. A new rule only
+/// blocks more, so a locked list still takes one. Anything that could open a
+/// site or an app again (removals, exceptions, the schedule, turning the list
+/// off) goes through [`mutate_list`].
+fn add_to_list(
     ctx: &AppContext,
     engine: &mut BlockEngine,
     list_id: EntityId,
@@ -1090,7 +1111,7 @@ fn clear_across_lists(
     let mut cleared = 0u32;
 
     for mut list in engine.db().list_block_lists()? {
-        if list.is_modification_protected() {
+        if list.is_modification_protected() || engine.is_block_list_protected(list.id) {
             continue;
         }
         let n = clear(&mut list);
@@ -1827,6 +1848,73 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_locked_list_takes_new_rules_but_never_loses_one_or_gains_an_exception() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect(&ctx, list.id).unwrap();
+
+        let CommandResult::WebsiteRule(site) = execute(
+            &ctx,
+            Command::AddWebsiteRule {
+                list_id: list.id,
+                rule: WebsiteMatchType::Domain("example.com".into()),
+            },
+        )
+        .unwrap() else {
+            panic!("expected a website rule back");
+        };
+        let CommandResult::AppRule(app) = execute(
+            &ctx,
+            Command::AddAppRule {
+                list_id: list.id,
+                rule: AppMatchType::ExecutableName("game".into()),
+            },
+        )
+        .unwrap() else {
+            panic!("expected an app rule back");
+        };
+        let CommandResult::Count(imported) = execute(
+            &ctx,
+            Command::BulkImportWebsites {
+                list_id: list.id,
+                values: vec!["one.example".into(), "two.example".into()],
+                kind: WebsiteRuleKind::Domain,
+            },
+        )
+        .unwrap() else {
+            panic!("expected a count back");
+        };
+        assert_eq!(imported, 2);
+
+        // Taking a rule out again, or allowing part of the list, would loosen it.
+        for cmd in [
+            Command::RemoveWebsiteRule {
+                list_id: list.id,
+                rule_id: site.id,
+            },
+            Command::RemoveAppRule {
+                list_id: list.id,
+                rule_id: app.id,
+            },
+            Command::AddException {
+                list_id: list.id,
+                exception: ExceptionType::Domain("example.com".into()),
+            },
+        ] {
+            assert_eq!(execute(&ctx, cmd).unwrap_err().code(), "protected");
+        }
+
+        let stored = &lists(&ctx)[0];
+        assert_eq!(stored.websites.len(), 3);
+        assert_eq!(stored.applications.len(), 1);
+        assert!(stored.exceptions.is_empty());
+        assert!(
+            stored.is_modification_protected(),
+            "adding must not end the lock"
+        );
     }
 
     #[test]
@@ -3462,12 +3550,92 @@ mod tests {
                     long_break_secs: 900,
                     cycles_until_long_break: 4,
                 },
+                lock_rounds: None,
             },
         )
         .unwrap();
 
         let running = execute(&ctx, Command::PomodoroStatus).unwrap();
         assert!(matches!(running, CommandResult::PomodoroStatus(Some(_))));
+    }
+
+    fn start_focus(
+        ctx: &AppContext,
+        list: EntityId,
+        lock_rounds: Option<u32>,
+    ) -> CommandOutcome<CommandResult> {
+        execute(
+            ctx,
+            Command::PomodoroStart {
+                block_list_id: list,
+                config: PomodoroConfig {
+                    work_secs: 1500,
+                    short_break_secs: 300,
+                    long_break_secs: 900,
+                    cycles_until_long_break: 4,
+                },
+                lock_rounds,
+            },
+        )
+    }
+
+    /// As if `done` work phases had ended.
+    fn finish_rounds(ctx: &AppContext, done: u32) {
+        let mut engine = ctx.engine.lock().unwrap();
+        let mut session = engine.db().get_active_pomodoro_session().unwrap().unwrap();
+        session.completed_cycles = done;
+        engine.db().update_pomodoro_session(&session).unwrap();
+        engine.refresh().unwrap();
+    }
+
+    #[test]
+    fn a_locked_focus_session_holds_until_its_rounds_are_done() {
+        let ctx = ctx();
+        let list = create(&ctx, "Focus");
+        start_focus(&ctx, list.id, Some(2)).unwrap();
+
+        let refused = |cmd: Command| matches!(execute(&ctx, cmd), Err(CommandError::Protected));
+        assert!(refused(Command::PomodoroStop));
+        assert!(refused(Command::PomodoroSkip));
+        assert!(refused(Command::PomodoroPause));
+        // Its list cannot be loosened meanwhile, and Focuser cannot be quit.
+        assert!(refused(Command::ToggleBlockList {
+            id: list.id,
+            enabled: false
+        }));
+        assert!(refused(Command::DeleteBlockList { id: list.id }));
+        assert!(ctx.engine.lock().unwrap().has_service_protection());
+
+        finish_rounds(&ctx, 1);
+        assert!(refused(Command::PomodoroStop), "one round of two");
+
+        finish_rounds(&ctx, 2);
+        assert!(!ctx.engine.lock().unwrap().has_service_protection());
+        assert!(matches!(
+            execute(&ctx, Command::PomodoroStop).unwrap(),
+            CommandResult::Flag(true)
+        ));
+    }
+
+    #[test]
+    fn a_focus_session_is_unlocked_unless_asked() {
+        let ctx = ctx();
+        let list = create(&ctx, "Focus");
+        start_focus(&ctx, list.id, None).unwrap();
+        assert!(matches!(
+            execute(&ctx, Command::PomodoroStop).unwrap(),
+            CommandResult::Flag(true)
+        ));
+    }
+
+    #[test]
+    fn a_focus_lock_is_one_to_twelve_rounds() {
+        let ctx = ctx();
+        let list = create(&ctx, "Focus");
+        for rounds in [0, 13] {
+            let err = start_focus(&ctx, list.id, Some(rounds)).unwrap_err();
+            assert_eq!(err.code(), "validation", "{rounds} rounds");
+        }
     }
 
     #[test]
@@ -3485,6 +3653,7 @@ mod tests {
                     long_break_secs: 900,
                     cycles_until_long_break: 4,
                 },
+                lock_rounds: None,
             },
         )
         .unwrap_err();
@@ -3525,6 +3694,7 @@ mod tests {
                 Command::PomodoroStart {
                     block_list_id: list.id,
                     config: PomodoroConfig::CLASSIC,
+                    lock_rounds: None,
                 },
             )
             .unwrap();
@@ -3559,6 +3729,8 @@ mod tests {
         for (key, value) in [
             (SETTING_CLOSE_BROWSERS, "false"),
             (SETTING_GRACE_PERIOD, "3600"),
+            // #45: an automation browser left open has no blocking at all.
+            (SETTING_SPARE_AUTOMATION, "true"),
         ] {
             assert!(
                 matches!(set(&ctx, key, value), Err(CommandError::Protected)),
@@ -3572,6 +3744,7 @@ mod tests {
 
         set(&ctx, SETTING_CLOSE_BROWSERS, "true").unwrap();
         set(&ctx, SETTING_GRACE_PERIOD, "10").unwrap();
+        set(&ctx, SETTING_SPARE_AUTOMATION, "false").unwrap();
         set(&ctx, "language", "de").unwrap();
     }
 

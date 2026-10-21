@@ -674,3 +674,29 @@ fn version_matches_the_binary() {
     let cli = Cli::new();
     assert_eq!(cli.ok(&["version"]), env!("CARGO_PKG_VERSION"));
 }
+
+#[test]
+fn a_locked_focus_session_cannot_be_stopped_from_the_command_line() {
+    let cli = Cli::new();
+    let list = cli.json(&["list", "create", "Focus"])["data"]["id"]
+        .as_str()
+        .expect("list id")
+        .to_string();
+
+    cli.ok(&["pomodoro", "start", &list, "--lock-rounds", "2"]);
+    assert!(
+        cli.ok(&["pomodoro", "status"])
+            .contains("Locked for 2 more rounds")
+    );
+    for refused in ["stop", "skip", "pause"] {
+        let (code, stderr) = cli.fail(&["pomodoro", refused]);
+        assert_eq!(
+            code, 5,
+            "`pomodoro {refused}` should be refused as protected"
+        );
+        assert!(stderr.starts_with("protected:"), "got: {stderr}");
+    }
+
+    let (code, _) = cli.fail(&["pomodoro", "start", &list, "--lock-rounds", "13"]);
+    assert_eq!(code, 2, "more than 12 rounds is invalid");
+}

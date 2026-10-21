@@ -109,3 +109,6 @@ welcome:
   waysCaption: I tipi di regola e cosa copre ciascuno
   tagline: Fatto per chi preferirebbe fare altro.
   versionBadge: Versione {version}
+locked:
+  title: "Bloccato per ora"
+  body: "Un elenco di blocco è bloccato, quindi Focuser tiene chiusa la pagina delle estensioni del browser. Si riapre quando il blocco finisce."

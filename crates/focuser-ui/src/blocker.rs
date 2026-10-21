@@ -128,10 +128,10 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
 
             // Browser extension enforcement. Settings are read on every heavy
             // tick so a change in the UI applies without restarting the app.
-            let (grace_duration, enforce_enabled) = enforcement_settings(eng.db());
-            if enforce_enabled {
+            let settings = enforcement_settings(eng.db());
+            if settings.enabled {
                 let has_active_blocks = eng.block_lists().iter().any(|l| l.is_effectively_active());
-                enforce_browsers = Some((has_active_blocks, grace_duration));
+                enforce_browsers = Some((has_active_blocks, settings));
             }
         }
 
@@ -139,8 +139,8 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
         // from the window and every request from the extension waits for that
         // lock, and reading command lines is the one step here whose cost
         // depends on what else the machine is running.
-        if let Some((has_active_blocks, grace_duration)) = enforce_browsers {
-            enforce_browser_extension(has_active_blocks, grace_duration, &mut grace_periods);
+        if let Some((has_active_blocks, settings)) = enforce_browsers {
+            enforce_browser_extension(has_active_blocks, &settings, &mut grace_periods);
         }
         if watch_uninstalls {
             block_uninstall_attempts(&mut cleared_processes);
@@ -148,10 +148,25 @@ pub fn run_blocking_loop(state: Arc<AppState>) {
     }
 }
 
-/// Grace period and whether unsupported browsers get closed at all.
-fn enforcement_settings(db: &focuser_core::db::Database) -> (Duration, bool) {
+/// How browsers without the extension are treated.
+struct Enforcement {
+    /// Closed at all.
+    enabled: bool,
+    grace: Duration,
+    /// Browsers a test tool started are left open (#45).
+    spare_automation: bool,
+}
+
+fn enforcement_settings(db: &focuser_core::db::Database) -> Enforcement {
     use focuser_app::execute::{
         DEFAULT_GRACE_PERIOD_SECS, SETTING_CLOSE_BROWSERS, SETTING_GRACE_PERIOD,
+        SETTING_SPARE_AUTOMATION,
+    };
+    let flag = |key, default: bool| {
+        db.get_setting_or_default(key, if default { "true" } else { "false" })
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(default)
     };
 
     let grace = db
@@ -160,13 +175,12 @@ fn enforcement_settings(db: &focuser_core::db::Database) -> (Duration, bool) {
         .flatten()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_GRACE_PERIOD_SECS);
-    let enabled = db
-        .get_setting_or_default(SETTING_CLOSE_BROWSERS, "true")
-        .ok()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(true);
 
-    (Duration::from_secs(grace), enabled)
+    Enforcement {
+        enabled: flag(SETTING_CLOSE_BROWSERS, true),
+        grace: Duration::from_secs(grace),
+        spare_automation: flag(SETTING_SPARE_AUTOMATION, false),
+    }
 }
 
 /// Apply blocks to the system hosts file.
@@ -340,9 +354,10 @@ fn kill_allowance_blocked_apps(
 /// extension has been in touch, not by asking the browser anything.
 fn enforce_browser_extension(
     has_active_blocks: bool,
-    grace_duration: Duration,
+    settings: &Enforcement,
     grace_periods: &mut HashMap<BrowserType, Grace>,
 ) {
+    let grace_duration = settings.grace;
     if !has_active_blocks {
         grace_periods.clear();
         return;
@@ -350,7 +365,10 @@ fn enforce_browser_extension(
 
     let now = Instant::now();
 
-    let running = browser_main_processes(&process::list(), process::cmdline);
+    let mut running = browser_main_processes(&process::list(), process::cmdline);
+    if settings.spare_automation {
+        spare_automation_browsers(&mut running, process::cmdline);
+    }
 
     // Generous 2-minute window: extensions use chrome.alarms, which fires
     // every 30s once the service worker sleeps. Anything tighter would call a
@@ -381,7 +399,8 @@ fn enforce_browser_extension(
                 warned: false,
             }
         });
-        let waited = now.duration_since(grace.started);
+        let started = grace.started;
+        let waited = now.duration_since(started);
 
         // The extension may still be checking in — just without incognito
         // access — which changes what the user needs to be told to fix.
@@ -412,10 +431,10 @@ fn enforce_browser_extension(
             GraceStep::Close => {}
         }
 
-        // Last look before closing anything, with a wider window still: the
-        // extension may have been installed (or granted incognito) mid-grace
-        // and be warming up.
-        if crate::api::get_safely_connected_browsers(180).contains(browser) {
+        // Last look before closing anything: the extension may have been
+        // installed (or granted incognito) mid-grace. Only a check-in since the
+        // grace began counts. The one before it is the extension going quiet.
+        if crate::api::safely_checked_in_since(browser, started) {
             info!(
                 browser = ?browser,
                 "Extension fully connected during grace period — cancelling termination"
@@ -447,6 +466,20 @@ fn enforce_browser_extension(
     }
 
     grace_periods.retain(|browser, _| running.contains_key(browser));
+}
+
+/// Leave out the browsers a test tool started (#45). A browser type with
+/// none left is not running as far as closing it goes.
+fn spare_automation_browsers(
+    running: &mut HashMap<BrowserType, Vec<u32>>,
+    mut read_cmdline: impl FnMut(u32) -> Option<String>,
+) {
+    for pids in running.values_mut() {
+        pids.retain(|&pid| {
+            !read_cmdline(pid).is_some_and(|line| focuser_common::browser::is_automation(&line))
+        });
+    }
+    running.retain(|_, pids| !pids.is_empty());
 }
 
 /// How long a browser has been running without cover, and whether the user
@@ -689,6 +722,25 @@ mod tests {
         } else {
             assert_eq!(pids, [10]);
         }
+    }
+
+    #[test]
+    fn a_browser_a_test_tool_started_is_left_out_and_the_others_stay() {
+        use focuser_common::extension::BrowserType::{Chrome, Firefox};
+        let mut running = HashMap::from([(Chrome, vec![20, 21]), (Firefox, vec![30])]);
+        spare_automation_browsers(&mut running, |pid| {
+            Some(
+                match pid {
+                    20 => "chrome --remote-debugging-pipe",
+                    30 => "firefox -juggler-pipe",
+                    _ => "chrome",
+                }
+                .to_string(),
+            )
+        });
+        // The person's own Chrome is still there to be closed. Firefox ran
+        // only for a test, so it is not counted as running at all.
+        assert_eq!(running, HashMap::from([(Chrome, vec![21])]));
     }
 
     #[test]

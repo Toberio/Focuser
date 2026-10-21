@@ -109,3 +109,6 @@ welcome:
   waysCaption: Regelarten und was jede abdeckt
   tagline: Für Leute gemacht, die lieber etwas anderes tun würden.
   versionBadge: Version {version}
+locked:
+  title: "Vorerst gesperrt"
+  body: "Eine Sperrliste ist gesperrt, deshalb hält Focuser die Erweiterungsseite des Browsers geschlossen. Sie öffnet sich wieder, wenn die Sperre endet."

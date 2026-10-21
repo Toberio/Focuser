@@ -109,3 +109,6 @@ welcome:
   waysCaption: Les types de règle et ce que chacun couvre
   tagline: Fait pour ceux qui préféreraient faire autre chose.
   versionBadge: Version {version}
+locked:
+  title: "Verrouillé pour l'instant"
+  body: "Une liste de blocage est verrouillée, donc Focuser garde fermée la page des extensions du navigateur. Elle se rouvre à la fin du verrouillage."

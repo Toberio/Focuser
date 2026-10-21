@@ -490,7 +490,12 @@ fn warm_app_icons(state: &Arc<AppState>) {
 /// ticked is a commitment about the block list, not about the app staying up.
 fn quit_blocked_by(state: &Arc<AppState>) -> Option<String> {
     let engine = state.engine.lock().ok()?;
-
+    if let Some((_, rounds)) = engine.locked_focus_session() {
+        return Some(match rounds {
+            1 => "Focus session — locked for 1 more round".into(),
+            n => format!("Focus session — locked for {n} more rounds"),
+        });
+    }
     let list = engine
         .block_lists()
         .iter()
@@ -513,12 +518,14 @@ fn quit_blocked_by(state: &Arc<AppState>) -> Option<String> {
 /// this only ever narrows the gap, never closes it.
 #[cfg(unix)]
 fn run_signal_guard(state: Arc<AppState>) {
-    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
     use signal_hook::iterator::Signals;
 
-    let Ok(mut signals) = Signals::new([SIGTERM, SIGINT]) else {
+    // SIGHUP too: `kill -HUP` ends a process just as well, and systemd counts
+    // it as a clean exit, so it is not restarted either.
+    let Ok(mut signals) = Signals::new([SIGTERM, SIGINT, SIGHUP]) else {
         warn!(
-            "Could not install a SIGTERM/SIGINT handler — a lock cannot stop `kill` from working"
+            "Could not install a SIGTERM/SIGINT/SIGHUP handler — a lock cannot stop `kill` from working"
         );
         return;
     };

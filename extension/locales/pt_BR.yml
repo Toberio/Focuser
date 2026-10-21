@@ -109,3 +109,6 @@ welcome:
   waysCaption: Tipos de regra e o que cada um cobre
   tagline: Feito para quem preferia estar fazendo outra coisa.
   versionBadge: Versão {version}
+locked:
+  title: "Bloqueado por enquanto"
+  body: "Uma lista de bloqueio está trancada, então o Focuser mantém fechada a página de extensões do navegador. Ela volta a abrir quando o bloqueio termina."

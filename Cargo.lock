@@ -3133,7 +3133,7 @@ checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "focuser-app"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "focuser-common",
@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-cli"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3167,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-common"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-core"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "focuser-common",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-devserver"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "clap",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-guardian"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "focuser-common",
@@ -3237,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-native"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-ui"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3287,7 +3287,7 @@ dependencies = [
 
 [[package]]
 name = "focuser-vision"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "burn",
  "focuser-common",

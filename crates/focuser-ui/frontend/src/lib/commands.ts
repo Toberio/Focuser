@@ -501,10 +501,10 @@ function usePomodoroMutation<TArgs>(build: (args: TArgs) => Command) {
 }
 
 export const useStartPomodoro = () =>
-  usePomodoroMutation<{ blockListId: string; config: PomodoroConfig }>(
-    ({ blockListId, config }) => ({
+  usePomodoroMutation<{ blockListId: string; config: PomodoroConfig; lockRounds?: number }>(
+    ({ blockListId, config, lockRounds }) => ({
       cmd: "pomodoro_start",
-      args: { block_list_id: blockListId, config },
+      args: { block_list_id: blockListId, config, lock_rounds: lockRounds ?? null },
     }),
   );
 

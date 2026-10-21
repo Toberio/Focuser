@@ -145,6 +145,9 @@ pub struct PomodoroSession {
     /// The `enabled` state of the linked block list before this Pomodoro
     /// session started. Restored when the session ends.
     pub prev_enabled: bool,
+    /// Work rounds the session is locked for (#47). Until that many are
+    /// done it cannot be stopped, skipped or paused. 0 is no lock.
+    pub locked_rounds: u32,
 }
 
 impl PomodoroSession {
@@ -161,7 +164,13 @@ impl PomodoroSession {
             completed_cycles: 0,
             started_at: now,
             prev_enabled,
+            locked_rounds: 0,
         }
+    }
+
+    /// Locked rounds still to go. 0 once the lock is over.
+    pub fn locked_rounds_left(&self) -> u32 {
+        self.locked_rounds.saturating_sub(self.completed_cycles)
     }
 
     pub fn is_paused(&self) -> bool {
@@ -205,6 +214,8 @@ pub struct PomodoroStatus {
     pub phase_duration_secs: u32,
     pub paused: bool,
     pub started_at: DateTime<Utc>,
+    /// Rounds until Stop, Skip and Pause come back. 0 when not locked.
+    pub locked_rounds_left: u32,
 }
 
 #[cfg(test)]

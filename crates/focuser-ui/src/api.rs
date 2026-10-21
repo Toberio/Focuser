@@ -103,6 +103,10 @@ impl BrowserHeartbeat {
             .insert(profile.to_string(), (now, allowed));
     }
 
+    fn checked_in_since(&self, since: Instant) -> bool {
+        self.last_seen > since
+    }
+
     /// Only a profile that said, within `within`, that it cannot see private
     /// windows leaves a gap. One that has gone quiet drops out.
     fn covers_private_windows(&self, within: std::time::Duration) -> bool {
@@ -162,14 +166,8 @@ fn should_record_blocked(tracking_key: &str) -> bool {
 /// carries no such information — only the dedicated heartbeat endpoint
 /// reports it, and a bare rules poll must not erase the last real answer.
 fn record_extension_heartbeat(browser_name: &str, private_windows: Option<(&str, bool)>) {
-    let name_lower = browser_name.to_lowercase();
-    let browser_type = match name_lower.as_str() {
-        "chrome" => BrowserType::Chrome,
-        "firefox" => BrowserType::Firefox,
-        "edge" => BrowserType::Edge,
-        "brave" => BrowserType::Brave,
-        "opera" => BrowserType::Opera,
-        _ => return,
+    let Some(browser_type) = browser_type_named(browser_name) else {
+        return;
     };
 
     let mut guard = CONNECTED_BROWSERS.lock().unwrap();
@@ -178,6 +176,18 @@ fn record_extension_heartbeat(browser_name: &str, private_windows: Option<(&str,
         .or_insert_with(BrowserHeartbeat::new)
         .record(private_windows);
     debug!(browser = browser_name, "Extension heartbeat recorded");
+}
+
+/// The browser an extension says it runs in.
+fn browser_type_named(name: &str) -> Option<BrowserType> {
+    match name.to_lowercase().as_str() {
+        "chrome" => Some(BrowserType::Chrome),
+        "firefox" => Some(BrowserType::Firefox),
+        "edge" => Some(BrowserType::Edge),
+        "brave" => Some(BrowserType::Brave),
+        "opera" => Some(BrowserType::Opera),
+        _ => None,
+    }
 }
 
 /// Get the set of browsers whose extension was seen within the timeout,
@@ -200,6 +210,48 @@ pub fn get_connected_browsers(timeout_secs: u64) -> std::collections::HashSet<Br
 /// extension too old to report is given the benefit of the doubt.
 pub fn get_safely_connected_browsers(timeout_secs: u64) -> std::collections::HashSet<BrowserType> {
     connected_browsers_matching(timeout_secs, BrowserHeartbeat::covers_private_windows)
+}
+
+/// Whether this browser's extension checked in after `since`, with no profile
+/// left out of private windows.
+///
+/// The last look before closing a browser asks this. A check-in from before
+/// its grace period began is the one that went quiet, and counting it kept a
+/// browser open for minutes after its extension was removed (#43).
+pub fn safely_checked_in_since(browser: &BrowserType, since: Instant) -> bool {
+    let guard = CONNECTED_BROWSERS.lock().unwrap();
+    guard
+        .as_ref()
+        .and_then(|map| map.get(browser))
+        .is_some_and(|hb| {
+            hb.checked_in_since(since)
+                && hb.covers_private_windows(std::time::Duration::from_secs(180))
+        })
+}
+
+/// The browser opened the address the extension left for its removal.
+///
+/// Forget the browser, so the hosts file and the grace period start now
+/// instead of after two quiet minutes. Only an id the extension sent before
+/// counts: any web page can open this address, and none knows that id.
+///
+/// ponytail: forgets the whole browser, so with two profiles the one that
+/// still has the extension covers the browser again at its next check-in.
+fn forget_removed_extension(browser_name: &str, profile: &str) {
+    let Some(browser_type) = browser_type_named(browser_name) else {
+        return;
+    };
+    let mut guard = CONNECTED_BROWSERS.lock().unwrap();
+    let Some(map) = guard.as_mut() else {
+        return;
+    };
+    let known = map
+        .get(&browser_type)
+        .is_some_and(|hb| !profile.is_empty() && hb.private_windows.contains_key(profile));
+    if known {
+        map.remove(&browser_type);
+        info!(browser = browser_name, "Extension removed from the browser");
+    }
 }
 
 fn connected_browsers_matching(
@@ -354,8 +406,15 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 100 * 1024 * 1024;
 
 fn respond(stream: &mut std::net::TcpStream, status: &str, response_body: &str) {
+    // A redirect carries where it goes in place of a body.
+    let (location, response_body) = if status.starts_with("302") {
+        (format!("Location: {response_body}\r\n"), "")
+    } else {
+        (String::new(), response_body)
+    };
     let response = format!(
         "HTTP/1.1 {status}\r\n\
+         {location}\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
          Access-Control-Allow-Origin: *\r\n\
@@ -413,6 +472,17 @@ fn route(method: &str, path: &str, body: &str, state: &AppState) -> (&'static st
                 record_extension_heartbeat(browser, allowed.map(|allowed| (profile, allowed)));
             }
             ("200 OK", r#"{"ok":true}"#.into())
+        }
+        _ if path.starts_with("/api/extension-removed?") => {
+            let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let browser = query_param(query, "browser").unwrap_or("");
+            forget_removed_extension(browser, query_param(query, "profile").unwrap_or(""));
+            let store = match browser_type_named(browser) {
+                Some(BrowserType::Firefox) => focuser_common::browser::FIREFOX_STORE_URL,
+                _ => focuser_common::browser::CHROME_STORE_URL,
+            };
+            // The browser shows this in a new tab. Send it on to the store.
+            ("302 Found", store.into())
         }
         _ => ("404 Not Found", r#"{"error":"not found"}"#.into()),
     }
@@ -650,16 +720,11 @@ fn api_add_site(body: &str, state: &AppState) -> (&'static str, String) {
     };
 
     let mut eng = state.engine.lock().unwrap();
+    // No lock check: a new site only blocks more, so a locked list takes one.
     let mut list = match eng.db().get_block_list(uuid) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
-    if list.is_modification_protected() {
-        return (
-            "403 Forbidden",
-            serde_json::json!({"error": "protected"}).to_string(),
-        );
-    }
 
     use focuser_common::types::WebsiteRule;
     let rule = match rule_type {
@@ -728,7 +793,7 @@ fn api_remove_site(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
-    if list.is_modification_protected() {
+    if list.is_modification_protected() || eng.is_block_list_protected(uuid) {
         return (
             "403 Forbidden",
             serde_json::json!({"error": "protected"}).to_string(),
@@ -934,7 +999,7 @@ fn api_toggle_list(body: &str, state: &AppState) -> (&'static str, String) {
         Ok(l) => l,
         Err(e) => return ("404 Not Found", format!(r#"{{"error":"{}"}}"#, e)),
     };
-    if list.is_modification_protected() {
+    if list.is_modification_protected() || eng.is_block_list_protected(uuid) {
         return (
             "403 Forbidden",
             serde_json::json!({"error": "protected"}).to_string(),
@@ -1214,7 +1279,6 @@ mod tests {
         let body = serde_json::json!({"list_id": list.id, "domain":"example.com", "enabled":false})
             .to_string();
         let attempt = || {
-            assert_eq!(super::api_add_site(&body, &state).0, "403 Forbidden");
             assert_eq!(super::api_remove_site(&body, &state).0, "403 Forbidden");
             assert_eq!(super::api_toggle_list(&body, &state).0, "403 Forbidden");
         };
@@ -1398,12 +1462,15 @@ mod tests {
         // switched a locked list off.
         assert_eq!(super::api_toggle_list(&body, &state).0, "403 Forbidden");
         assert_eq!(super::api_remove_site(&body, &state).0, "403 Forbidden");
-        assert_eq!(super::api_add_site(&body, &state).0, "403 Forbidden");
+
+        // Adding a site only blocks more, so the popup can still do it.
+        let add = serde_json::json!({"list_id": list.id, "domain": "x.example"}).to_string();
+        assert_eq!(super::api_add_site(&add, &state).0, "200 OK");
 
         let engine = state.engine.lock().unwrap();
         let stored = engine.db().get_block_list(list.id).unwrap();
         assert!(stored.enabled, "the locked list was switched off");
-        assert_eq!(stored.websites.len(), 1);
+        assert_eq!(stored.websites.len(), 2, "youtube.com was removed");
     }
 
     // A hosts file cannot express these, so this endpoint is the only way they
@@ -1762,6 +1829,66 @@ mod tests {
             None,
         );
         assert!(covered());
+    }
+
+    /// The browser opens this address when the extension is removed. Brave,
+    /// since no other test reports it.
+    #[test]
+    fn a_removed_extension_stops_covering_its_browser_at_once() {
+        use focuser_common::extension::BrowserType::Brave;
+        let addr = start(ctx_with_extension(|_| {}));
+        let connected = || super::get_connected_browsers(60).contains(&Brave);
+
+        request(
+            &addr,
+            "GET",
+            "/api/heartbeat?browser=brave&incognito_allowed=true&profile=p1",
+            None,
+        );
+        assert!(connected());
+
+        // Any page can open this address, but it does not know the profile.
+        let stranger = raw_request(&addr, "/api/extension-removed?browser=brave&profile=guess");
+        assert!(stranger.starts_with("HTTP/1.1 302"), "{stranger}");
+        assert!(connected(), "a made-up profile removed the extension");
+
+        let removed = raw_request(&addr, "/api/extension-removed?browser=brave&profile=p1");
+        assert!(!connected(), "the browser still counts as covered");
+        // The tab the browser opens for it lands where the extension is back
+        // one click away.
+        assert!(
+            removed.contains(&format!(
+                "Location: {}",
+                focuser_common::browser::CHROME_STORE_URL
+            )),
+            "{removed}"
+        );
+    }
+
+    /// The whole response, status line and headers included.
+    fn raw_request(addr: &str, path: &str) -> String {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn only_a_check_in_after_the_moment_counts_as_one_since_then() {
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut beat = super::BrowserHeartbeat::new();
+        pause();
+        let grace_started = std::time::Instant::now();
+        assert!(
+            !beat.checked_in_since(grace_started),
+            "the check-in that went quiet counted"
+        );
+        pause();
+        beat.record(None);
+        assert!(beat.checked_in_since(grace_started));
     }
 
     // ─── query_param ────────────────────────────────────────────────

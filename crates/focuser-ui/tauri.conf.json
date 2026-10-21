@@ -76,6 +76,13 @@
         "postInstallScript": "linux/postinst.sh",
         "preRemoveScript": "linux/prerm.sh"
       },
+      "rpm": {
+        "depends": [
+          "libwebkit2gtk-4.1.so.0()(64bit)",
+          "libappindicator3.so.1()(64bit)",
+          "libasound.so.2()(64bit)"
+        ]
+      },
       "appimage": {
         "bundleMediaFramework": false
       }

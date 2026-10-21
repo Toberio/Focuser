@@ -140,6 +140,25 @@ export async function isIncognitoAllowed(): Promise<boolean | null> {
  * private windows. The app needs to tell them apart to hold each to its own.
  * It never leaves this machine.
  */
+/**
+ * Leave the browser an address to open if this extension is removed, so the
+ * app hears of it at once and not two quiet minutes later. Only while the
+ * app answers: with no app there, the tab would only show an error.
+ */
+export async function leaveRemovalAddress(
+  browserName: BrowserName,
+  appRunning: boolean,
+): Promise<void> {
+  try {
+    const url = appRunning
+      ? `${API_BASE}/api/extension-removed?browser=${encodeURIComponent(browserName)}&profile=${encodeURIComponent(await profileId())}`
+      : "";
+    await browser.runtime.setUninstallURL(url);
+  } catch {
+    /* not in this browser: the app notices when the check-ins stop */
+  }
+}
+
 export async function profileId(): Promise<string> {
   try {
     const stored: unknown = (await browser.storage.local.get("profileId")).profileId;

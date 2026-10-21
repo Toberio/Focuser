@@ -109,3 +109,6 @@ welcome:
   waysCaption: ルールの種類と、それぞれの対象範囲
   tagline: 本当は別のことをしていたい人のために。
   versionBadge: バージョン {version}
+locked:
+  title: "現在ロック中"
+  body: "ブロックリストがロックされているため、Focuser はブラウザの拡張機能ページを閉じたままにしています。ロックが終わると再び開けます。"

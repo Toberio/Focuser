@@ -118,6 +118,8 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/bundle/deb/*.deb dist/ 2>/dev/null || true
+          # Built all along for Fedora and openSUSE, and never published (#3).
+          cp target/${{ matrix.target }}/release/bundle/rpm/*.rpm dist/ 2>/dev/null || true
           cp target/${{ matrix.target }}/release/bundle/appimage/*.AppImage dist/ 2>/dev/null || true
           cp target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.sig dist/ 2>/dev/null || true
           cp target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.tar.gz dist/ 2>/dev/null || true
@@ -139,6 +141,14 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The release text is the tag's own message. Checkout can leave an
+      # annotated tag as a plain one with no message, so fetch it again.
+      - name: Write the release notes
+        run: |
+          git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          node .github/scripts/release-notes.mjs "$GITHUB_REF_NAME" > notes.md
+          cat notes.md
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -225,28 +235,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: Focuser ${{ github.ref_name }}
-          body: |
-            ## Focuser ${{ github.ref_name }}
-
-            ### Downloads
-
-            | Platform | Installer | Portable |
-            |----------|-----------|----------|
-            | Windows | `.exe` (NSIS installer) | `Focuser-Portable.exe` |
-            | macOS (Intel) | `.dmg` | — |
-            | macOS (Apple Silicon) | `.dmg` | — |
-            | Linux | `.deb` / `.AppImage` | `Focuser-Linux-x86_64` |
-
-            ### Installation
-            - **Windows**: Download the `.exe` installer, run it, and follow the setup wizard. Focuser will be added to Start Menu and auto-start on boot.
-            - **macOS**: Download the `.dmg`, open it, drag Focuser to Applications.
-            - **Linux**: Use the `.deb` for Debian/Ubuntu (`sudo dpkg -i Focuser_*.deb`) or the `.AppImage` for any distro.
-
-            ### Browser extension
-            - **Chrome / Edge / Brave / Opera**: [Chrome Web Store](https://chromewebstore.google.com/detail/jpnhbpbcmagoonmaleppldmcnaibkbmj)
-            - **Firefox**: [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/focuser-website-blocker/)
-
-            See the [README](https://github.com/aadeshrao123/Focuser#readme) for full details.
+          body_path: notes.md
           draft: false
           prerelease: false
           files: release/*

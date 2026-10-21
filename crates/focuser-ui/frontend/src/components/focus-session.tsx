@@ -1,4 +1,4 @@
-import { Pause, Play, SkipForward, Square, Timer } from "lucide-react";
+import { Lock, Pause, Play, SkipForward, Square, Timer } from "lucide-react";
 import { useState } from "react";
 import type { BlockList, PomodoroConfig } from "@/bindings";
 import { FlipClock } from "@/components/flip-clock";
@@ -9,6 +9,7 @@ import { Card } from "@/components/ui/card";
 import { Dial } from "@/components/ui/dial";
 import { InlineError } from "@/components/ui/feedback";
 import { Progress } from "@/components/ui/progress";
+import { Switch } from "@/components/ui/switch";
 import {
   usePausePomodoro,
   usePomodoroPresets,
@@ -101,35 +102,42 @@ function Running({
           </p>
         </div>
 
-        <div className="flex shrink-0 gap-2">
-          {status.paused ? (
-            <Button size="sm" icon={<Play />} onClick={() => resume.mutate()}>
-              {m.focus_resume()}
+        {status.locked_rounds_left > 0 ? (
+          <p className="inline-flex shrink-0 items-center gap-1.5 text-muted-foreground text-sm">
+            <Lock className="size-3.5" />
+            {m.focus_locked()}
+          </p>
+        ) : (
+          <div className="flex shrink-0 gap-2">
+            {status.paused ? (
+              <Button size="sm" icon={<Play />} onClick={() => resume.mutate()}>
+                {m.focus_resume()}
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" icon={<Pause />} onClick={() => pause.mutate()}>
+                {m.focus_pause()}
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<SkipForward />}
+              onClick={() => skip.mutate()}
+              aria-label={m.focus_skip_label()}
+            >
+              {m.focus_skip()}
             </Button>
-          ) : (
-            <Button variant="outline" size="sm" icon={<Pause />} onClick={() => pause.mutate()}>
-              {m.focus_pause()}
+            <Button
+              variant="ghost"
+              tone="destructive"
+              size="sm"
+              icon={<Square />}
+              onClick={() => stop.mutate()}
+            >
+              {m.focus_stop()}
             </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            icon={<SkipForward />}
-            onClick={() => skip.mutate()}
-            aria-label={m.focus_skip_label()}
-          >
-            {m.focus_skip()}
-          </Button>
-          <Button
-            variant="ghost"
-            tone="destructive"
-            size="sm"
-            icon={<Square />}
-            onClick={() => stop.mutate()}
-          >
-            {m.focus_stop()}
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
 
       <Progress className="mt-4" value={progress} label={m.focus_phase_progress()} />
@@ -181,6 +189,7 @@ function StartForm({ lists }: { lists: BlockList[] }) {
   // Null until the user touches something. The durations shown come from the
   // first preset, so the numbers live in Rust and are never restated here.
   const [draft, setDraft] = useState<Minutes | null>(null);
+  const [locked, setLocked] = useState(false);
 
   const selected = resolveSelected(lists, rawSelected);
 
@@ -277,6 +286,19 @@ function StartForm({ lists }: { lists: BlockList[] }) {
         </div>
       </div>
 
+      <div className="mt-5">
+        <div className="flex items-center gap-2">
+          <Switch
+            size="sm"
+            checked={locked}
+            onCheckedChange={setLocked}
+            aria-label={m.focus_lock()}
+          />
+          <span className="text-muted-foreground text-sm">{m.focus_lock()}</span>
+        </div>
+        {locked && <p className="mt-1 text-muted-foreground text-xs">{m.focus_lock_hint()}</p>}
+      </div>
+
       <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
         <ListPicker lists={lists} value={selected} onChange={setSelected} />
         <Button
@@ -291,6 +313,8 @@ function StartForm({ lists }: { lists: BlockList[] }) {
                 long_break_secs: values.longBreak * 60,
                 cycles_until_long_break: values.cycles,
               },
+              // Up to the long break: one session, as the timeline shows it.
+              lockRounds: locked ? values.cycles : undefined,
             })
           }
         >

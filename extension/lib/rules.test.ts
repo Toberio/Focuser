@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalHost,
   compile,
+  isExtensionsPage,
   isInternalUrl,
   match,
   matchHostWildcard,
@@ -98,6 +99,20 @@ describe("match", () => {
     expect(
       match(rules({ blocked_wildcards: ["*/watch?v=*"] }), "video.test", "https://video.test/watch?v=abc"),
     ).not.toBeNull();
+  });
+
+  it("matches a page pattern typed without https:// or www. (#48)", () => {
+    const r = rules({ blocked_wildcards: ["youtube.com/@somechannel*"] });
+    for (const url of [
+      "https://www.youtube.com/@somechannel",
+      "https://www.youtube.com/@somechannel/videos",
+      "https://youtube.com/@somechannel",
+    ]) {
+      expect(match(r, new URL(url).hostname, url), url).not.toBeNull();
+    }
+    expect(match(r, "www.youtube.com", "https://www.youtube.com/@otherchannel")).toBeNull();
+    // Still from the start of the address, not anywhere in it.
+    expect(match(r, "link.test", "https://link.test/youtube.com/@somechannel")).toBeNull();
   });
 
   it("blocks a site that was typed as a bare name, on any ending", () => {
@@ -286,5 +301,30 @@ describe("ruleCount", () => {
 
   it("deduplicates domains that canonicalise to the same host", () => {
     expect(ruleCount(rules({ blocked_domains: ["example.com", "www.example.com"] }))).toBe(1);
+  });
+});
+
+describe("the browser's extensions page", () => {
+  it("is the page in every browser where the extension can be switched off", () => {
+    for (const url of [
+      "chrome://extensions/",
+      "chrome://extensions/?id=jpnhbpbcmagoonmaleppldmcnaibkbmj",
+      "edge://extensions/",
+      "brave://extensions/shortcuts",
+      "opera://extensions",
+      "vivaldi://extensions/",
+      "about:addons",
+    ])
+      expect(isExtensionsPage(url), url).toBe(true);
+  });
+
+  it("is not the rest of the settings, or a site that has the word in it", () => {
+    for (const url of [
+      "chrome://settings/",
+      "about:preferences",
+      "https://example.com/extensions",
+      "chrome://extensions-internals",
+    ])
+      expect(isExtensionsPage(url), url).toBe(false);
   });
 });

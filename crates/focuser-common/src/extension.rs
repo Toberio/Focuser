@@ -88,6 +88,10 @@ pub struct ExtensionRuleSet {
     /// filter on exempts. Left out when empty, like `image_filter`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_filter_exceptions: Vec<String>,
+    /// A block list is locked right now. The extension keeps the browser's
+    /// own extensions page shut meanwhile, where it could be switched off.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 impl ExtensionRuleSet {
@@ -106,6 +110,7 @@ impl ExtensionRuleSet {
             allowance_domains: Vec::new(),
             image_filter: ImageFilter::Off,
             image_filter_exceptions: Vec::new(),
+            locked: false,
         }
     }
 

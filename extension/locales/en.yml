@@ -119,3 +119,6 @@ welcome:
   contribute: Contribute code
   thanks: Thank you for using Focuser. Good luck with whatever you are trying to get done.
   tagline: Made for people who would rather be doing something else.
+locked:
+  title: "Locked for now"
+  body: "A block list is locked, so Focuser keeps the browser's extensions page closed. It opens again when the lock ends."

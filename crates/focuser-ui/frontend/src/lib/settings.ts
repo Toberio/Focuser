@@ -12,6 +12,7 @@ import { useSetSetting, useSetting } from "./commands";
 export const SETTING_KEYS = {
   blockUnsupportedBrowsers: "block_unsupported_browsers",
   extensionGracePeriod: "extension_grace_period",
+  spareAutomationBrowsers: "spare_automation_browsers",
   language: "language",
   phaseSound: "pomodoro_sound",
   phaseSoundVolume: "pomodoro_sound_volume",

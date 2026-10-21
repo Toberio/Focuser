@@ -115,6 +115,11 @@ pub fn print_human(result: &CommandResult) {
                 if status.paused { " (paused)" } else { "" },
                 status.block_list_name,
             );
+            match status.locked_rounds_left {
+                0 => {}
+                1 => println!("Locked for 1 more round."),
+                n => println!("Locked for {n} more rounds."),
+            }
         }
 
         CommandResult::PomodoroSession(session) => println!("{}", session.id),

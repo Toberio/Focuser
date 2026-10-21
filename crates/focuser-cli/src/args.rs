@@ -368,6 +368,10 @@ pub enum PomodoroCmd {
         /// Override how many focus blocks precede a long break.
         #[arg(long)]
         cycles: Option<u32>,
+        /// Lock the session for this many focus blocks (1 to 12): until then
+        /// it cannot be stopped, skipped or paused, and Focuser cannot quit.
+        #[arg(long, value_name = "ROUNDS")]
+        lock_rounds: Option<u32>,
     },
     /// List the built-in duration presets.
     Presets,
@@ -626,6 +630,7 @@ impl TopLevel {
                     short_break_secs,
                     long_break_secs,
                     cycles,
+                    lock_rounds,
                 } => {
                     // The preset supplies the baseline; each flag overrides one
                     // field, so `--preset sprint --work-secs 600` means what it
@@ -646,6 +651,7 @@ impl TopLevel {
                             long_break_secs: long_break_secs.unwrap_or(base.long_break_secs),
                             cycles_until_long_break: cycles.unwrap_or(base.cycles_until_long_break),
                         },
+                        lock_rounds,
                     }
                 }
                 PomodoroCmd::Pause => Command::PomodoroPause,

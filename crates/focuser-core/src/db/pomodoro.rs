@@ -15,8 +15,8 @@ impl Database {
                 id, block_list_id, work_secs, short_break_secs, long_break_secs,
                 cycles_until_long_break, started_at, ended_at, completed_cycles,
                 current_phase, current_cycle, phase_started_at,
-                paused_remaining_secs, prev_enabled
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11, ?12, ?13)",
+                paused_remaining_secs, prev_enabled, locked_rounds
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 session.id.to_string(),
                 session.block_list_id.to_string(),
@@ -31,6 +31,7 @@ impl Database {
                 session.phase_started_at.to_rfc3339(),
                 session.paused_remaining_secs.map(|v| v as i64),
                 session.prev_enabled as i64,
+                session.locked_rounds as i64,
             ],
         )
         .map_err(|e| FocuserError::Database(e.to_string()))?;
@@ -90,7 +91,7 @@ impl Database {
                 "SELECT id, block_list_id, work_secs, short_break_secs, long_break_secs,
                         cycles_until_long_break, started_at, completed_cycles,
                         current_phase, current_cycle, phase_started_at,
-                        paused_remaining_secs, prev_enabled
+                        paused_remaining_secs, prev_enabled, locked_rounds
                  FROM pomodoro_sessions
                  WHERE ended_at IS NULL
                  ORDER BY started_at DESC
@@ -220,6 +221,7 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<PomodoroSession> 
     let cycles: i64 = row.get(5)?;
     let completed_cycles: i64 = row.get(7)?;
     let current_cycle: i64 = row.get(9)?;
+    let locked_rounds: i64 = row.get(13)?;
 
     Ok(PomodoroSession {
         id,
@@ -237,5 +239,6 @@ fn row_to_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<PomodoroSession> 
         completed_cycles: completed_cycles as u32,
         started_at,
         prev_enabled: prev_enabled != 0,
+        locked_rounds: locked_rounds.max(0) as u32,
     })
 }

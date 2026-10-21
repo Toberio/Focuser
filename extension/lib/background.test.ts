@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeBrowser } from "wxt/testing/fake-browser";
 import background from "@/entrypoints/background";
+import { profileId } from "./api";
 import type { RuleSet } from "./rules";
 
 const RULES: RuleSet = {
@@ -19,12 +20,24 @@ let injected = vi.fn(async (_injection: { files?: string[] }) => undefined);
 const blockPages = () => injected.mock.calls.filter(([i]) => i.files?.includes("/block-page.js"));
 
 /** Start the background worker with `rules` already loaded. */
-async function start(rules: RuleSet = RULES) {
-  const fetched = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) =>
-    String(url).includes("/api/rules")
+async function start(
+  rules: RuleSet = RULES,
+  {
+    appRunning = true,
+    channel = "",
+  }: { appRunning?: boolean; channel?: string | ((asked: string) => string) } = {},
+) {
+  const fetched = vi.fn(async (url: RequestInfo | URL, _init?: RequestInit) => {
+    // YouTube's oEmbed answer: which channel a video is from.
+    if (String(url).startsWith("https://www.youtube.com/oembed")) {
+      const author = typeof channel === "function" ? channel(String(url)) : channel;
+      return new Response(JSON.stringify({ author_url: author }));
+    }
+    if (!appRunning) throw new TypeError("Failed to fetch");
+    return String(url).includes("/api/rules")
       ? new Response(JSON.stringify(rules))
-      : new Response("{}"),
-  );
+      : new Response("{}");
+  });
   vi.stubGlobal("fetch", fetched);
 
   // fake-browser has no toolbar button, script injection or idle detection.
@@ -40,7 +53,7 @@ async function start(rules: RuleSet = RULES) {
 
   background.main();
   // The badge is set once the first rules fetch has been applied.
-  await vi.waitFor(() => expect(badge).toHaveBeenCalled());
+  if (appRunning) await vi.waitFor(() => expect(badge).toHaveBeenCalled());
   return fetched;
 }
 
@@ -172,6 +185,131 @@ describe("telling the app about private windows", () => {
       expect(beat.searchParams.get("browser")).toBeTruthy();
       expect(beat.searchParams.has("incognito_allowed")).toBe(false);
     }
+  });
+});
+
+describe("telling the app when the extension is removed", () => {
+  const removalAddress = () =>
+    vi.spyOn(fakeBrowser.runtime, "setUninstallURL").mockResolvedValue(undefined);
+
+  it("leaves the browser an address of the app's to open, with this profile's id", async () => {
+    const left = removalAddress();
+    await start();
+
+    await vi.waitFor(() => expect(left).toHaveBeenCalled());
+    const url = new URL(String(left.mock.lastCall?.[0]));
+    expect(`${url.origin}${url.pathname}`).toBe("http://127.0.0.1:17549/api/extension-removed");
+    expect(url.searchParams.get("browser")).toBeTruthy();
+    // The id the heartbeat sends. A web page can open the address too, but
+    // it cannot know this.
+    expect(url.searchParams.get("profile")).toBe(await profileId());
+  });
+
+  it("leaves none while the app is not running, where the tab would only show an error", async () => {
+    const left = removalAddress();
+    await start(RULES, { appRunning: false });
+
+    await vi.waitFor(() => expect(left).toHaveBeenCalledWith(""));
+  });
+});
+
+describe("the browser's extensions page while a list is locked", () => {
+  const LOCKED: RuleSet = { ...RULES, locked: true };
+  const privateWindows = (allowed: boolean) =>
+    Object.assign(fakeBrowser, { extension: { isAllowedIncognitoAccess: async () => allowed } });
+  /** Open the extensions page in tab 5 and return where the worker sent it. */
+  async function openExtensionsPage() {
+    const sent = vi.spyOn(fakeBrowser.tabs, "update").mockResolvedValue({} as never);
+    await fakeBrowser.tabs.onUpdated.trigger(5, { url: "chrome://extensions/" }, {} as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return sent;
+  }
+
+  it("sends it to a page that says why", async () => {
+    privateWindows(true);
+    await start(LOCKED);
+    const sent = await openExtensionsPage();
+
+    await vi.waitFor(() => expect(sent).toHaveBeenCalled());
+    expect(sent.mock.lastCall?.[0]).toBe(5);
+    expect(String(sent.mock.lastCall?.[1]?.url)).toContain("/locked.html");
+  });
+
+  it("leaves it open while nothing is locked", async () => {
+    privateWindows(true);
+    await start(RULES);
+    expect(await openExtensionsPage()).not.toHaveBeenCalled();
+  });
+
+  it("leaves it open while private windows are not allowed, since that is fixed there", async () => {
+    privateWindows(false);
+    await start(LOCKED);
+    expect(await openExtensionsPage()).not.toHaveBeenCalled();
+  });
+});
+
+describe("a video from a blocked YouTube channel (#48)", () => {
+  const CHANNEL: RuleSet = {
+    ...RULES,
+    blocked_domains: [],
+    allowed_url_paths: [],
+    blocked_url_paths: ["youtube.com/@badchannel"],
+  };
+  const visit = (url: string) =>
+    fakeBrowser.webNavigation.onCommitted.trigger({ tabId: 7, frameId: 0, url } as never);
+  const move = (url: string) =>
+    fakeBrowser.webNavigation.onHistoryStateUpdated.trigger({ tabId: 7, frameId: 0, url } as never);
+
+  it("gets the block page", async () => {
+    await start(CHANNEL, { channel: "https://www.youtube.com/@BadChannel" });
+    await visit("https://www.youtube.com/watch?v=vid00000101");
+    await vi.waitFor(() => expect(blockPages()).toHaveLength(1));
+  });
+
+  it("does not when the video is from another channel", async () => {
+    const fetched = await start(CHANNEL, { channel: "https://www.youtube.com/@GoodChannel" });
+    await visit("https://www.youtube.com/watch?v=vid00000102");
+    await vi.waitFor(() =>
+      expect(fetched.mock.calls.some(([u]) => String(u).includes("/oembed"))).toBe(true),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(blockPages()).toHaveLength(0);
+  });
+
+  it("is not looked up when no rule names a channel", async () => {
+    const fetched = await start({ ...CHANNEL, blocked_url_paths: [] });
+    await visit("https://www.youtube.com/watch?v=vid00000103");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetched.mock.calls.some(([u]) => String(u).includes("/oembed"))).toBe(false);
+  });
+
+  it("reloads when the page moves on to such a video", async () => {
+    const reload = vi.spyOn(fakeBrowser.tabs, "reload").mockResolvedValue();
+    await start(CHANNEL, {
+      channel: (asked) =>
+        asked.includes("bad")
+          ? "https://www.youtube.com/@BadChannel"
+          : "https://www.youtube.com/@GoodChannel",
+    });
+
+    await visit("https://www.youtube.com/watch?v=goodvid0001");
+    await move("https://www.youtube.com/watch?v=goodvid0001&t=1");
+    await move("https://www.youtube.com/watch?v=badvid00001");
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledWith(7));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload while a blocked video only rewrites its own address", async () => {
+    // YouTube rewrites the address of the video it has just loaded. A reload
+    // for that would bring the block back and start the loop from #36 again.
+    const reload = vi.spyOn(fakeBrowser.tabs, "reload").mockResolvedValue();
+    await start(CHANNEL, { channel: "https://www.youtube.com/@BadChannel" });
+
+    await visit("https://www.youtube.com/watch?v=badvid00002");
+    await move("https://www.youtube.com/watch?v=badvid00002&t=1");
+    await vi.waitFor(() => expect(blockPages()).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reload).not.toHaveBeenCalled();
   });
 });
 

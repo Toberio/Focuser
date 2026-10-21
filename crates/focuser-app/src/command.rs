@@ -249,6 +249,9 @@ pub enum Command {
     PomodoroStart {
         block_list_id: EntityId,
         config: PomodoroConfig,
+        /// Lock the session for this many work rounds: until they are done
+        /// it cannot be stopped, skipped or paused (#47). None is no lock.
+        lock_rounds: Option<u32>,
     },
     /// Returns whether a session was actually paused.
     PomodoroPause,

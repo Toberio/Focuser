@@ -6,6 +6,7 @@ import {
   imageVerdict,
   isIncognitoAllowed,
   sendImageFeedback,
+  leaveRemovalAddress,
   POLL_INTERVAL_MS,
   profileId,
   reportBlocked,
@@ -26,6 +27,7 @@ import {
   canonicalSet,
   compile,
   EMPTY_RULES,
+  isExtensionsPage,
   isInternalUrl,
   match,
   ruleCount,
@@ -44,6 +46,7 @@ import {
   skipPatterns,
   VerdictCache,
 } from "@/lib/image-filter";
+import { channelOf, namesChannel, youtubeVideoId } from "@/lib/youtube";
 import type { BlockContext, Message, MessageReply } from "@/lib/messages";
 import { isTappable, MAX_IMAGE_BYTES, ResponseTap } from "@/lib/response-tap";
 import { SharedActivity } from "@/lib/shared-activity";
@@ -68,6 +71,9 @@ export default defineBackground(() => {
   let rules: CompiledRules = EMPTY_RULES;
   let rawRules: RuleSet | null = null;
   let connected = false;
+  // What the browser was last told to open on removal: null until the first
+  // fetch, so an address left by an earlier session is replaced either way.
+  let removalAddressFor: boolean | null = null;
   let index: CategoryIndex = EMPTY_INDEX;
 
   // Keyed by `tabId:target` — a single navigation fires both onCommitted and
@@ -79,6 +85,9 @@ export default defineBackground(() => {
   // off the in-page reload below — that reload brings the block straight
   // back, and the site rewrites again, forever.
   const showingBlock = new Set<number>();
+  // The YouTube video each tab loaded with, to tell a move to another video
+  // from the page rewriting its own address.
+  const loadedVideo = new Map<number, string | null>();
   let lastTickAt = 0;
   const sharedActivity = new SharedActivity();
   let samplingShared = false;
@@ -140,6 +149,10 @@ export default defineBackground(() => {
     const next = await fetchRules(browserName);
     const wasConnected = connected;
     connected = next !== null;
+    if (connected !== removalAddressFor) {
+      removalAddressFor = connected;
+      void leaveRemovalAddress(browserName, connected);
+    }
 
     if (next && JSON.stringify(next) !== JSON.stringify(rawRules)) {
       rawRules = next;
@@ -209,7 +222,7 @@ export default defineBackground(() => {
   }
 
   async function blockTab(tabId: number, hostname: string, url: string) {
-    const hit = match(rules, hostname, url);
+    const hit = match(rules, hostname, url) ?? (await channelMatch(url));
     if (!hit) return;
     if (!shouldInject(tabId, trackingKey(hit))) return;
     // Marked before anything is awaited: the site runs while the app is asked
@@ -238,10 +251,22 @@ export default defineBackground(() => {
     }
   }
 
+  /**
+   * The rule a YouTube video falls under through its channel (#48). Its own
+   * address names only the video, so the channel is looked up.
+   */
+  async function channelMatch(url: string): Promise<BlockMatch | null> {
+    const video = youtubeVideoId(url);
+    if (!video || !namesChannel(rules)) return null;
+    const channel = await channelOf(video);
+    return channel ? match(rules, new URL(channel).hostname, channel) : null;
+  }
+
   async function enforceOnOpenTabs() {
     const tabs = await browser.tabs.query({});
     for (const tab of tabs) {
       if (!tab.id || !tab.url) continue;
+      await guardExtensionsPage(tab.id, tab.url);
       try {
         const parsed = new URL(tab.url);
         if (isInternalUrl(parsed.protocol)) continue;
@@ -570,6 +595,7 @@ export default defineBackground(() => {
       if (key.startsWith(`${tabId}:`)) recentInjections.delete(key);
     }
     showingBlock.delete(tabId);
+    loadedVideo.delete(tabId);
   }
 
   browser.webNavigation.onCommitted.addListener(async (details) => {
@@ -579,6 +605,7 @@ export default defineBackground(() => {
     // second visit within the dedup window got no block page: the site stayed
     // hidden behind the early style, but loaded and able to play sound.
     forgetTab(details.tabId);
+    loadedVideo.set(details.tabId, youtubeVideoId(to.url));
     await blockTab(details.tabId, to.hostname, to.url);
   });
 
@@ -588,10 +615,42 @@ export default defineBackground(() => {
   browser.webNavigation.onHistoryStateUpdated.addListener((details) => {
     if (showingBlock.has(details.tabId)) return;
     const to = destination(details);
-    if (to && match(rules, to.hostname, to.url)) void browser.tabs.reload(details.tabId);
+    if (!to) return;
+    if (match(rules, to.hostname, to.url)) {
+      void browser.tabs.reload(details.tabId);
+      return;
+    }
+    // A move to another video can be a blocked channel's. The video the page
+    // loaded with rewriting its own address is not a move, and a reload for
+    // it would loop.
+    const video = youtubeVideoId(to.url);
+    if (video && video !== loadedVideo.get(details.tabId)) {
+      loadedVideo.set(details.tabId, video);
+      void channelMatch(to.url).then((hit) => hit && browser.tabs.reload(details.tabId));
+    }
   });
 
   browser.tabs.onRemoved.addListener(forgetTab);
+
+  // ─── The browser's extensions page, while a list is locked ────────
+
+  /**
+   * The extension can be switched off on that page, so it stays shut while a
+   * block list is locked. Not while the extension is kept out of private
+   * windows: that is fixed on the same page, and the app closes the browser
+   * meanwhile anyway.
+   */
+  async function guardExtensionsPage(tabId: number, url: string | undefined) {
+    if (!url || !rawRules?.locked || !isExtensionsPage(url)) return;
+    if ((await isIncognitoAllowed()) === false) return;
+    try {
+      await browser.tabs.update(tabId, { url: browser.runtime.getURL("/locked.html") });
+    } catch {
+      await browser.tabs.remove(tabId).catch(() => undefined);
+    }
+  }
+
+  browser.tabs.onUpdated.addListener((tabId, change) => void guardExtensionsPage(tabId, change.url));
 
   browser.runtime.onMessage.addListener(
     (raw: unknown, sender, sendResponse: (reply: MessageReply) => void) => {

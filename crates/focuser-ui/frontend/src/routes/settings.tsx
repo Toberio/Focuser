@@ -36,6 +36,7 @@ export function Settings() {
   const autostart = useAutostart();
   const enforceBrowsers = useBooleanSetting(SETTING_KEYS.blockUnsupportedBrowsers, true);
   const gracePeriod = useNumberSetting(SETTING_KEYS.extensionGracePeriod, 60);
+  const spareAutomation = useBooleanSetting(SETTING_KEYS.spareAutomationBrowsers, false);
   const phaseSound = useBooleanSetting(SETTING_KEYS.phaseSound, false);
   const soundVolume = useNumberSetting(SETTING_KEYS.phaseSoundVolume, 70);
   const language = useLanguage();
@@ -45,6 +46,8 @@ export function Settings() {
   const editLocked = locks.some((l) => l.prevent_modification);
   const autostartLocked = autostart.value && locks.some((l) => l.prevent_service_stop);
   const browsersLocked = editLocked && enforceBrowsers.value;
+  // A lock forbids turning this on. Turning it off is always fine.
+  const spareLocked = editLocked && !spareAutomation.value;
 
   const retention = useStatsRetention();
   const setRetention = useSetStatsRetention();
@@ -122,6 +125,25 @@ export function Settings() {
               step={5}
               suffix={m.settings_seconds_suffix()}
               disabled={!enforceBrowsers.value || gracePeriod.isPending}
+            />
+          }
+        />
+        <SettingRow
+          label={m.settings_spare_automation()}
+          description={
+            spareLocked ? m.settings_locked_on() : m.settings_spare_automation_description()
+          }
+          control={
+            <Switch
+              checked={spareAutomation.value}
+              onCheckedChange={spareAutomation.set}
+              disabled={
+                !enforceBrowsers.value ||
+                spareAutomation.isPending ||
+                spareAutomation.isSaving ||
+                spareLocked
+              }
+              aria-label={m.settings_spare_automation()}
             />
           }
         />
@@ -226,6 +248,7 @@ export function Settings() {
           autostart.error ??
           enforceBrowsers.error ??
           gracePeriod.error ??
+          spareAutomation.error ??
           phaseSound.error ??
           soundVolume.error ??
           setRetention.error

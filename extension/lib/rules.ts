@@ -30,6 +30,8 @@ export interface RuleSet {
   /** Sites the image filter leaves alone. Each covers its subdomains. */
   image_filter_exceptions?: string[];
   version?: number;
+  /** A block list is locked right now. */
+  locked?: boolean;
 }
 
 /** Rules with the hot paths pre-canonicalised, built once per rules update. */
@@ -264,12 +266,24 @@ export function match(rules: CompiledRules, hostname: string, url: string): Bloc
   for (const path of rules.urlPaths) {
     if (lowerUrl.includes(path)) return { reason: "url-path", target: path };
   }
+  const pages = pageForms(lowerUrl);
   for (const raw of rules.wildcards) {
-    if (matchHostWildcard(raw, hostname) || matchWildcard(raw.toLowerCase(), lowerUrl)) {
+    const glob = raw.toLowerCase();
+    if (matchHostWildcard(raw, hostname) || pages.some((page) => matchWildcard(glob, page))) {
       return { reason: "wildcard", target: raw };
     }
   }
   return null;
+}
+
+/**
+ * The address as given, then without `https://`, then without `www.` too.
+ * People write a page pattern the way they would type it, like
+ * `youtube.com/@name*`, and that has neither (#48).
+ */
+function pageForms(url: string): string[] {
+  const bare = url.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+  return [url, bare, bare.replace(/^www\./, "")];
 }
 
 export function isBlocked(rules: CompiledRules, hostname: string, url: string): boolean {
@@ -277,6 +291,17 @@ export function isBlocked(rules: CompiledRules, hostname: string, url: string): 
 }
 
 /** Pages the extension must never touch: its own, and the browser's. */
+/**
+ * The browser's own page for its extensions, where this one can be switched
+ * off. Kept shut while a block list is locked.
+ */
+export function isExtensionsPage(url: string): boolean {
+  return (
+    /^(chrome|edge|brave|opera|vivaldi):\/\/extensions(\/|\?|$)/i.test(url) ||
+    /^about:addons\b/i.test(url)
+  );
+}
+
 export function isInternalUrl(protocol: string): boolean {
   return (
     protocol === "chrome:" ||

@@ -383,6 +383,11 @@ export type Command =
 { cmd: "pomodoro_presets" } | { cmd: "pomodoro_start"; args: {
 	block_list_id: string,
 	config: PomodoroConfig,
+	/**
+	 *  Lock the session for this many work rounds: until they are done
+	 *  it cannot be stopped, skipped or paused (#47). None is no lock.
+	 */
+	lock_rounds: number | null,
 } } | 
 /**  Returns whether a session was actually paused. */
 { cmd: "pomodoro_pause" } | { cmd: "pomodoro_resume" } | 
@@ -638,6 +643,11 @@ export type PomodoroSession = {
 	 *  session started. Restored when the session ends.
 	 */
 	prev_enabled: boolean,
+	/**
+	 *  Work rounds the session is locked for (#47). Until that many are
+	 *  done it cannot be stopped, skipped or paused. 0 is no lock.
+	 */
+	locked_rounds: number,
 };
 
 /**  Snapshot of the Pomodoro state for the UI. */
@@ -653,6 +663,8 @@ export type PomodoroStatus = {
 	phase_duration_secs: number,
 	paused: boolean,
 	started_at: string,
+	/**  Rounds until Stop, Skip and Pause come back. 0 when not locked. */
+	locked_rounds_left: number,
 };
 
 export type Protection = {

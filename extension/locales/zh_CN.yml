@@ -109,3 +109,6 @@ welcome:
   waysCaption: 各类规则及其涵盖范围
   tagline: 为宁愿去做别的事的人而做。
   versionBadge: 版本 {version}
+locked:
+  title: "暂时锁定"
+  body: "有一个拦截清单处于锁定状态，因此 Focuser 会关闭浏览器的扩展程序页面。锁定结束后即可再次打开。"

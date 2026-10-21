@@ -130,6 +130,7 @@ pub fn start_session(
     eng: &mut BlockEngine,
     block_list_id: EntityId,
     config: PomodoroConfig,
+    locked_rounds: u32,
 ) -> Result<PomodoroSession> {
     // Reject if another session is running.
     if eng.db().get_active_pomodoro_session()?.is_some() {
@@ -153,7 +154,8 @@ pub fn start_session(
     updated.updated_at = Utc::now();
     eng.db().update_block_list(&updated)?;
 
-    let session = PomodoroSession::new(block_list_id, config, prev_enabled);
+    let mut session = PomodoroSession::new(block_list_id, config, prev_enabled);
+    session.locked_rounds = locked_rounds;
     eng.db().create_pomodoro_session(&session)?;
     eng.db().record_pomodoro_phase_start(
         session.id,
@@ -250,8 +252,20 @@ pub fn tick(eng: &mut BlockEngine, runtime: &mut PomodoroRuntime) -> Result<Tick
     };
     let now = Utc::now();
 
-    // Tamper detection.
-    if runtime.detect_tamper(now) {
+    // Tamper detection. A locked session is not ended by it, which would end
+    // the lock too: the phase it was in starts over instead.
+    let tampered = runtime.detect_tamper(now);
+    if tampered && session.locked_rounds_left() > 0 {
+        warn!(
+            session_id = %session.id,
+            "Pomodoro: wall-clock tamper detected in a locked session, restarting the phase"
+        );
+        session.phase_started_at = now;
+        session.paused_remaining_secs = None;
+        eng.db().update_pomodoro_session(&session)?;
+        return Ok(TickOutcome::NoChange);
+    }
+    if tampered {
         warn!(
             session_id = %session.id,
             "Pomodoro: wall-clock tamper detected, aborting session"
@@ -328,6 +342,7 @@ pub fn build_status(db: &Database) -> Result<Option<PomodoroStatus>> {
         phase_duration_secs: session.current_phase_duration_secs(),
         paused: session.is_paused(),
         started_at: session.started_at,
+        locked_rounds_left: session.locked_rounds_left(),
     }))
 }
 
@@ -444,11 +459,43 @@ mod tests {
         eng.db().get_block_list(id).unwrap().enabled
     }
 
+    /// The clock was set two hours ahead since the last tick.
+    fn clock_moved_ahead() -> PomodoroRuntime {
+        let mut runtime = PomodoroRuntime::new();
+        runtime.last_tick_instant = Some(Instant::now());
+        runtime.last_tick_wall = Some(Utc::now() - chrono::Duration::hours(2));
+        runtime
+    }
+
+    #[test]
+    fn a_clock_jump_starts_the_phase_of_a_locked_session_again() {
+        let list = focuser_common::types::BlockList::new("Deep Work");
+        let mut eng = engine_with(&list);
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC, 2).unwrap();
+
+        // Ending it, as an unlocked one is, would end the lock with it.
+        let outcome = tick(&mut eng, &mut clock_moved_ahead()).unwrap();
+        assert_eq!(outcome, TickOutcome::NoChange);
+        let session = eng.db().get_active_pomodoro_session().unwrap();
+        assert_eq!(session.map(|s| s.locked_rounds_left()), Some(2));
+    }
+
+    #[test]
+    fn a_clock_jump_ends_an_unlocked_session() {
+        let list = focuser_common::types::BlockList::new("Social");
+        let mut eng = engine_with(&list);
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC, 0).unwrap();
+
+        let outcome = tick(&mut eng, &mut clock_moved_ahead()).unwrap();
+        assert_eq!(outcome, TickOutcome::TamperDetected);
+        assert!(eng.db().get_active_pomodoro_session().unwrap().is_none());
+    }
+
     #[test]
     fn a_break_turns_an_unlocked_list_off() {
         let list = focuser_common::types::BlockList::new("Social");
         let mut eng = engine_with(&list);
-        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC).unwrap();
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC, 0).unwrap();
 
         skip_phase(&mut eng).unwrap();
         assert!(!enabled(&eng, list.id));
@@ -458,7 +505,7 @@ mod tests {
     fn a_break_cannot_switch_off_a_locked_list() {
         let list = locked(true);
         let mut eng = engine_with(&list);
-        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC).unwrap();
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC, 0).unwrap();
 
         skip_phase(&mut eng).unwrap();
         assert!(
@@ -472,7 +519,7 @@ mod tests {
         // Off before the session, so a plain restore would switch it off.
         let list = locked(false);
         let mut eng = engine_with(&list);
-        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC).unwrap();
+        start_session(&mut eng, list.id, PomodoroConfig::CLASSIC, 0).unwrap();
 
         stop_session(&mut eng).unwrap();
         assert!(enabled(&eng, list.id));

@@ -14,21 +14,34 @@ pub struct BlockEngine {
     db: Database,
     /// Cached block lists for fast evaluation (refreshed periodically).
     cached_lists: Vec<BlockList>,
+    /// The list of a focus session that is locked, and its rounds to go.
+    locked_session: Option<(EntityId, u32)>,
 }
 
 impl BlockEngine {
     pub fn new(db: Database) -> Result<Self> {
         upgrade_exceptions(&db)?;
         let cached_lists = db.list_block_lists()?;
+        let locked_session = locked_session(&db)?;
         info!(count = cached_lists.len(), "Block engine initialized");
-        Ok(Self { db, cached_lists })
+        Ok(Self {
+            db,
+            cached_lists,
+            locked_session,
+        })
     }
 
     /// Reload block lists from the database.
     pub fn refresh(&mut self) -> Result<()> {
         self.cached_lists = self.db.list_block_lists()?;
+        self.locked_session = locked_session(&self.db)?;
         debug!(count = self.cached_lists.len(), "Refreshed block lists");
         Ok(())
+    }
+
+    /// The list of a focus session that is locked, and its rounds to go (#47).
+    pub fn locked_focus_session(&self) -> Option<(EntityId, u32)> {
+        self.locked_session
     }
 
     /// Check if a domain should be blocked.
@@ -147,6 +160,11 @@ impl BlockEngine {
     ) -> ExtensionRuleSet {
         let mut rules = ExtensionRuleSet::empty();
         let mut filtering: Vec<&BlockList> = Vec::new();
+        rules.locked = self.locked_session.is_some()
+            || self
+                .cached_lists
+                .iter()
+                .any(|l| l.is_modification_protected());
 
         for list in &self.cached_lists {
             if !list.is_effectively_active() {
@@ -357,19 +375,26 @@ impl BlockEngine {
             .any(|l| l.has_uninstall_protection())
     }
 
+    /// Focuser may not be quit: a list's lock says so, or a focus session is
+    /// locked.
     pub fn has_service_protection(&self) -> bool {
-        self.cached_lists.iter().any(|l| l.has_service_protection())
+        self.locked_session.is_some()
+            || self.cached_lists.iter().any(|l| l.has_service_protection())
     }
 
     pub fn has_any_active_protection(&self) -> bool {
         self.cached_lists.iter().any(|l| l.has_active_protection())
     }
 
+    /// The list may not be loosened: its own lock, or a locked focus session
+    /// running on it.
     pub fn is_block_list_protected(&self, id: EntityId) -> bool {
-        self.cached_lists
-            .iter()
-            .find(|l| l.id == id)
-            .is_some_and(|l| l.is_modification_protected())
+        self.locked_session.is_some_and(|(list, _)| list == id)
+            || self
+                .cached_lists
+                .iter()
+                .find(|l| l.id == id)
+                .is_some_and(|l| l.is_modification_protected())
     }
 
     pub fn active_protection_info(&self) -> Vec<ProtectionInfo> {
@@ -458,6 +483,14 @@ fn has_hours(list: &BlockList) -> bool {
         .is_some_and(|s| !s.time_slots.is_empty())
 }
 
+/// The locked focus session, if one is running and has rounds to go.
+fn locked_session(db: &Database) -> Result<Option<(EntityId, u32)>> {
+    Ok(db
+        .get_active_pomodoro_session()?
+        .map(|s| (s.block_list_id, s.locked_rounds_left()))
+        .filter(|(_, left)| *left > 0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +533,26 @@ mod tests {
             ["*.crunchyroll.*", "crunchyroll.*"]
         );
         assert!(engine.has_extension_only_rules());
+    }
+
+    /// The extension keeps the browser's extensions page shut while this is on.
+    #[test]
+    fn the_extension_hears_while_a_list_is_locked() {
+        let mut engine = setup_engine();
+        assert!(!engine.compile_extension_rules().locked);
+
+        let now = chrono::Utc::now();
+        let mut list = engine.block_lists()[0].clone();
+        list.protection = Some(focuser_common::types::Protection {
+            prevent_uninstall: false,
+            prevent_service_stop: false,
+            prevent_modification: true,
+            started_at: now,
+            expires_at: Some(now + chrono::Duration::hours(1)),
+        });
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+        assert!(engine.compile_extension_rules().locked);
     }
 
     #[test]

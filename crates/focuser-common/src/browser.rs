@@ -159,6 +159,32 @@ pub fn identify_browser(process_name: &str) -> Option<&'static BrowserInfo> {
         .find(|b| b.exe_names.iter().any(|name| name.to_lowercase() == lower))
 }
 
+/// Start flags only a test tool puts on a browser: Playwright, Puppeteer,
+/// Selenium and the WebDriver BiDi drivers.
+const AUTOMATION_FLAGS: &[&str] = &[
+    "--remote-debugging-pipe",
+    "--remote-debugging-port",
+    "-remote-debugging-port",
+    "--enable-automation",
+    "--headless",
+    "-headless",
+    "--marionette",
+    "-marionette",
+    "-juggler",
+    "-juggler-pipe",
+];
+
+/// Whether a browser's command line says a test tool started it (#45).
+///
+/// Whole arguments only, so an address with the text in it does not count.
+pub fn is_automation(command_line: &str) -> bool {
+    command_line.split_whitespace().any(|arg| {
+        let arg = arg.trim_matches('"');
+        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+        AUTOMATION_FLAGS.contains(&flag)
+    })
+}
+
 /// Status of a detected browser — used for IPC responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserStatusInfo {
@@ -177,6 +203,34 @@ pub struct BrowserStatusInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_browser_started_by_a_test_tool_is_known_by_its_flags() {
+        for line in [
+            // Playwright, Puppeteer and Selenium's chromedriver.
+            r#""C:\pw\chromium-1223\chrome-win64\chrome.exe" --remote-debugging-pipe --no-first-run"#,
+            "/usr/bin/chromium --remote-debugging-port=9222 --user-data-dir=/tmp/p",
+            "chrome --enable-automation --headless=new about:blank",
+            // Firefox under Playwright, geckodriver and BiDi.
+            "/opt/firefox/firefox -juggler-pipe -profile /tmp/p",
+            "firefox --marionette -profile /tmp/x",
+            "firefox.exe --remote-debugging-port 9222",
+        ] {
+            assert!(is_automation(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_browser_someone_opened_is_not() {
+        for line in [
+            r#""C:\Program Files\Google\Chrome\Application\chrome.exe""#,
+            "/usr/bin/firefox https://example.com/?q=--enable-automation",
+            "chrome --profile-directory=Default --restore-last-session",
+            "",
+        ] {
+            assert!(!is_automation(line), "{line}");
+        }
+    }
 
     #[test]
     fn test_identify_browser_chrome() {
