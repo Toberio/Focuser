@@ -13,15 +13,12 @@
 //! retried at the next startup — which is exactly when the task has handed us
 //! the privileges to finish the job.
 //!
-//! On Linux the .deb ships a systemd user unit that also respawns Focuser if
-//! it is killed. When that unit is installed and the session runs
-//! `graphical-session.target`, the unit *is* the login launcher: the app
-//! enables it itself, the toggle enables and disables it, and the plugin's XDG
-//! autostart entry is kept off, since with both, login launched Focuser twice.
-//!
-//! Some desktops (Cinnamon, for one) never start that target. There the XDG
-//! entry stays the launcher, and the login launch hands itself over to the
-//! unit (see [`hand_off_to_unit`]), so a kill still brings Focuser back.
+//! On Linux the plugin's XDG autostart entry is the only launcher, on every
+//! desktop. The .deb also ships a systemd user unit that restarts Focuser if
+//! it is killed, and a login launch hands itself over to that unit (see
+//! [`hand_off_to_unit`]). The unit is never enabled: with two launchers, one
+//! could go missing without the other noticing, and that is a way out of a
+//! lock.
 
 use std::sync::Arc;
 
@@ -85,7 +82,15 @@ pub fn set_autostart(
     }
 
     // HKCU, so this one always works.
-    set_plugin(&app, enabled);
+    let plugin = app.autolaunch();
+    let wrote = if enabled {
+        plugin.enable()
+    } else {
+        plugin.disable()
+    };
+    if let Err(e) = wrote {
+        warn!("autostart plugin refused: {e}");
+    }
 
     match imp::set_task(enabled) {
         TaskChange::Done | TaskChange::NoTask => Ok(()),
@@ -102,24 +107,15 @@ pub fn set_autostart(
 /// and can finally change it.
 pub fn reconcile(app: &AppHandle, db: &focuser_core::db::Database) {
     if db.get_setting(INITIALISED).ok().flatten().is_none() {
-        set_plugin(app, true);
-        enable_launcher();
+        let _ = app.autolaunch().enable();
         let _ = db.set_setting(INITIALISED, "1");
         return;
     }
 
     let Ok(Some(saved)) = db.get_setting(ENABLED) else {
-        // Never touched, so the default (on) stands. Still clear an XDG entry
-        // left over from before the systemd unit was installed, and enable
-        // the unit in its place.
-        if imp::replaces_plugin() {
-            set_plugin(app, true);
-            enable_launcher();
-        }
         return;
     };
     let want = saved == "1";
-    set_plugin(app, want);
     if want == imp::task_enabled() {
         return;
     }
@@ -133,17 +129,7 @@ pub fn reconcile(app: &AppHandle, db: &focuser_core::db::Database) {
     }
 }
 
-/// Turn on a platform launcher that replaces the plugin.
-///
-/// Nothing else would: a package installed through a software center runs no
-/// script as the user, so the app has to enable its own unit.
-fn enable_launcher() {
-    if imp::replaces_plugin() && !imp::task_enabled() {
-        imp::set_task(true);
-    }
-}
-
-/// Move a login launch into the systemd unit, on desktops that never start it.
+/// Move a login launch into the systemd unit, so a kill brings Focuser back.
 ///
 /// True when the unit took over and this process should exit. Called before
 /// anything else opens, so the two copies never both hold the database or the
@@ -151,20 +137,6 @@ fn enable_launcher() {
 /// without the restart on kill.
 pub fn hand_off_to_unit() -> bool {
     imp::hand_off_to_unit()
-}
-
-/// Write or remove the plugin's own registration, unless a platform launcher
-/// replaces it, in which case it is always removed.
-fn set_plugin(app: &AppHandle, enabled: bool) {
-    let plugin = app.autolaunch();
-    let wrote = if enabled && !imp::replaces_plugin() {
-        plugin.enable()
-    } else {
-        plugin.disable()
-    };
-    if let Err(e) = wrote {
-        warn!("autostart plugin refused: {e}");
-    }
 }
 
 #[cfg(windows)]
@@ -176,16 +148,6 @@ mod imp {
 
     const TASK: &str = "Focuser";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    /// The Run entry and the task both fire; the single-instance handler
-    /// ignores whichever login launch comes second.
-    pub fn replaces_plugin() -> bool {
-        false
-    }
-
-    pub fn hand_off_to_unit() -> bool {
-        false
-    }
 
     fn schtasks(args: &[&str]) -> Option<std::process::Output> {
         Command::new("schtasks")
@@ -232,6 +194,10 @@ mod imp {
             TaskChange::NeedsAdmin
         }
     }
+
+    pub fn hand_off_to_unit() -> bool {
+        false
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -239,25 +205,38 @@ mod imp {
     use super::TaskChange;
     use std::path::Path;
     use std::process::Command;
-    use std::sync::OnceLock;
     use tracing::{info, warn};
 
-    /// Where the .deb puts the unit. Tied to the packaging in tauri.conf.json.
+    /// Where the .deb puts the unit and the binary it starts. Tied to the
+    /// packaging in tauri.conf.json.
     const SYSTEMD_UNIT: &str = "/usr/lib/systemd/user/focuser.service";
+    const INSTALLED_EXE: &str = "/usr/bin/focuser-ui";
     const UNIT: &str = "focuser.service";
 
     /// Set by the unit, so a copy it started never tries to hand off again.
     const SUPERVISED: &str = "FOCUSER_SUPERVISED";
 
-    /// What a window needs to open, which the systemd user manager does not
-    /// have unless the desktop hands it over.
-    const DISPLAY_VARS: &[&str] = &[
+    /// What the unit's copy needs from the session, which the systemd user
+    /// manager does not have unless the desktop hands it over. Without the
+    /// session bus, the single-instance check cannot see that copy, and a
+    /// launch from the menu would start a second one.
+    const SESSION_VARS: &[&str] = &[
         "DISPLAY",
-        "XAUTHORITY",
         "WAYLAND_DISPLAY",
+        "XAUTHORITY",
         "XDG_SESSION_TYPE",
         "XDG_CURRENT_DESKTOP",
+        "DBUS_SESSION_BUS_ADDRESS",
     ];
+
+    // The XDG entry is the launcher, written by the plugin, so there is no
+    // second mechanism to keep in step.
+    pub fn task_enabled() -> bool {
+        false
+    }
+    pub fn set_task(_enabled: bool) -> TaskChange {
+        TaskChange::NoTask
+    }
 
     fn systemctl(args: &[&str]) -> bool {
         Command::new("systemctl")
@@ -267,24 +246,27 @@ mod imp {
             .is_ok_and(|out| out.status.success())
     }
 
-    fn unit_installed() -> bool {
-        Path::new(SYSTEMD_UNIT).exists()
+    /// Only the packaged binary hands off, since the unit starts that one. An
+    /// AppImage or a dev build on a machine with the .deb installed would
+    /// otherwise be replaced by a different version.
+    fn is_installed_exe() -> bool {
+        std::env::current_exe().is_ok_and(|exe| exe == Path::new(INSTALLED_EXE))
     }
 
-    /// The unit is installed and this session starts it.
-    ///
-    /// The unit hangs off `graphical-session.target`, which some desktops
-    /// never start. There the XDG entry stays the launcher and hands off to
-    /// the unit instead. Checked once per run: it does not change mid-session.
-    fn has_unit() -> bool {
-        static USABLE: OnceLock<bool> = OnceLock::new();
-        *USABLE.get_or_init(|| {
-            unit_installed() && systemctl(&["is-active", "--quiet", "graphical-session.target"])
-        })
+    /// A window can open: the desktop name alone is set by some sessions
+    /// before any display is.
+    fn has_display() -> bool {
+        ["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|val| !val.is_empty()))
     }
 
     pub fn hand_off_to_unit() -> bool {
-        if std::env::var_os(SUPERVISED).is_some() || !unit_installed() || has_unit() {
+        if std::env::var_os(SUPERVISED).is_some()
+            || !Path::new(SYSTEMD_UNIT).exists()
+            || !is_installed_exe()
+            || !has_display()
+        {
             return false;
         }
         // Already running under the unit: carry on, and the single-instance
@@ -292,24 +274,23 @@ mod imp {
         if systemctl(&["is-active", "--quiet", UNIT]) {
             return false;
         }
-        let vars: Vec<&str> = DISPLAY_VARS
-            .iter()
-            .copied()
-            .filter(|v| std::env::var_os(v).is_some())
-            .collect();
-        if vars.is_empty() {
-            return false;
-        }
 
         let mut import = vec!["import-environment"];
-        import.extend(vars);
+        import.extend(
+            SESSION_VARS
+                .iter()
+                .copied()
+                .filter(|v| std::env::var_os(v).is_some()),
+        );
         if !systemctl(&import) {
-            warn!("could not pass the display to systemd; running without restart on kill");
+            warn!("could not pass the session to systemd; running without restart on kill");
             return false;
         }
         // A unit that used up its restarts at the last logout would otherwise
         // refuse to start. Fails harmlessly when there is nothing to reset.
         systemctl(&["reset-failed", UNIT]);
+        // The unit is Type=exec, so this returns only once focuser-ui has
+        // actually been executed, and fails if it could not be.
         let started = systemctl(&["start", UNIT]);
         if started {
             info!("handed over to {UNIT}, which restarts Focuser if it is killed");
@@ -317,40 +298,6 @@ mod imp {
             warn!("could not start {UNIT}; running without restart on kill");
         }
         started
-    }
-
-    pub fn replaces_plugin() -> bool {
-        has_unit()
-    }
-
-    pub fn task_enabled() -> bool {
-        has_unit()
-            && Command::new("systemctl")
-                .args(["--user", "is-enabled", "--quiet", UNIT])
-                .status()
-                .is_ok_and(|s| s.success())
-    }
-
-    pub fn set_task(enabled: bool) -> TaskChange {
-        if !has_unit() {
-            return TaskChange::NoTask;
-        }
-        // Enable or disable only: stopping it here would quit the app that is
-        // asking. A user unit needs no admin, so this cannot be refused for
-        // permissions; any failure is logged and retried at the next start.
-        let verb = if enabled { "enable" } else { "disable" };
-        match Command::new("systemctl")
-            .args(["--user", verb, UNIT])
-            .output()
-        {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => warn!(
-                "could not {verb} {UNIT}: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => warn!("systemctl failed to run: {e}"),
-        }
-        TaskChange::Done
     }
 }
 
@@ -360,9 +307,6 @@ mod imp {
 
     // The plugin's LaunchAgent is the only launcher, so there is no second
     // mechanism to keep in step.
-    pub fn replaces_plugin() -> bool {
-        false
-    }
     pub fn task_enabled() -> bool {
         false
     }
