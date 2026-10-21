@@ -47,6 +47,11 @@
   --border-strong: rgb(255 255 255 / 0.13);
   --ring: #8b5cf6;
 
+  /* Background wash behind the pages, see `.app-canvas`. */
+  --wash-1: rgb(139 92 246 / 0.13);
+  --wash-2: rgb(34 211 238 / 0.07);
+  --wash-3: rgb(244 114 182 / 0.05);
+
   /* Charts. Distinct hues rather than one ramp, so adjacent series stay
      tellable apart without relying on colour alone. */
   --chart-1: #8b5cf6;
@@ -166,12 +171,13 @@
 
 @layer utilities {
   /* A faint violet wash from the top-left, so a full-screen window is not a
-     uniform slab. Two radial gradients, no repaint cost. */
+     uniform slab. Two radial gradients, no repaint cost. The tints are tokens
+     so a desktop theme can recolour or drop them. */
   .app-canvas {
     background-image:
-      radial-gradient(48rem 32rem at 12% -8%, rgb(139 92 246 / 0.13), transparent 62%),
-      radial-gradient(40rem 28rem at 88% 4%, rgb(34 211 238 / 0.07), transparent 58%),
-      radial-gradient(36rem 26rem at 60% 100%, rgb(244 114 182 / 0.05), transparent 60%);
+      radial-gradient(48rem 32rem at 12% -8%, var(--wash-1), transparent 62%),
+      radial-gradient(40rem 28rem at 88% 4%, var(--wash-2), transparent 58%),
+      radial-gradient(36rem 26rem at 60% 100%, var(--wash-3), transparent 60%);
   }
 
   /* Hairline highlight along a panel's top edge. */

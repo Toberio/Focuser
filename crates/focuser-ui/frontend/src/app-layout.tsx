@@ -16,6 +16,7 @@ import { AppIcon } from "@/components/ui/app-icon";
 import { LiveBadge } from "@/components/ui/badge";
 import { UpdatePill } from "@/components/update-pill";
 import { usePomodoroStatus } from "@/lib/commands";
+import { useApplyDesktopTheme } from "@/lib/desktop-theme";
 import { formatCountdown } from "@/lib/duration";
 import { useApplySavedLanguage } from "@/lib/language";
 import { cn } from "@/lib/utils";
@@ -39,6 +40,7 @@ export function AppLayout() {
   // Wraps every route, so this is the one place the saved language reaches the
   // whole app rather than only the page that happens to read it.
   useApplySavedLanguage();
+  useApplyDesktopTheme();
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-deep">

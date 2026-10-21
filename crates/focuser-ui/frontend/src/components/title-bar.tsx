@@ -1,6 +1,7 @@
 import { Copy, Minus, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { AppIcon } from "@/components/ui/app-icon";
+import { useDesktopTheme } from "@/lib/desktop-theme";
 import { isTauri } from "@/lib/transport";
 import { cn } from "@/lib/utils";
 import { closeWindow, isMaximized, minimizeWindow, onResized, toggleMaximize } from "@/lib/window";
@@ -10,11 +11,14 @@ import { m } from "@/paraglide/messages.js";
  * The window's own title bar, drawn by the app rather than the OS.
  *
  * Absent in the browser harness, where there is no window to drag or close.
+ * On Omarchy, which tiles every window, its other apps go without a bar, so
+ * only the close button is kept, floating in the corner.
  * The bar itself is the drag region; the buttons opt out so a click on one is
  * not swallowed by the drag.
  */
 export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
+  const tiled = useDesktopTheme()?.omarchy ?? false;
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -23,6 +27,16 @@ export function TitleBar() {
   }, []);
 
   if (!isTauri()) return null;
+
+  if (tiled) {
+    return (
+      <div className="fixed top-0 right-0 z-50 h-8 overflow-hidden rounded-bl-md">
+        <ControlButton label={m.titlebar_close()} destructive onClick={closeWindow}>
+          <X className="size-3.5" />
+        </ControlButton>
+      </div>
+    );
+  }
 
   return (
     <header

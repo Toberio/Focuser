@@ -3,6 +3,7 @@
 mod api;
 mod autostart;
 mod blocker;
+mod desktop_theme;
 mod foreground_watcher;
 mod i18n;
 mod image_feedback;
@@ -172,6 +173,7 @@ fn main() {
             native::do_update,
             autostart::is_autostart_enabled,
             autostart::set_autostart,
+            desktop_theme::desktop_theme,
             sound::pick_sound_file,
             sound::preview_sound,
         ])
@@ -332,6 +334,12 @@ fn main() {
             // Close to tray instead of quitting
             let app_handle = app.handle().clone();
             let window = app.get_webview_window("main").unwrap();
+            #[cfg(target_os = "linux")]
+            if under_tiling_compositor() {
+                // A tile smaller than the 900x600 minimum gets the window's
+                // buffer scaled into it, which stretches the whole UI.
+                let _ = window.set_min_size(None::<tauri::Size>);
+            }
             // Created hidden, so a login start stays in the tray (#9).
             if !launched_at_login(&std::env::args().collect::<Vec<_>>()) {
                 let _ = window.show();
@@ -714,21 +722,47 @@ fn build_extension_modal_js(prompt: &api::BrowserPrompt, state: &Arc<AppState>) 
     )
 }
 
-/// WebKitGTK's DMA-BUF renderer crashes the window on NVIDIA's proprietary
-/// driver: on Wayland the app dies seconds after start with "Error 71
-/// (Protocol error) dispatching to Wayland display", and on X11 the window
-/// can stay blank. Turning the renderer off costs nothing visible here.
-/// A value the user already set is left alone, so `=0` opts back in.
+/// WebKitGTK on NVIDIA's proprietary driver breaks in two ways. On Wayland
+/// the app dies seconds after start with "Error 71 (Protocol error)
+/// dispatching to Wayland display", which comes from the driver's explicit
+/// sync; turning that off fixes it and keeps GPU rendering. On X11 the window
+/// can stay blank, and only turning off the DMA-BUF renderer helps there. That
+/// was once the fix on Wayland too, but software rendering at 4K made the UI
+/// lag. A value the user already set is left alone in both cases.
 #[cfg(target_os = "linux")]
 fn work_around_nvidia_webkit() {
-    const VAR: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
-    if std::env::var_os(VAR).is_some() || !std::path::Path::new("/proc/driver/nvidia").exists() {
+    if !std::path::Path::new("/proc/driver/nvidia").exists() {
         return;
     }
-    info!("NVIDIA driver found, disabling WebKit's DMA-BUF renderer");
+    let (var, what) = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ("__NV_DISABLE_EXPLICIT_SYNC", "explicit sync")
+    } else {
+        (
+            "WEBKIT_DISABLE_DMABUF_RENDERER",
+            "WebKit's DMA-BUF renderer",
+        )
+    };
+    if std::env::var_os(var).is_some() {
+        return;
+    }
+    info!("NVIDIA driver found, disabling {what}");
     // SAFETY: called from main before Tauri, WebKit or any other thread
     // starts, so nothing can be reading the environment concurrently.
-    unsafe { std::env::set_var(VAR, "1") };
+    unsafe { std::env::set_var(var, "1") };
+}
+
+/// Tiling compositors size windows to their tile and scale the buffer of a
+/// window that refuses to shrink, so a minimum size distorts it there.
+#[cfg(target_os = "linux")]
+fn under_tiling_compositor() -> bool {
+    [
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "SWAYSOCK",
+        "I3SOCK",
+        "NIRI_SOCKET",
+    ]
+    .iter()
+    .any(|var| std::env::var_os(var).is_some())
 }
 
 #[cfg(windows)]
